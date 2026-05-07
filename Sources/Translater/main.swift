@@ -10,6 +10,113 @@ private enum MenuItemTag: Int {
     case quit = 104
 }
 
+@MainActor
+private final class TranslationPrefetch {
+    private enum State {
+        case pending
+        case running
+        case completed(String)
+        case failed(String)
+        case cancelled
+    }
+
+    let text: String
+    private let ollamaClient: OllamaClient
+    private var task: Task<Void, Never>?
+    private var state: State = .pending
+    private var partialTranslation = ""
+    private var subscribers: [(String) -> Void] = []
+    private var failureSubscribers: [(String) -> Void] = []
+
+    init(text: String, ollamaClient: OllamaClient) {
+        self.text = text
+        self.ollamaClient = ollamaClient
+    }
+
+    func startAfterDelay(milliseconds: UInt64) {
+        guard task == nil else { return }
+
+        task = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: milliseconds * 1_000_000)
+                try Task.checkCancellation()
+                await self?.start()
+            } catch {
+                self?.markCancelled()
+            }
+        }
+    }
+
+    func subscribe(onPartial: @escaping (String) -> Void, onFailure: @escaping (String) -> Void) {
+        if !partialTranslation.isEmpty {
+            onPartial(partialTranslation)
+        }
+
+        switch state {
+        case .completed(let translation):
+            onPartial(translation)
+        case .failed(let message):
+            onFailure(message)
+        default:
+            subscribers.append(onPartial)
+            failureSubscribers.append(onFailure)
+        }
+    }
+
+    func ensureStartedNow() {
+        switch state {
+        case .pending:
+            task?.cancel()
+            task = Task { [weak self] in
+                await self?.start()
+            }
+        default:
+            break
+        }
+    }
+
+    func cancel() {
+        task?.cancel()
+        state = .cancelled
+        subscribers.removeAll()
+        failureSubscribers.removeAll()
+    }
+
+    private func start() async {
+        guard case .pending = state else { return }
+        state = .running
+
+        do {
+            let finalTranslation = try await ollamaClient.translateToRussian(text) { [weak self] partial in
+                Task { @MainActor in
+                    self?.publishPartial(partial)
+                }
+            }
+            state = .completed(finalTranslation)
+            publishPartial(finalTranslation)
+        } catch is CancellationError {
+            markCancelled()
+        } catch {
+            let message = error.localizedDescription
+            state = .failed(message)
+            failureSubscribers.forEach { $0(message) }
+            subscribers.removeAll()
+            failureSubscribers.removeAll()
+        }
+    }
+
+    private func publishPartial(_ partial: String) {
+        partialTranslation = partial
+        subscribers.forEach { $0(partial) }
+    }
+
+    private func markCancelled() {
+        state = .cancelled
+        subscribers.removeAll()
+        failureSubscribers.removeAll()
+    }
+}
+
 @main
 final class TranslaterApp: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
@@ -22,6 +129,10 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
 
     private var translateButtonController: FloatingTranslateButtonController?
     private var translationPanelController: TranslationPanelController?
+    private var translationPrefetch: TranslationPrefetch?
+
+    private let prefetchDelayMilliseconds: UInt64 = 220
+    private let prefetchMaxCharacterCount = 1_200
 
     static func main() {
         let app = NSApplication.shared
@@ -110,6 +221,7 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
             guard let selection = self.selectionReader.readSelectedText(), !selection.text.isEmpty else {
                 self.translateButtonController?.close()
                 self.translateButtonController = nil
+                self.cancelPrefetch()
                 return
             }
 
@@ -117,9 +229,11 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    @MainActor
     private func showTranslateButton(for selectedText: String, near screenPoint: NSPoint) {
         translationPanelController?.close()
         translateButtonController?.close()
+        startPrefetchIfEligible(for: selectedText)
 
         let controller = FloatingTranslateButtonController(
             screenPoint: screenPoint,
@@ -134,6 +248,7 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
         controller.show()
     }
 
+    @MainActor
     private func translate(_ text: String, near screenPoint: NSPoint) {
         let controller = TranslationPanelController(
             screenPoint: screenPoint,
@@ -142,6 +257,16 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
         translationPanelController?.close()
         translationPanelController = controller
         controller.showLoading()
+
+        if let translationPrefetch, translationPrefetch.text == text {
+            translationPrefetch.subscribe { partialTranslation in
+                controller.showTranslation(partialTranslation)
+            } onFailure: { message in
+                controller.showError(message)
+            }
+            translationPrefetch.ensureStartedNow()
+            return
+        }
 
         Task {
             do {
@@ -159,6 +284,25 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    @MainActor
+    private func startPrefetchIfEligible(for text: String) {
+        cancelPrefetch()
+
+        guard text.count <= prefetchMaxCharacterCount else {
+            return
+        }
+
+        let prefetch = TranslationPrefetch(text: text, ollamaClient: ollamaClient)
+        translationPrefetch = prefetch
+        prefetch.startAfterDelay(milliseconds: prefetchDelayMilliseconds)
+    }
+
+    @MainActor
+    private func cancelPrefetch() {
+        translationPrefetch?.cancel()
+        translationPrefetch = nil
     }
 
     private func requestAccessibilityPermissionIfNeeded() {
@@ -560,22 +704,34 @@ final class GlassHostView: NSView {
 }
 
 final class TranslationContentView: NSView {
-    static let preferredWidth: CGFloat = 440
-    private static let minHeight: CGFloat = 238
-    private static let maxHeight: CGFloat = 520
-    private static let contentWidth: CGFloat = 404
-    private static let minimumSourceBoxHeight: CGFloat = 46
-    private static let minimumResultBoxHeight: CGFloat = 78
-    private static let maximumSourceBoxHeight: CGFloat = 136
-    private static let maximumResultBoxHeight: CGFloat = 260
+    static let preferredWidth: CGFloat = 400
+    private static let minHeight: CGFloat = 156
+    private static let maxHeight: CGFloat = 540
+    private static let contentWidth: CGFloat = 364
+    private static let minimumSourceBoxHeight: CGFloat = 38
+    private static let minimumResultBoxHeight: CGFloat = 48
+    private static let maximumSourceBoxHeight: CGFloat = 140
+    private static let maximumResultBoxHeight: CGFloat = 280
+
+    private static let panelPaddingX: CGFloat = 18
+    private static let panelPaddingTop: CGFloat = 16
+    private static let panelPaddingBottom: CGFloat = 16
+    private static let labelHeight: CGFloat = 14
+    private static let labelToBoxGap: CGFloat = 8
+    private static let sectionGap: CGFloat = 14
+    private static let buttonSize: CGFloat = 18
+    private static let sourceFontSize: CGFloat = 15
+    private static let resultFontSize: CGFloat = 17
+    private static let boxInsetX: CGFloat = 14
+    private static let boxInsetY: CGFloat = 10
 
     var onClose: (() -> Void)?
 
     private let sourceText: String
     private var resultText = "Translating..."
     private let resultTextView = NSTextView()
-    private let sourceTitleLabel = NSTextField(labelWithString: "source")
-    private let russianTitleLabel = NSTextField(labelWithString: "russian")
+    private let sourceTitleLabel = NSTextField(labelWithString: "")
+    private let russianTitleLabel = NSTextField(labelWithString: "")
     private let sourceTextField: NSTextField
     private let resultScrollView = NSScrollView()
     private var panelGlass: GlassHostView?
@@ -604,20 +760,24 @@ final class TranslationContentView: NSView {
     static func preferredHeight(sourceText: String, resultText: String) -> CGFloat {
         let sourceBoxHeight = boxHeight(
             for: sourceText,
-            font: NSFont.systemFont(ofSize: 16, weight: .medium),
-            width: contentWidth - 24,
+            font: NSFont.systemFont(ofSize: sourceFontSize, weight: .regular),
+            width: contentWidth - boxInsetX * 2,
             minimum: minimumSourceBoxHeight,
             maximum: maximumSourceBoxHeight
         )
         let resultBoxHeight = boxHeight(
             for: resultText,
-            font: NSFont.systemFont(ofSize: 17, weight: .medium),
-            width: contentWidth - 60,
+            font: NSFont.systemFont(ofSize: resultFontSize, weight: .medium),
+            width: contentWidth - boxInsetX * 2,
             minimum: minimumResultBoxHeight,
             maximum: maximumResultBoxHeight
         )
 
-        let fixedHeight: CGFloat = 24 + 18 + 7 + 14 + 18 + 7 + 18
+        let fixedHeight = panelPaddingTop
+            + labelHeight + labelToBoxGap
+            + sectionGap
+            + labelHeight + labelToBoxGap
+            + panelPaddingBottom
         return min(max(fixedHeight + sourceBoxHeight + resultBoxHeight, minHeight), maxHeight)
     }
 
@@ -626,7 +786,7 @@ final class TranslationContentView: NSView {
     }
 
     private static func boxHeight(for text: String, font: NSFont, width: CGFloat, minimum: CGFloat, maximum: CGFloat) -> CGFloat {
-        let height = textHeight(for: text, font: font, width: width) + 20
+        let height = textHeight(for: text, font: font, width: width) + boxInsetY * 2
         return min(max(height, minimum), maximum)
     }
 
@@ -648,8 +808,8 @@ final class TranslationContentView: NSView {
     private func buildUI() {
         let panelGlass = GlassHostView(
             frame: bounds,
-            cornerRadius: 24,
-            tintColor: NSColor(calibratedRed: 0.07, green: 0.13, blue: 0.23, alpha: 0.48),
+            cornerRadius: 22,
+            tintColor: NSColor(calibratedRed: 0.06, green: 0.10, blue: 0.18, alpha: 0.46),
             style: .regular
         )
         panelGlass.autoresizingMask = [.width, .height]
@@ -657,53 +817,53 @@ final class TranslationContentView: NSView {
         let content = panelGlass.contentView
         self.panelGlass = panelGlass
 
-        closeButton = addToolbarButton(
+        configureSectionLabel(sourceTitleLabel, text: "Source")
+        content.addSubview(sourceTitleLabel)
+
+        closeButton = makeIconButton(
             symbolName: "xmark",
             accessibilityDescription: "Close",
-            frame: .zero,
+            pointSize: 10,
             target: self,
             action: #selector(closeTapped),
             to: content
         )
 
-        configureLabel(sourceTitleLabel)
-        content.addSubview(sourceTitleLabel)
-
         let sourceBox = GlassHostView(
             frame: .zero,
-            cornerRadius: 16,
-            tintColor: NSColor(calibratedRed: 0.02, green: 0.05, blue: 0.11, alpha: 0.28),
+            cornerRadius: 12,
+            tintColor: NSColor(calibratedWhite: 0.0, alpha: 0.22),
             style: .clear
         )
         content.addSubview(sourceBox)
         self.sourceBox = sourceBox
 
-        sourceTextField.font = NSFont.systemFont(ofSize: 16, weight: .medium)
-        sourceTextField.textColor = .white
+        sourceTextField.font = NSFont.systemFont(ofSize: Self.sourceFontSize, weight: .regular)
+        sourceTextField.textColor = NSColor(calibratedWhite: 1.0, alpha: 0.92)
         sourceTextField.lineBreakMode = .byWordWrapping
         sourceTextField.maximumNumberOfLines = 0
         sourceBox.contentView.addSubview(sourceTextField)
 
-        configureLabel(russianTitleLabel)
+        configureSectionLabel(russianTitleLabel, text: "Russian")
         content.addSubview(russianTitleLabel)
 
-        let resultBox = GlassHostView(
-            frame: .zero,
-            cornerRadius: 16,
-            tintColor: NSColor(calibratedRed: 0.02, green: 0.05, blue: 0.11, alpha: 0.28),
-            style: .clear
-        )
-        content.addSubview(resultBox)
-        self.resultBox = resultBox
-
-        copyButton = addToolbarButton(
-            symbolName: "square.on.square",
+        copyButton = makeIconButton(
+            symbolName: "doc.on.doc",
             accessibilityDescription: "Copy translation",
-            frame: .zero,
+            pointSize: 11,
             target: self,
             action: #selector(copyResult),
             to: content
         )
+
+        let resultBox = GlassHostView(
+            frame: .zero,
+            cornerRadius: 12,
+            tintColor: NSColor(calibratedWhite: 0.0, alpha: 0.22),
+            style: .clear
+        )
+        content.addSubview(resultBox)
+        self.resultBox = resultBox
 
         resultScrollView.drawsBackground = false
         resultScrollView.hasVerticalScroller = true
@@ -714,7 +874,7 @@ final class TranslationContentView: NSView {
         resultTextView.isEditable = false
         resultTextView.isSelectable = true
         resultTextView.textColor = .white
-        resultTextView.font = NSFont.systemFont(ofSize: 17, weight: .medium)
+        resultTextView.font = NSFont.systemFont(ofSize: Self.resultFontSize, weight: .medium)
         resultTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         resultTextView.isVerticallyResizable = true
         resultTextView.isHorizontallyResizable = false
@@ -728,39 +888,48 @@ final class TranslationContentView: NSView {
     }
 
     @discardableResult
-    private func addToolbarButton(
+    private func makeIconButton(
         symbolName: String,
         accessibilityDescription: String,
-        frame: NSRect,
+        pointSize: CGFloat,
         target: AnyObject,
         action: Selector,
         to parent: NSView
     ) -> NSButton {
-        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityDescription) ?? NSImage()
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
+        let baseImage = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityDescription) ?? NSImage()
+        let image = baseImage.withSymbolConfiguration(config) ?? baseImage
         let button = NSButton(image: image, target: target, action: action)
-        button.frame = frame
         button.imagePosition = .imageOnly
         button.isBordered = false
-        button.contentTintColor = NSColor(calibratedRed: 0.78, green: 0.82, blue: 0.88, alpha: 0.9)
+        button.contentTintColor = NSColor(calibratedWhite: 1.0, alpha: 0.55)
         button.toolTip = accessibilityDescription
         parent.addSubview(button)
         return button
     }
 
-    private func configureLabel(_ label: NSTextField) {
-        label.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        label.textColor = NSColor(calibratedRed: 0.78, green: 0.86, blue: 0.96, alpha: 0.88)
+    private func configureSectionLabel(_ label: NSTextField, text: String) {
+        let attributed = NSAttributedString(string: text.uppercased(), attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor(calibratedWhite: 1.0, alpha: 0.50),
+            .kern: 1.6
+        ])
+        label.attributedStringValue = attributed
     }
 
     func layoutForCurrentSize() {
         let sourceBoxHeight = Self.boxHeight(
             for: sourceText,
-            font: NSFont.systemFont(ofSize: 16, weight: .medium),
-            width: Self.contentWidth - 24,
+            font: NSFont.systemFont(ofSize: Self.sourceFontSize, weight: .regular),
+            width: Self.contentWidth - Self.boxInsetX * 2,
             minimum: Self.minimumSourceBoxHeight,
             maximum: Self.maximumSourceBoxHeight
         )
-        let fixedHeight: CGFloat = 24 + 18 + 7 + 14 + 18 + 7 + 18
+        let fixedHeight = Self.panelPaddingTop
+            + Self.labelHeight + Self.labelToBoxGap
+            + Self.sectionGap
+            + Self.labelHeight + Self.labelToBoxGap
+            + Self.panelPaddingBottom
         let availableBoxHeight = max(
             Self.minimumSourceBoxHeight + Self.minimumResultBoxHeight,
             bounds.height - fixedHeight
@@ -771,41 +940,66 @@ final class TranslationContentView: NSView {
         )
         let resolvedResultBoxHeight = max(Self.minimumResultBoxHeight, availableBoxHeight - resolvedSourceBoxHeight)
 
-        closeButton?.frame = NSRect(x: bounds.width - 46, y: bounds.height - 46, width: 24, height: 24)
-
-        var y = bounds.height - 24 - 18
-        sourceTitleLabel.frame = NSRect(x: 24, y: y, width: 130, height: 18)
-        y -= 7 + resolvedSourceBoxHeight
-        sourceBox?.frame = NSRect(x: 18, y: y, width: Self.contentWidth, height: resolvedSourceBoxHeight)
-        sourceTextField.frame = NSRect(
-            x: 12,
-            y: 8,
-            width: Self.contentWidth - 24,
-            height: resolvedSourceBoxHeight - 16
+        var y = bounds.height - Self.panelPaddingTop - Self.labelHeight
+        sourceTitleLabel.frame = NSRect(
+            x: Self.panelPaddingX,
+            y: y,
+            width: Self.contentWidth - Self.buttonSize - 8,
+            height: Self.labelHeight
+        )
+        closeButton?.frame = NSRect(
+            x: bounds.width - Self.panelPaddingX - Self.buttonSize,
+            y: y + (Self.labelHeight - Self.buttonSize) / 2,
+            width: Self.buttonSize,
+            height: Self.buttonSize
         )
 
-        y -= 14 + 18
-        russianTitleLabel.frame = NSRect(x: 24, y: y, width: 130, height: 18)
-        y -= 7 + resolvedResultBoxHeight
-        let resultBoxFrame = NSRect(x: 18, y: y, width: Self.contentWidth, height: resolvedResultBoxHeight)
-        resultBox?.frame = resultBoxFrame
+        y -= Self.labelToBoxGap + resolvedSourceBoxHeight
+        sourceBox?.frame = NSRect(
+            x: Self.panelPaddingX,
+            y: y,
+            width: Self.contentWidth,
+            height: resolvedSourceBoxHeight
+        )
+        sourceTextField.frame = NSRect(
+            x: Self.boxInsetX,
+            y: Self.boxInsetY - 2,
+            width: Self.contentWidth - Self.boxInsetX * 2,
+            height: resolvedSourceBoxHeight - Self.boxInsetY * 2 + 4
+        )
+
+        y -= Self.sectionGap + Self.labelHeight
+        russianTitleLabel.frame = NSRect(
+            x: Self.panelPaddingX,
+            y: y,
+            width: Self.contentWidth - Self.buttonSize - 8,
+            height: Self.labelHeight
+        )
         copyButton?.frame = NSRect(
-            x: resultBoxFrame.maxX - 36,
-            y: resultBoxFrame.maxY - 34,
-            width: 24,
-            height: 24
+            x: bounds.width - Self.panelPaddingX - Self.buttonSize,
+            y: y + (Self.labelHeight - Self.buttonSize) / 2,
+            width: Self.buttonSize,
+            height: Self.buttonSize
+        )
+
+        y -= Self.labelToBoxGap + resolvedResultBoxHeight
+        resultBox?.frame = NSRect(
+            x: Self.panelPaddingX,
+            y: y,
+            width: Self.contentWidth,
+            height: resolvedResultBoxHeight
         )
 
         let resultScrollFrame = NSRect(
-            x: 12,
-            y: 10,
-            width: Self.contentWidth - 60,
-            height: resolvedResultBoxHeight - 20
+            x: Self.boxInsetX,
+            y: Self.boxInsetY,
+            width: Self.contentWidth - Self.boxInsetX * 2,
+            height: resolvedResultBoxHeight - Self.boxInsetY * 2
         )
         resultScrollView.frame = resultScrollFrame
         let resultTextHeight = Self.textHeight(
             for: resultText,
-            font: NSFont.systemFont(ofSize: 17, weight: .medium),
+            font: NSFont.systemFont(ofSize: Self.resultFontSize, weight: .medium),
             width: resultScrollFrame.width
         ) + 8
         resultTextView.frame = NSRect(
