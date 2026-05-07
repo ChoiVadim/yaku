@@ -7,7 +7,31 @@ private enum MenuItemTag: Int {
     case accessibilityStatus = 101
     case accessibilitySettings = 102
     case refreshAccessibility = 103
-    case quit = 104
+    case targetLanguage = 104
+    case quit = 105
+}
+
+struct TranslationLanguage: Equatable {
+    let id: String
+    let displayName: String
+    let promptName: String
+
+    static let all: [TranslationLanguage] = [
+        .init(id: "ru", displayName: "Russian", promptName: "Russian"),
+        .init(id: "en", displayName: "English", promptName: "English"),
+        .init(id: "ko", displayName: "Korean", promptName: "Korean"),
+        .init(id: "ja", displayName: "Japanese", promptName: "Japanese"),
+        .init(id: "zh-Hans", displayName: "Chinese Simplified", promptName: "Simplified Chinese"),
+        .init(id: "es", displayName: "Spanish", promptName: "Spanish"),
+        .init(id: "fr", displayName: "French", promptName: "French"),
+        .init(id: "de", displayName: "German", promptName: "German")
+    ]
+
+    static let defaultLanguage = all[0]
+
+    static func language(id: String) -> TranslationLanguage {
+        all.first { $0.id == id } ?? defaultLanguage
+    }
 }
 
 private enum TextNormalizer {
@@ -98,16 +122,23 @@ private final class TranslationPrefetch {
     }
 
     let text: String
+    let targetLanguage: TranslationLanguage
     private let ollamaClient: OllamaClient
     private var task: Task<Void, Never>?
     private var state: State = .pending
     private var partialTranslation = ""
     private var subscribers: [(String) -> Void] = []
     private var failureSubscribers: [(String) -> Void] = []
-    private let onComplete: (String, String) -> Void
+    private let onComplete: (String, TranslationLanguage, String) -> Void
 
-    init(text: String, ollamaClient: OllamaClient, onComplete: @escaping (String, String) -> Void) {
+    init(
+        text: String,
+        targetLanguage: TranslationLanguage,
+        ollamaClient: OllamaClient,
+        onComplete: @escaping (String, TranslationLanguage, String) -> Void
+    ) {
         self.text = text
+        self.targetLanguage = targetLanguage
         self.ollamaClient = ollamaClient
         self.onComplete = onComplete
     }
@@ -166,13 +197,13 @@ private final class TranslationPrefetch {
         state = .running
 
         do {
-            let finalTranslation = try await ollamaClient.translateToRussian(text) { [weak self] partial in
+            let finalTranslation = try await ollamaClient.translate(text, to: targetLanguage) { [weak self] partial in
                 Task { @MainActor in
                     self?.publishPartial(partial)
                 }
             }
             state = .completed(finalTranslation)
-            onComplete(text, finalTranslation)
+            onComplete(text, targetLanguage, finalTranslation)
             publishPartial(finalTranslation)
         } catch is CancellationError {
             markCancelled()
@@ -206,8 +237,8 @@ private final class TranslationCache {
         self.maxEntries = maxEntries
     }
 
-    func translation(for text: String) -> String? {
-        let key = cacheKey(for: text)
+    func translation(for text: String, targetLanguage: TranslationLanguage) -> String? {
+        let key = cacheKey(for: text, targetLanguage: targetLanguage)
         guard let translation = entries[key] else {
             return nil
         }
@@ -216,8 +247,8 @@ private final class TranslationCache {
         return translation
     }
 
-    func store(_ translation: String, for text: String) {
-        let key = cacheKey(for: text)
+    func store(_ translation: String, for text: String, targetLanguage: TranslationLanguage) {
+        let key = cacheKey(for: text, targetLanguage: targetLanguage)
         guard !key.isEmpty, !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return
         }
@@ -227,8 +258,8 @@ private final class TranslationCache {
         trimIfNeeded()
     }
 
-    private func cacheKey(for text: String) -> String {
-        TextNormalizer.cleanedSelection(text)
+    private func cacheKey(for text: String, targetLanguage: TranslationLanguage) -> String {
+        "\(targetLanguage.id):\(TextNormalizer.cleanedSelection(text))"
     }
 
     private func markRecentlyUsed(_ key: String) {
@@ -258,6 +289,16 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
     private var translationPanelController: TranslationPanelController?
     private var translationPrefetch: TranslationPrefetch?
     private lazy var translationCache = TranslationCache()
+    private var targetLanguage: TranslationLanguage {
+        get {
+            TranslationLanguage.language(
+                id: UserDefaults.standard.string(forKey: "targetLanguageID") ?? TranslationLanguage.defaultLanguage.id
+            )
+        }
+        set {
+            UserDefaults.standard.set(newValue.id, forKey: "targetLanguageID")
+        }
+    }
 
     private let prefetchDelayMilliseconds: UInt64 = 220
     private let prefetchMaxCharacterCount = 1_200
@@ -322,6 +363,13 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        let targetLanguageItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        targetLanguageItem.tag = MenuItemTag.targetLanguage.rawValue
+        targetLanguageItem.submenu = makeTargetLanguageMenu()
+        menu.addItem(targetLanguageItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
         quitItem.tag = MenuItemTag.quit.rawValue
         quitItem.target = self
@@ -330,6 +378,21 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
         self.statusItem = statusItem
         updateMenuState()
+    }
+
+    private func makeTargetLanguageMenu() -> NSMenu {
+        let menu = NSMenu()
+        for language in TranslationLanguage.all {
+            let item = NSMenuItem(
+                title: language.displayName,
+                action: #selector(selectTargetLanguage(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = language.id
+            menu.addItem(item)
+        }
+        return menu
     }
 
     private func startMouseMonitor() {
@@ -376,7 +439,8 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
     private func showTranslateButton(for selectedText: String, near screenPoint: NSPoint) {
         translationPanelController?.close()
         translateButtonController?.close()
-        if translationCache.translation(for: selectedText) == nil {
+        let language = targetLanguage
+        if translationCache.translation(for: selectedText, targetLanguage: language) == nil {
             startPrefetchIfEligible(for: selectedText)
         } else {
             cancelPrefetch()
@@ -397,20 +461,24 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func translate(_ text: String, near screenPoint: NSPoint) {
+        let language = targetLanguage
         let controller = TranslationPanelController(
             screenPoint: screenPoint,
-            sourceText: text
+            sourceText: text,
+            targetLanguage: language
         )
         translationPanelController?.close()
         translationPanelController = controller
         controller.showLoading()
 
-        if let cachedTranslation = translationCache.translation(for: text) {
+        if let cachedTranslation = translationCache.translation(for: text, targetLanguage: language) {
             controller.showTranslation(cachedTranslation)
             return
         }
 
-        if let translationPrefetch, translationPrefetch.text == text {
+        if let translationPrefetch,
+           translationPrefetch.text == text,
+           translationPrefetch.targetLanguage == language {
             translationPrefetch.subscribe { partialTranslation in
                 controller.showTranslation(partialTranslation)
             } onFailure: { message in
@@ -422,13 +490,13 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
 
         Task {
             do {
-                let translated = try await ollamaClient.translateToRussian(text) { partialTranslation in
+                let translated = try await ollamaClient.translate(text, to: language) { partialTranslation in
                     Task { @MainActor in
                         controller.showTranslation(partialTranslation)
                     }
                 }
                 await MainActor.run {
-                    self.translationCache.store(translated, for: text)
+                    self.translationCache.store(translated, for: text, targetLanguage: language)
                     controller.showTranslation(translated)
                 }
             } catch {
@@ -447,8 +515,13 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        let prefetch = TranslationPrefetch(text: text, ollamaClient: ollamaClient) { [weak self] sourceText, translation in
-            self?.translationCache.store(translation, for: sourceText)
+        let language = targetLanguage
+        let prefetch = TranslationPrefetch(
+            text: text,
+            targetLanguage: language,
+            ollamaClient: ollamaClient
+        ) { [weak self] sourceText, targetLanguage, translation in
+            self?.translationCache.store(translation, for: sourceText, targetLanguage: targetLanguage)
         }
         translationPrefetch = prefetch
         prefetch.startAfterDelay(milliseconds: prefetchDelayMilliseconds)
@@ -485,6 +558,14 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
         menu.item(withTag: MenuItemTag.accessibilityStatus.rawValue)?.title = trusted
             ? "Accessibility: Enabled"
             : "Enable Accessibility, then quit and reopen"
+        menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.title = "Translate To: \(targetLanguage.displayName)"
+
+        if let languageMenu = menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.submenu {
+            for item in languageMenu.items {
+                guard let languageID = item.representedObject as? String else { continue }
+                item.state = languageID == targetLanguage.id ? .on : .off
+            }
+        }
     }
 
     @objc private func openAccessibilitySettings() {
@@ -493,6 +574,19 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
     }
 
     @objc private func refreshAccessibilityStatus() {
+        updateMenuState()
+    }
+
+    @MainActor
+    @objc private func selectTargetLanguage(_ sender: NSMenuItem) {
+        guard let languageID = sender.representedObject as? String else {
+            return
+        }
+
+        targetLanguage = TranslationLanguage.language(id: languageID)
+        cancelPrefetch()
+        translationPanelController?.close()
+        translationPanelController = nil
         updateMenuState()
     }
 
@@ -693,7 +787,7 @@ final class TranslationPanelController {
     var panelFrame: NSRect { panel.frame }
     var isVisible: Bool { panel.isVisible }
 
-    init(screenPoint: NSPoint, sourceText: String) {
+    init(screenPoint: NSPoint, sourceText: String, targetLanguage: TranslationLanguage) {
         let visibleFrame = NSScreen.visibleFrame(containing: screenPoint)
         let panelHeight = min(
             TranslationContentView.preferredHeight(sourceText: sourceText, resultText: "Translating..."),
@@ -705,7 +799,7 @@ final class TranslationPanelController {
             y: max(screenPoint.y - panelSize.height - 10, visibleFrame.minY + 16)
         )
 
-        contentView = TranslationContentView(sourceText: sourceText)
+        contentView = TranslationContentView(sourceText: sourceText, targetLanguage: targetLanguage)
         panel = NSPanel(
             contentRect: NSRect(origin: origin, size: panelSize),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -907,10 +1001,11 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     var onClose: (() -> Void)?
 
     private let sourceText: String
+    private let targetLanguage: TranslationLanguage
     private var resultText = "Translating..."
     private let resultTextView = NSTextView()
     private let sourceTitleLabel = NSTextField(labelWithString: "")
-    private let russianTitleLabel = NSTextField(labelWithString: "")
+    private let targetTitleLabel = NSTextField(labelWithString: "")
     private let sourceTextView = NSTextView()
     private let sourceScrollView = NSScrollView()
     private let resultScrollView = NSScrollView()
@@ -926,8 +1021,9 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     private var shouldScrollSourceToTop = true
     private var shouldScrollResultToTop = true
 
-    init(sourceText: String) {
+    init(sourceText: String, targetLanguage: TranslationLanguage) {
         self.sourceText = sourceText
+        self.targetLanguage = targetLanguage
         super.init(frame: NSRect(
             x: 0,
             y: 0,
@@ -1068,8 +1164,8 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         sourceScrollView.documentView = sourceTextView
         sourceBox.contentView.addSubview(sourceScrollView)
 
-        configureSectionLabel(russianTitleLabel, text: "Russian")
-        content.addSubview(russianTitleLabel)
+        configureSectionLabel(targetTitleLabel, text: targetLanguage.displayName)
+        content.addSubview(targetTitleLabel)
 
         copyButton = makeIconButton(
             symbolName: "doc.on.doc",
@@ -1250,7 +1346,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         }
 
         y -= Self.sectionGap + Self.labelHeight
-        russianTitleLabel.frame = NSRect(
+        targetTitleLabel.frame = NSRect(
             x: Self.panelPaddingX,
             y: y,
             width: Self.contentWidth - Self.buttonSize - 8,
@@ -1429,7 +1525,7 @@ struct OllamaClient {
     let baseURL: URL
     let model: String
 
-    func translateToRussian(_ text: String, onPartial: @escaping (String) -> Void) async throws -> String {
+    func translate(_ text: String, to targetLanguage: TranslationLanguage, onPartial: @escaping (String) -> Void) async throws -> String {
         let sourceText = TextNormalizer.cleanedSelection(text)
         guard !sourceText.isEmpty else {
             throw TranslationError.emptyResponse
@@ -1449,7 +1545,7 @@ struct OllamaClient {
                 ChatMessage(
                     role: "system",
                     content: """
-                    Translate the user's text into natural Russian. The source may come from a messy UI text selection, so silently clean accidental line breaks, repeated spaces, and hyphenated line wraps before translating. Preserve the intended meaning, proper names, dates, and paragraph-like readability. Return only the Russian translation, with no commentary.
+                    Translate the user's text into natural \(targetLanguage.promptName). The source may come from a messy UI text selection, so silently clean accidental line breaks, repeated spaces, and hyphenated line wraps before translating. Preserve the intended meaning, proper names, dates, and paragraph-like readability. Return only the \(targetLanguage.promptName) translation, with no commentary.
                     """
                 ),
                 ChatMessage(role: "user", content: sourceText)
