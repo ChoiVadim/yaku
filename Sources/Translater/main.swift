@@ -145,7 +145,11 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
 
         Task {
             do {
-                let translated = try await ollamaClient.translateToRussian(text)
+                let translated = try await ollamaClient.translateToRussian(text) { partialTranslation in
+                    Task { @MainActor in
+                        controller.showTranslation(partialTranslation)
+                    }
+                }
                 await MainActor.run {
                     controller.showTranslation(translated)
                 }
@@ -413,6 +417,7 @@ final class TranslationPanelController {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
+        panel.isMovableByWindowBackground = true
         panel.contentView = contentView
         contentView.onClose = { [weak self] in self?.close() }
     }
@@ -828,13 +833,17 @@ final class TranslationContentView: NSView {
     @objc private func closeTapped() {
         onClose?()
     }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
 }
 
 struct OllamaClient {
     let baseURL: URL
     let model: String
 
-    func translateToRussian(_ text: String) async throws -> String {
+    func translateToRussian(_ text: String, onPartial: @escaping (String) -> Void) async throws -> String {
         let url = baseURL.appending(path: "api/chat")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -843,7 +852,8 @@ struct OllamaClient {
 
         let body = ChatRequest(
             model: model,
-            stream: false,
+            stream: true,
+            think: "low",
             messages: [
                 ChatMessage(
                     role: "system",
@@ -854,27 +864,46 @@ struct OllamaClient {
         )
         request.httpBody = try JSONEncoder().encode(body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               (200..<300).contains(httpResponse.statusCode)
         else {
-            let body = String(data: data, encoding: .utf8) ?? "Unknown Ollama error"
-            throw TranslationError.ollama(body)
+            throw TranslationError.ollama("HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
         }
 
-        let decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
-        let translated = decoded.message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !translated.isEmpty else {
+        var translated = ""
+        let decoder = JSONDecoder()
+        for try await line in bytes.lines {
+            guard !line.isEmpty, let data = line.data(using: .utf8) else {
+                continue
+            }
+
+            let decoded = try decoder.decode(ChatResponse.self, from: data)
+            translated += decoded.message.content
+
+            let partial = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !partial.isEmpty {
+                onPartial(partial)
+            }
+
+            if decoded.done {
+                break
+            }
+        }
+
+        let finalTranslation = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !finalTranslation.isEmpty else {
             throw TranslationError.emptyResponse
         }
 
-        return translated
+        return finalTranslation
     }
 }
 
 struct ChatRequest: Encodable {
     let model: String
     let stream: Bool
+    let think: String
     let messages: [ChatMessage]
 }
 
@@ -885,6 +914,7 @@ struct ChatMessage: Codable {
 
 struct ChatResponse: Decodable {
     let message: ChatMessage
+    let done: Bool
 }
 
 enum TranslationError: LocalizedError {
