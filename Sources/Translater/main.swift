@@ -10,6 +10,83 @@ private enum MenuItemTag: Int {
     case quit = 104
 }
 
+private enum TextNormalizer {
+    static func cleanedSelection(_ text: String) -> String {
+        var cleaned = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\u{200B}", with: "")
+
+        cleaned = cleaned.replacingOccurrences(
+            of: #"(?<=\p{L})-\n(?=\p{L})"#,
+            with: "",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"[ \t]*\n[ \t]*"#,
+            with: " ",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\s+"#,
+            with: " ",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\s+([,.;:!?…])"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"([(])\s+"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\s+([)])"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func cleanedTranslation(_ text: String) -> String {
+        var cleaned = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\u{200B}", with: "")
+
+        cleaned = cleaned.replacingOccurrences(
+            of: #"[ \t]+\n"#,
+            with: "\n",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\n[ \t]+"#,
+            with: "\n",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\n{3,}"#,
+            with: "\n\n",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"[ \t]{2,}"#,
+            with: " ",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\s+([,.;:!?…])"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 @MainActor
 private final class TranslationPrefetch {
     private enum State {
@@ -151,9 +228,7 @@ private final class TranslationCache {
     }
 
     private func cacheKey(for text: String) -> String {
-        text
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        TextNormalizer.cleanedSelection(text)
     }
 
     private func markRecentlyUsed(_ key: String) {
@@ -285,7 +360,15 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
                 return
             }
 
-            self.showTranslateButton(for: selection.text, near: NSEvent.mouseLocation)
+            let cleanedSelection = TextNormalizer.cleanedSelection(selection.text)
+            guard !cleanedSelection.isEmpty else {
+                self.translateButtonController?.close()
+                self.translateButtonController = nil
+                self.cancelPrefetch()
+                return
+            }
+
+            self.showTranslateButton(for: cleanedSelection, near: NSEvent.mouseLocation)
         }
     }
 
@@ -840,6 +923,8 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     private var selectionCopyButton: NSButton?
     private var selectedSnippetToCopy: String?
     private weak var selectedTextView: NSTextView?
+    private var shouldScrollSourceToTop = true
+    private var shouldScrollResultToTop = true
 
     init(sourceText: String) {
         self.sourceText = sourceText
@@ -886,8 +971,40 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     }
 
     private static func boxHeight(for text: String, font: NSFont, width: CGFloat, minimum: CGFloat, maximum: CGFloat) -> CGFloat {
-        let height = textHeight(for: text, font: font, width: width) + boxInsetY * 2
+        let height = textHeight(for: text, font: font, width: width) + boxInsetY * 2 + 4
         return min(max(height, minimum), maximum)
+    }
+
+    private static func layoutScrollableTextView(
+        _ textView: NSTextView,
+        inside scrollView: NSScrollView,
+        scrollFrame: NSRect,
+        rawTextHeight: CGFloat
+    ) {
+        scrollView.frame = scrollFrame
+
+        let fitsInScrollFrame = rawTextHeight + 4 <= scrollFrame.height
+        let verticalInset: CGFloat
+        let textViewHeight: CGFloat
+        if fitsInScrollFrame {
+            verticalInset = floor(max(2, (scrollFrame.height - rawTextHeight) / 2))
+            textViewHeight = scrollFrame.height
+        } else {
+            verticalInset = 2
+            textViewHeight = max(scrollFrame.height, rawTextHeight + 8)
+        }
+
+        textView.textContainerInset = NSSize(width: 0, height: verticalInset)
+        textView.frame = NSRect(
+            origin: .zero,
+            size: NSSize(width: scrollFrame.width, height: textViewHeight)
+        )
+        textView.minSize = NSSize(width: 0, height: scrollFrame.height)
+        textView.textContainer?.containerSize = NSSize(
+            width: scrollFrame.width,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        scrollView.hasVerticalScroller = !fitsInScrollFrame
     }
 
     private static func textHeight(for text: String, font: NSFont, width: CGFloat) -> CGFloat {
@@ -1116,22 +1233,21 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
             width: Self.contentWidth - Self.boxInsetX * 2,
             height: resolvedSourceBoxHeight - Self.boxInsetY * 2
         )
-        sourceScrollView.frame = sourceScrollFrame
-        let sourceTextHeight = Self.textHeight(
+        let sourceRawTextHeight = Self.textHeight(
             for: sourceText,
             font: NSFont.systemFont(ofSize: Self.sourceFontSize, weight: .regular),
             width: sourceScrollFrame.width
-        ) + 8
-        sourceTextView.frame = NSRect(
-            origin: .zero,
-            size: NSSize(width: sourceScrollFrame.width, height: max(sourceScrollFrame.height, sourceTextHeight))
         )
-        sourceTextView.minSize = NSSize(width: 0, height: sourceScrollFrame.height)
-        sourceTextView.textContainer?.containerSize = NSSize(
-            width: sourceScrollFrame.width,
-            height: CGFloat.greatestFiniteMagnitude
+        Self.layoutScrollableTextView(
+            sourceTextView,
+            inside: sourceScrollView,
+            scrollFrame: sourceScrollFrame,
+            rawTextHeight: sourceRawTextHeight
         )
-        sourceScrollView.hasVerticalScroller = sourceTextHeight > sourceScrollFrame.height + 1
+        if shouldScrollSourceToTop {
+            scrollToTop(sourceScrollView)
+            shouldScrollSourceToTop = false
+        }
 
         y -= Self.sectionGap + Self.labelHeight
         russianTitleLabel.frame = NSRect(
@@ -1161,44 +1277,62 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
             width: Self.contentWidth - Self.boxInsetX * 2,
             height: resolvedResultBoxHeight - Self.boxInsetY * 2
         )
-        resultScrollView.frame = resultScrollFrame
-        let resultTextHeight = Self.textHeight(
+        let resultRawTextHeight = Self.textHeight(
             for: resultText,
             font: NSFont.systemFont(ofSize: Self.resultFontSize, weight: .medium),
             width: resultScrollFrame.width
-        ) + 8
-        resultTextView.frame = NSRect(
-            origin: .zero,
-            size: NSSize(width: resultScrollFrame.width, height: max(resultScrollFrame.height, resultTextHeight))
         )
-        resultTextView.minSize = NSSize(width: 0, height: resultScrollFrame.height)
-        resultTextView.textContainer?.containerSize = NSSize(
-            width: resultScrollFrame.width,
-            height: CGFloat.greatestFiniteMagnitude
+        Self.layoutScrollableTextView(
+            resultTextView,
+            inside: resultScrollView,
+            scrollFrame: resultScrollFrame,
+            rawTextHeight: resultRawTextHeight
         )
-        resultScrollView.hasVerticalScroller = resultTextHeight > resultScrollFrame.height + 1
+        if shouldScrollResultToTop {
+            scrollToTop(resultScrollView)
+            shouldScrollResultToTop = false
+        }
     }
 
     func setResult(_ text: String) {
         hideSelectionCopyButtonIfNeeded(for: resultTextView)
+        let cleanedText = TextNormalizer.cleanedTranslation(text)
 
-        if text == resultText {
+        if cleanedText == resultText {
             return
         }
 
-        if !resultText.isEmpty, text.hasPrefix(resultText), let textStorage = resultTextView.textStorage {
-            let suffix = String(text.dropFirst(resultText.count))
+        let isStreamingAppend = !resultText.isEmpty && cleanedText.hasPrefix(resultText)
+        if !isStreamingAppend {
+            shouldScrollResultToTop = true
+        }
+
+        if isStreamingAppend, let textStorage = resultTextView.textStorage {
+            let suffix = String(cleanedText.dropFirst(resultText.count))
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: resultTextView.font ?? NSFont.systemFont(ofSize: Self.resultFontSize, weight: .medium),
                 .foregroundColor: resultTextView.textColor ?? NSColor.white
             ]
             textStorage.append(NSAttributedString(string: suffix, attributes: attrs))
         } else {
-            resultTextView.string = text
+            resultTextView.string = cleanedText
         }
 
-        resultText = text
+        resultText = cleanedText
         layoutForCurrentSize()
+    }
+
+    private func scrollToTop(_ scrollView: NSScrollView) {
+        guard let documentView = scrollView.documentView else {
+            return
+        }
+
+        let clipView = scrollView.contentView
+        let y = documentView.isFlipped
+            ? CGFloat.zero
+            : max(0, documentView.bounds.height - clipView.bounds.height)
+        clipView.scroll(to: NSPoint(x: 0, y: y))
+        scrollView.reflectScrolledClipView(clipView)
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -1296,6 +1430,11 @@ struct OllamaClient {
     let model: String
 
     func translateToRussian(_ text: String, onPartial: @escaping (String) -> Void) async throws -> String {
+        let sourceText = TextNormalizer.cleanedSelection(text)
+        guard !sourceText.isEmpty else {
+            throw TranslationError.emptyResponse
+        }
+
         let url = baseURL.appending(path: "api/chat")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -1309,9 +1448,11 @@ struct OllamaClient {
             messages: [
                 ChatMessage(
                     role: "system",
-                    content: "You translate text into Russian. Return only the Russian translation, with no commentary."
+                    content: """
+                    Translate the user's text into natural Russian. The source may come from a messy UI text selection, so silently clean accidental line breaks, repeated spaces, and hyphenated line wraps before translating. Preserve the intended meaning, proper names, dates, and paragraph-like readability. Return only the Russian translation, with no commentary.
+                    """
                 ),
-                ChatMessage(role: "user", content: text)
+                ChatMessage(role: "user", content: sourceText)
             ]
         )
         request.httpBody = try JSONEncoder().encode(body)
@@ -1333,7 +1474,7 @@ struct OllamaClient {
             let decoded = try decoder.decode(ChatResponse.self, from: data)
             translated += decoded.message.content
 
-            let partial = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+            let partial = TextNormalizer.cleanedTranslation(translated)
             if !partial.isEmpty {
                 onPartial(partial)
             }
@@ -1343,7 +1484,7 @@ struct OllamaClient {
             }
         }
 
-        let finalTranslation = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalTranslation = TextNormalizer.cleanedTranslation(translated)
         guard !finalTranslation.isEmpty else {
             throw TranslationError.emptyResponse
         }
