@@ -589,7 +589,7 @@ final class TranslationPanelController {
 
     func showTranslation(_ text: String) {
         contentView.setResult(text)
-        resizeToFitContent(animated: true)
+        resizeToFitContent(animated: false)
     }
 
     func showError(_ message: String) {
@@ -658,9 +658,30 @@ final class TranslationPanelController {
             width: targetWidth,
             height: targetHeight
         )
-        panel.setFrame(targetFrame, display: true, animate: animated)
-        contentView.setFrameSize(targetFrame.size)
-        contentView.layoutForCurrentSize()
+
+        let frameUnchanged = abs(targetFrame.minX - currentFrame.minX) < 0.5
+            && abs(targetFrame.minY - currentFrame.minY) < 0.5
+            && abs(targetFrame.width - currentFrame.width) < 0.5
+            && abs(targetFrame.height - currentFrame.height) < 0.5
+        if frameUnchanged {
+            contentView.layoutForCurrentSize()
+            return
+        }
+
+        let heightDelta = abs(targetFrame.height - currentFrame.height)
+        if !animated || heightDelta < 1.5 {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            panel.setFrame(targetFrame, display: true)
+            CATransaction.commit()
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.10
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().setFrame(targetFrame, display: true)
+        }
     }
 }
 
@@ -750,6 +771,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     private var resultBox: GlassHostView?
     private var closeButton: NSButton?
     private var copyButton: NSButton?
+    private var selectionCopyBubble: GlassHostView?
     private var selectionCopyButton: NSButton?
     private var selectedSnippetToCopy: String?
     private weak var selectedTextView: NSTextView?
@@ -876,15 +898,27 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
             to: content
         )
 
+        let copyBubble = GlassHostView(
+            frame: NSRect(x: 0, y: 0, width: 34, height: 34),
+            cornerRadius: 17,
+            tintColor: NSColor(calibratedRed: 0.07, green: 0.12, blue: 0.20, alpha: 0.58),
+            style: .regular
+        )
+        copyBubble.isHidden = true
+        content.addSubview(copyBubble)
+        selectionCopyBubble = copyBubble
+
         selectionCopyButton = makeIconButton(
             symbolName: "doc.on.doc",
             accessibilityDescription: "Copy selection",
-            pointSize: 12,
+            pointSize: 14,
             target: self,
             action: #selector(copySelectedSnippet),
-            to: content
+            to: copyBubble.contentView
         )
-        selectionCopyButton?.isHidden = true
+        selectionCopyButton?.frame = copyBubble.contentView.bounds
+        selectionCopyButton?.autoresizingMask = [.width, .height]
+        selectionCopyButton?.contentTintColor = NSColor(calibratedWhite: 1.0, alpha: 0.78)
         selectionCopyButton?.sendAction(on: [.leftMouseDown])
 
         let resultBox = GlassHostView(
@@ -909,9 +943,9 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         )
         resultScrollView.documentView = resultTextView
         resultBox.contentView.addSubview(resultScrollView)
-        if let selectionCopyButton {
-            selectionCopyButton.removeFromSuperview()
-            content.addSubview(selectionCopyButton)
+        if let selectionCopyBubble {
+            selectionCopyBubble.removeFromSuperview()
+            content.addSubview(selectionCopyBubble)
         }
 
         setResult(resultText)
@@ -964,6 +998,10 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     }
 
     func layoutForCurrentSize() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+
         let sourceBoxHeight = Self.boxHeight(
             for: sourceText,
             font: NSFont.systemFont(ofSize: Self.sourceFontSize, weight: .regular),
@@ -1076,8 +1114,28 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
 
     func setResult(_ text: String) {
         hideSelectionCopyButtonIfNeeded(for: resultTextView)
+
+        if text == resultText {
+            return
+        }
+
+        if !resultText.isEmpty, text.hasPrefix(resultText), let textStorage = resultTextView.textStorage {
+            let suffix = String(text.dropFirst(resultText.count))
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: resultTextView.font ?? NSFont.systemFont(ofSize: Self.resultFontSize, weight: .medium),
+                .foregroundColor: resultTextView.textColor ?? NSColor.white
+            ]
+            textStorage.append(NSAttributedString(string: suffix, attributes: attrs))
+        } else {
+            resultTextView.string = text
+        }
+
         resultText = text
-        resultTextView.string = text
+        layoutForCurrentSize()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
         layoutForCurrentSize()
     }
 
@@ -1117,16 +1175,23 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         selectedSnippetToCopy = selectedText
         selectedTextView = textView
 
-        let sourceFrame = sourceBox?.frame ?? .zero
-        let resultFrame = resultBox?.frame ?? .zero
-        let activeFrame = textView === sourceTextView ? sourceFrame : resultFrame
-        selectionCopyButton?.frame = NSRect(
-            x: activeFrame.maxX - Self.buttonSize - 10,
-            y: activeFrame.maxY - Self.buttonSize - 10,
-            width: Self.buttonSize,
-            height: Self.buttonSize
+        positionSelectionCopyBubbleNearMouse()
+        selectionCopyBubble?.isHidden = false
+    }
+
+    private func positionSelectionCopyBubbleNearMouse() {
+        let bubbleSize = NSSize(width: 34, height: 34)
+        let mouseInWindow = window?.convertPoint(fromScreen: NSEvent.mouseLocation) ?? convert(NSEvent.mouseLocation, from: nil)
+        let mouseInView = convert(mouseInWindow, from: nil)
+        let targetOrigin = NSPoint(
+            x: mouseInView.x + 10,
+            y: mouseInView.y + 10
         )
-        selectionCopyButton?.isHidden = false
+        let clampedOrigin = NSPoint(
+            x: min(max(8, targetOrigin.x), max(8, bounds.width - bubbleSize.width - 8)),
+            y: min(max(8, targetOrigin.y), max(8, bounds.height - bubbleSize.height - 8))
+        )
+        selectionCopyBubble?.frame = NSRect(origin: clampedOrigin, size: bubbleSize)
     }
 
     private func selectedText(in textView: NSTextView) -> String? {
@@ -1147,7 +1212,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     }
 
     private func hideSelectionCopyButton(clearSelection: Bool = true) {
-        selectionCopyButton?.isHidden = true
+        selectionCopyBubble?.isHidden = true
         if clearSelection {
             selectedSnippetToCopy = nil
             selectedTextView = nil
