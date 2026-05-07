@@ -27,10 +27,12 @@ private final class TranslationPrefetch {
     private var partialTranslation = ""
     private var subscribers: [(String) -> Void] = []
     private var failureSubscribers: [(String) -> Void] = []
+    private let onComplete: (String, String) -> Void
 
-    init(text: String, ollamaClient: OllamaClient) {
+    init(text: String, ollamaClient: OllamaClient, onComplete: @escaping (String, String) -> Void) {
         self.text = text
         self.ollamaClient = ollamaClient
+        self.onComplete = onComplete
     }
 
     func startAfterDelay(milliseconds: UInt64) {
@@ -93,6 +95,7 @@ private final class TranslationPrefetch {
                 }
             }
             state = .completed(finalTranslation)
+            onComplete(text, finalTranslation)
             publishPartial(finalTranslation)
         } catch is CancellationError {
             markCancelled()
@@ -117,6 +120,55 @@ private final class TranslationPrefetch {
     }
 }
 
+private final class TranslationCache {
+    private let maxEntries: Int
+    private var entries: [String: String] = [:]
+    private var keysByRecentUse: [String] = []
+
+    init(maxEntries: Int = 200) {
+        self.maxEntries = maxEntries
+    }
+
+    func translation(for text: String) -> String? {
+        let key = cacheKey(for: text)
+        guard let translation = entries[key] else {
+            return nil
+        }
+
+        markRecentlyUsed(key)
+        return translation
+    }
+
+    func store(_ translation: String, for text: String) {
+        let key = cacheKey(for: text)
+        guard !key.isEmpty, !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+
+        entries[key] = translation
+        markRecentlyUsed(key)
+        trimIfNeeded()
+    }
+
+    private func cacheKey(for text: String) -> String {
+        text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+    }
+
+    private func markRecentlyUsed(_ key: String) {
+        keysByRecentUse.removeAll { $0 == key }
+        keysByRecentUse.append(key)
+    }
+
+    private func trimIfNeeded() {
+        while keysByRecentUse.count > maxEntries, let oldestKey = keysByRecentUse.first {
+            keysByRecentUse.removeFirst()
+            entries.removeValue(forKey: oldestKey)
+        }
+    }
+}
+
 @main
 final class TranslaterApp: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
@@ -130,6 +182,7 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
     private var translateButtonController: FloatingTranslateButtonController?
     private var translationPanelController: TranslationPanelController?
     private var translationPrefetch: TranslationPrefetch?
+    private lazy var translationCache = TranslationCache()
 
     private let prefetchDelayMilliseconds: UInt64 = 220
     private let prefetchMaxCharacterCount = 1_200
@@ -240,7 +293,11 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
     private func showTranslateButton(for selectedText: String, near screenPoint: NSPoint) {
         translationPanelController?.close()
         translateButtonController?.close()
-        startPrefetchIfEligible(for: selectedText)
+        if translationCache.translation(for: selectedText) == nil {
+            startPrefetchIfEligible(for: selectedText)
+        } else {
+            cancelPrefetch()
+        }
 
         let controller = FloatingTranslateButtonController(
             screenPoint: screenPoint,
@@ -265,6 +322,11 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
         translationPanelController = controller
         controller.showLoading()
 
+        if let cachedTranslation = translationCache.translation(for: text) {
+            controller.showTranslation(cachedTranslation)
+            return
+        }
+
         if let translationPrefetch, translationPrefetch.text == text {
             translationPrefetch.subscribe { partialTranslation in
                 controller.showTranslation(partialTranslation)
@@ -283,6 +345,7 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
                     }
                 }
                 await MainActor.run {
+                    self.translationCache.store(translated, for: text)
                     controller.showTranslation(translated)
                 }
             } catch {
@@ -301,7 +364,9 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        let prefetch = TranslationPrefetch(text: text, ollamaClient: ollamaClient)
+        let prefetch = TranslationPrefetch(text: text, ollamaClient: ollamaClient) { [weak self] sourceText, translation in
+            self?.translationCache.store(translation, for: sourceText)
+        }
         translationPrefetch = prefetch
         prefetch.startAfterDelay(milliseconds: prefetchDelayMilliseconds)
     }
