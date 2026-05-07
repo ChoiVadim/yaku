@@ -1131,6 +1131,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
             width: sourceScrollFrame.width,
             height: CGFloat.greatestFiniteMagnitude
         )
+        sourceScrollView.hasVerticalScroller = sourceTextHeight > sourceScrollFrame.height + 1
 
         y -= Self.sectionGap + Self.labelHeight
         russianTitleLabel.frame = NSRect(
@@ -1175,6 +1176,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
             width: resultScrollFrame.width,
             height: CGFloat.greatestFiniteMagnitude
         )
+        resultScrollView.hasVerticalScroller = resultTextHeight > resultScrollFrame.height + 1
     }
 
     func setResult(_ text: String) {
