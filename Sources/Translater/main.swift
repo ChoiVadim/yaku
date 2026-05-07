@@ -215,6 +215,13 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
             return
         }
 
+        let mouseLocation = NSEvent.mouseLocation
+        if let controller = translationPanelController,
+           controller.isVisible,
+           controller.panelFrame.insetBy(dx: -4, dy: -4).contains(mouseLocation) {
+            return
+        }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
             guard let self else { return }
 
@@ -535,6 +542,9 @@ final class TranslationPanelController {
     private var globalOutsideClickMonitor: Any?
     private var localOutsideClickMonitor: Any?
 
+    var panelFrame: NSRect { panel.frame }
+    var isVisible: Bool { panel.isVisible }
+
     init(screenPoint: NSPoint, sourceText: String) {
         let visibleFrame = NSScreen.visibleFrame(containing: screenPoint)
         let panelHeight = min(
@@ -703,7 +713,7 @@ final class GlassHostView: NSView {
     }
 }
 
-final class TranslationContentView: NSView {
+final class TranslationContentView: NSView, NSTextViewDelegate {
     static let preferredWidth: CGFloat = 400
     private static let minHeight: CGFloat = 156
     private static let maxHeight: CGFloat = 540
@@ -732,17 +742,20 @@ final class TranslationContentView: NSView {
     private let resultTextView = NSTextView()
     private let sourceTitleLabel = NSTextField(labelWithString: "")
     private let russianTitleLabel = NSTextField(labelWithString: "")
-    private let sourceTextField: NSTextField
+    private let sourceTextView = NSTextView()
+    private let sourceScrollView = NSScrollView()
     private let resultScrollView = NSScrollView()
     private var panelGlass: GlassHostView?
     private var sourceBox: GlassHostView?
     private var resultBox: GlassHostView?
     private var closeButton: NSButton?
     private var copyButton: NSButton?
+    private var selectionCopyButton: NSButton?
+    private var selectedSnippetToCopy: String?
+    private weak var selectedTextView: NSTextView?
 
     init(sourceText: String) {
         self.sourceText = sourceText
-        sourceTextField = NSTextField(labelWithString: sourceText)
         super.init(frame: NSRect(
             x: 0,
             y: 0,
@@ -838,11 +851,18 @@ final class TranslationContentView: NSView {
         content.addSubview(sourceBox)
         self.sourceBox = sourceBox
 
-        sourceTextField.font = NSFont.systemFont(ofSize: Self.sourceFontSize, weight: .regular)
-        sourceTextField.textColor = NSColor(calibratedWhite: 1.0, alpha: 0.92)
-        sourceTextField.lineBreakMode = .byWordWrapping
-        sourceTextField.maximumNumberOfLines = 0
-        sourceBox.contentView.addSubview(sourceTextField)
+        sourceScrollView.drawsBackground = false
+        sourceScrollView.hasVerticalScroller = true
+        sourceScrollView.autohidesScrollers = true
+        sourceScrollView.borderType = .noBorder
+        configureTextView(
+            sourceTextView,
+            text: sourceText,
+            font: NSFont.systemFont(ofSize: Self.sourceFontSize, weight: .regular),
+            color: NSColor(calibratedWhite: 1.0, alpha: 0.92)
+        )
+        sourceScrollView.documentView = sourceTextView
+        sourceBox.contentView.addSubview(sourceScrollView)
 
         configureSectionLabel(russianTitleLabel, text: "Russian")
         content.addSubview(russianTitleLabel)
@@ -855,6 +875,17 @@ final class TranslationContentView: NSView {
             action: #selector(copyResult),
             to: content
         )
+
+        selectionCopyButton = makeIconButton(
+            symbolName: "doc.on.doc",
+            accessibilityDescription: "Copy selection",
+            pointSize: 12,
+            target: self,
+            action: #selector(copySelectedSnippet),
+            to: content
+        )
+        selectionCopyButton?.isHidden = true
+        selectionCopyButton?.sendAction(on: [.leftMouseDown])
 
         let resultBox = GlassHostView(
             frame: .zero,
@@ -870,21 +901,36 @@ final class TranslationContentView: NSView {
         resultScrollView.autohidesScrollers = true
         resultScrollView.borderType = .noBorder
 
-        resultTextView.drawsBackground = false
-        resultTextView.isEditable = false
-        resultTextView.isSelectable = true
-        resultTextView.textColor = .white
-        resultTextView.font = NSFont.systemFont(ofSize: Self.resultFontSize, weight: .medium)
-        resultTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        resultTextView.isVerticallyResizable = true
-        resultTextView.isHorizontallyResizable = false
-        resultTextView.autoresizingMask = [.width]
-        resultTextView.textContainer?.widthTracksTextView = true
-        resultTextView.textContainerInset = NSSize(width: 0, height: 2)
+        configureTextView(
+            resultTextView,
+            text: resultText,
+            font: NSFont.systemFont(ofSize: Self.resultFontSize, weight: .medium),
+            color: .white
+        )
         resultScrollView.documentView = resultTextView
         resultBox.contentView.addSubview(resultScrollView)
+        if let selectionCopyButton {
+            selectionCopyButton.removeFromSuperview()
+            content.addSubview(selectionCopyButton)
+        }
 
         setResult(resultText)
+    }
+
+    private func configureTextView(_ textView: NSTextView, text: String, font: NSFont, color: NSColor) {
+        textView.string = text
+        textView.drawsBackground = false
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.textColor = color
+        textView.font = font
+        textView.delegate = self
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainerInset = NSSize(width: 0, height: 2)
     }
 
     @discardableResult
@@ -961,11 +1007,26 @@ final class TranslationContentView: NSView {
             width: Self.contentWidth,
             height: resolvedSourceBoxHeight
         )
-        sourceTextField.frame = NSRect(
+        let sourceScrollFrame = NSRect(
             x: Self.boxInsetX,
-            y: Self.boxInsetY - 2,
+            y: Self.boxInsetY,
             width: Self.contentWidth - Self.boxInsetX * 2,
-            height: resolvedSourceBoxHeight - Self.boxInsetY * 2 + 4
+            height: resolvedSourceBoxHeight - Self.boxInsetY * 2
+        )
+        sourceScrollView.frame = sourceScrollFrame
+        let sourceTextHeight = Self.textHeight(
+            for: sourceText,
+            font: NSFont.systemFont(ofSize: Self.sourceFontSize, weight: .regular),
+            width: sourceScrollFrame.width
+        ) + 8
+        sourceTextView.frame = NSRect(
+            origin: .zero,
+            size: NSSize(width: sourceScrollFrame.width, height: max(sourceScrollFrame.height, sourceTextHeight))
+        )
+        sourceTextView.minSize = NSSize(width: 0, height: sourceScrollFrame.height)
+        sourceTextView.textContainer?.containerSize = NSSize(
+            width: sourceScrollFrame.width,
+            height: CGFloat.greatestFiniteMagnitude
         )
 
         y -= Self.sectionGap + Self.labelHeight
@@ -1014,6 +1075,7 @@ final class TranslationContentView: NSView {
     }
 
     func setResult(_ text: String) {
+        hideSelectionCopyButtonIfNeeded(for: resultTextView)
         resultText = text
         resultTextView.string = text
         layoutForCurrentSize()
@@ -1024,8 +1086,72 @@ final class TranslationContentView: NSView {
         NSPasteboard.general.setString(resultTextView.string, forType: .string)
     }
 
+    @objc private func copySelectedSnippet() {
+        guard let selectedSnippetToCopy, !selectedSnippetToCopy.isEmpty else {
+            return
+        }
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(selectedSnippetToCopy, forType: .string)
+        hideSelectionCopyButton()
+    }
+
     @objc private func closeTapped() {
         onClose?()
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        guard let textView = notification.object as? NSTextView else {
+            return
+        }
+
+        updateSelectionCopyButton(for: textView)
+    }
+
+    private func updateSelectionCopyButton(for textView: NSTextView) {
+        guard let selectedText = selectedText(in: textView), !selectedText.isEmpty else {
+            hideSelectionCopyButtonIfNeeded(for: textView)
+            return
+        }
+
+        selectedSnippetToCopy = selectedText
+        selectedTextView = textView
+
+        let sourceFrame = sourceBox?.frame ?? .zero
+        let resultFrame = resultBox?.frame ?? .zero
+        let activeFrame = textView === sourceTextView ? sourceFrame : resultFrame
+        selectionCopyButton?.frame = NSRect(
+            x: activeFrame.maxX - Self.buttonSize - 10,
+            y: activeFrame.maxY - Self.buttonSize - 10,
+            width: Self.buttonSize,
+            height: Self.buttonSize
+        )
+        selectionCopyButton?.isHidden = false
+    }
+
+    private func selectedText(in textView: NSTextView) -> String? {
+        let range = textView.selectedRange()
+        guard range.length > 0, let stringRange = Range(range, in: textView.string) else {
+            return nil
+        }
+
+        return String(textView.string[stringRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func hideSelectionCopyButtonIfNeeded(for textView: NSTextView) {
+        guard selectedTextView === textView else {
+            return
+        }
+
+        hideSelectionCopyButton(clearSelection: false)
+    }
+
+    private func hideSelectionCopyButton(clearSelection: Bool = true) {
+        selectionCopyButton?.isHidden = true
+        if clearSelection {
+            selectedSnippetToCopy = nil
+            selectedTextView = nil
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
