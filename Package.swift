@@ -3,15 +3,15 @@
 import PackageDescription
 
 let package = Package(
-    name: "Translater",
+    name: "Yaku",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "Translater", targets: ["Translater"])
+        .executable(name: "Yaku", targets: ["Yaku"])
     ],
     targets: [
-        .executableTarget(name: "Translater")
+        .executableTarget(name: "Yaku")
     ],
     swiftLanguageModes: [.v5]
 )

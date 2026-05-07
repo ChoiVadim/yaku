@@ -1,14 +1,199 @@
 import AppKit
 import ApplicationServices
+import Carbon.HIToolbox
 import Foundation
+import Vision
 
 private enum MenuItemTag: Int {
-    case appStatus = 100
-    case accessibilityStatus = 101
-    case accessibilitySettings = 102
-    case refreshAccessibility = 103
-    case targetLanguage = 104
-    case quit = 105
+    case permissionNotice = 100
+    case accessibilitySettings = 101
+    case permissionSeparator = 102
+    case targetLanguage = 103
+    case quit = 104
+    case bootstrapNotice = 105
+    case bootstrapAction = 106
+    case bootstrapSeparator = 107
+    case screenshotArea = 108
+    case translateSelection = 109
+    case draftTargetLanguage = 110
+}
+
+private struct GlobalHotKeyDefinition {
+    static let signature = OSType(0x54524E53) // TRNS
+    private static let fnModifier = UInt32(kEventKeyModifierFnMask)
+
+    let id: UInt32
+    let keyCode: UInt32
+    let carbonModifiers: UInt32
+    let requiredModifierFlags: NSEvent.ModifierFlags
+    let forbiddenModifierFlags: NSEvent.ModifierFlags
+    let displayString: String
+
+    static let screenshotArea = GlobalHotKeyDefinition(
+        id: 1,
+        keyCode: UInt32(kVK_ANSI_S),
+        carbonModifiers: UInt32(cmdKey | controlKey),
+        requiredModifierFlags: [.command, .control],
+        forbiddenModifierFlags: [.option, .shift],
+        displayString: "⌃⌘S"
+    )
+
+    static let screenshotAreaFn = GlobalHotKeyDefinition(
+        id: 3,
+        keyCode: UInt32(kVK_ANSI_S),
+        carbonModifiers: fnModifier,
+        requiredModifierFlags: [.function],
+        forbiddenModifierFlags: [.command, .control, .option, .shift],
+        displayString: "fn+S"
+    )
+
+    static let translateSelection = GlobalHotKeyDefinition(
+        id: 2,
+        keyCode: UInt32(kVK_ANSI_T),
+        carbonModifiers: UInt32(cmdKey | controlKey),
+        requiredModifierFlags: [.command, .control],
+        forbiddenModifierFlags: [.option, .shift],
+        displayString: "⌃⌘T"
+    )
+
+    static let translateSelectionFn = GlobalHotKeyDefinition(
+        id: 4,
+        keyCode: UInt32(kVK_ANSI_T),
+        carbonModifiers: fnModifier,
+        requiredModifierFlags: [.function],
+        forbiddenModifierFlags: [.command, .control, .option, .shift],
+        displayString: "fn+T"
+    )
+
+    static let screenshotAreaDisplayString = "\(screenshotArea.displayString) or \(screenshotAreaFn.displayString)"
+    static let translateSelectionDisplayString = "\(translateSelection.displayString) or \(translateSelectionFn.displayString)"
+}
+
+private final class GlobalHotKey {
+    private let definition: GlobalHotKeyDefinition
+
+    private var hotKeyRef: EventHotKeyRef?
+    private var eventHandlerRef: EventHandlerRef?
+    private var fallbackMonitor: Any?
+    private let onPressed: @MainActor () -> Void
+
+    init(definition: GlobalHotKeyDefinition, onPressed: @escaping @MainActor () -> Void) {
+        self.definition = definition
+        self.onPressed = onPressed
+    }
+
+    func register() {
+        unregister()
+
+        let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        var eventSpec = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+
+        let handlerStatus = InstallEventHandler(
+            GetApplicationEventTarget(),
+            { _, eventRef, userData in
+                guard let eventRef, let userData else {
+                    return OSStatus(eventNotHandledErr)
+                }
+
+                var hotKeyID = EventHotKeyID()
+                let parameterStatus = GetEventParameter(
+                    eventRef,
+                    EventParamName(kEventParamDirectObject),
+                    EventParamType(typeEventHotKeyID),
+                    nil,
+                    MemoryLayout<EventHotKeyID>.size,
+                    nil,
+                    &hotKeyID
+                )
+
+                let registrar = Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue()
+                guard parameterStatus == noErr,
+                      hotKeyID.signature == GlobalHotKeyDefinition.signature,
+                      hotKeyID.id == registrar.definition.id
+                else {
+                    return OSStatus(eventNotHandledErr)
+                }
+
+                Task { @MainActor in
+                    registrar.onPressed()
+                }
+                return noErr
+            },
+            1,
+            &eventSpec,
+            selfPointer,
+            &eventHandlerRef
+        )
+
+        guard handlerStatus == noErr else {
+            installFallbackMonitor()
+            return
+        }
+
+        let hotKeyID = EventHotKeyID(
+            signature: GlobalHotKeyDefinition.signature,
+            id: definition.id
+        )
+        let hotKeyStatus = RegisterEventHotKey(
+            definition.keyCode,
+            definition.carbonModifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+
+        guard hotKeyStatus == noErr else {
+            if let eventHandlerRef {
+                RemoveEventHandler(eventHandlerRef)
+                self.eventHandlerRef = nil
+            }
+            installFallbackMonitor()
+            return
+        }
+    }
+
+    func unregister() {
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+            self.hotKeyRef = nil
+        }
+
+        if let eventHandlerRef {
+            RemoveEventHandler(eventHandlerRef)
+            self.eventHandlerRef = nil
+        }
+
+        if let fallbackMonitor {
+            NSEvent.removeMonitor(fallbackMonitor)
+            self.fallbackMonitor = nil
+        }
+    }
+
+    private func installFallbackMonitor() {
+        fallbackMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+            guard self.matches(event) else {
+                return
+            }
+
+            Task { @MainActor in
+                self.onPressed()
+            }
+        }
+    }
+
+    private func matches(_ event: NSEvent) -> Bool {
+        guard event.keyCode == UInt16(definition.keyCode) else {
+            return false
+        }
+
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        return definition.requiredModifierFlags.isSubset(of: modifiers)
+            && modifiers.intersection(definition.forbiddenModifierFlags).isEmpty
+    }
 }
 
 struct TranslationLanguage: Equatable {
@@ -28,6 +213,7 @@ struct TranslationLanguage: Equatable {
     ]
 
     static let defaultLanguage = all[0]
+    static let defaultDraftLanguage = all.first { $0.id == "ko" } ?? defaultLanguage
 
     static func language(id: String) -> TranslationLanguage {
         all.first { $0.id == id } ?? defaultLanguage
@@ -36,11 +222,7 @@ struct TranslationLanguage: Equatable {
 
 private enum TextNormalizer {
     static func cleanedSelection(_ text: String) -> String {
-        var cleaned = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: "\u{00A0}", with: " ")
-            .replacingOccurrences(of: "\u{200B}", with: "")
+        var cleaned = normalizedBaseText(text)
 
         cleaned = cleaned.replacingOccurrences(
             of: #"(?<=\p{L})-\n(?=\p{L})"#,
@@ -76,11 +258,7 @@ private enum TextNormalizer {
     }
 
     static func cleanedTranslation(_ text: String) -> String {
-        var cleaned = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: "\u{00A0}", with: " ")
-            .replacingOccurrences(of: "\u{200B}", with: "")
+        var cleaned = normalizedBaseText(text)
 
         cleaned = cleaned.replacingOccurrences(
             of: #"[ \t]+\n"#,
@@ -108,6 +286,40 @@ private enum TextNormalizer {
             options: .regularExpression
         )
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func cleanedDraftMessage(_ text: String) -> String {
+        var cleaned = normalizedBaseText(text)
+
+        cleaned = cleaned.replacingOccurrences(
+            of: #"[ \t]+\n"#,
+            with: "\n",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\n[ \t]+"#,
+            with: "\n",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"[ \t]{2,}"#,
+            with: " ",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\n{4,}"#,
+            with: "\n\n\n",
+            options: .regularExpression
+        )
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizedBaseText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\u{200B}", with: "")
     }
 }
 
@@ -276,9 +488,11 @@ private final class TranslationCache {
 }
 
 @main
-final class TranslaterApp: NSObject, NSApplicationDelegate {
+@MainActor
+final class YakuApp: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var mouseMonitor: Any?
+    private var lastLeftMouseDownLocation: NSPoint?
     private let selectionReader = SelectionReader()
     private let ollamaClient = OllamaClient(
         baseURL: URL(string: "http://127.0.0.1:11434")!,
@@ -288,7 +502,14 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
     private var translateButtonController: FloatingTranslateButtonController?
     private var translationPanelController: TranslationPanelController?
     private var translationPrefetch: TranslationPrefetch?
+    private var isScreenshotTranslationRunning = false
+    private var globalHotKeys: [GlobalHotKey] = []
     private lazy var translationCache = TranslationCache()
+    private lazy var bootstrap: OllamaBootstrap = OllamaBootstrap(
+        baseURL: ollamaClient.baseURL,
+        model: ollamaClient.model
+    )
+    private var onboardingWindowController: OnboardingWindowController?
     private var targetLanguage: TranslationLanguage {
         get {
             TranslationLanguage.language(
@@ -299,13 +520,23 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
             UserDefaults.standard.set(newValue.id, forKey: "targetLanguageID")
         }
     }
+    private var draftTargetLanguage: TranslationLanguage {
+        get {
+            TranslationLanguage.language(
+                id: UserDefaults.standard.string(forKey: "draftTargetLanguageID") ?? TranslationLanguage.defaultDraftLanguage.id
+            )
+        }
+        set {
+            UserDefaults.standard.set(newValue.id, forKey: "draftTargetLanguageID")
+        }
+    }
 
     private let prefetchDelayMilliseconds: UInt64 = 220
     private let prefetchMaxCharacterCount = 1_200
 
     static func main() {
         let app = NSApplication.shared
-        let delegate = TranslaterApp()
+        let delegate = YakuApp()
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
         app.run()
@@ -315,69 +546,232 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
         setupStatusItem()
         requestAccessibilityPermissionIfNeeded()
         startMouseMonitor()
+        setupGlobalHotKeys()
+        setupBootstrap()
+    }
+
+    private func setupGlobalHotKeys() {
+        let screenshotHotKey = GlobalHotKey(definition: .screenshotArea) { [weak self] in
+            self?.startScreenshotTranslation()
+        }
+        let screenshotFnHotKey = GlobalHotKey(definition: .screenshotAreaFn) { [weak self] in
+            self?.startScreenshotTranslation()
+        }
+        let translateSelectionHotKey = GlobalHotKey(definition: .translateSelection) { [weak self] in
+            self?.startSelectedTextTranslationForReplacement()
+        }
+        let translateSelectionFnHotKey = GlobalHotKey(definition: .translateSelectionFn) { [weak self] in
+            self?.startSelectedTextTranslationForReplacement()
+        }
+        globalHotKeys = [
+            screenshotHotKey,
+            screenshotFnHotKey,
+            translateSelectionHotKey,
+            translateSelectionFnHotKey
+        ]
+        globalHotKeys.forEach { $0.register() }
+    }
+
+    private func setupBootstrap() {
+        bootstrap.onChange = { [weak self] state in
+            self?.handleBootstrapStateChange(state)
+        }
+        bootstrap.refresh()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard let self else { return }
+            if !self.bootstrap.state.isReady {
+                self.presentOnboardingWindow()
+            }
+        }
+    }
+
+    @MainActor
+    private func handleBootstrapStateChange(_ state: BootstrapState) {
+        updateMenuState()
+    }
+
+    @MainActor
+    private func presentOnboardingWindow() {
+        if let onboardingWindowController {
+            onboardingWindowController.presentAndRefresh()
+            return
+        }
+        let controller = OnboardingWindowController(bootstrap: bootstrap) { [weak self] in
+            self?.onboardingWindowController = nil
+        }
+        onboardingWindowController = controller
+        controller.presentAndRefresh()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         if let mouseMonitor {
             NSEvent.removeMonitor(mouseMonitor)
         }
+        globalHotKeys.forEach { $0.unregister() }
     }
 
     private func setupStatusItem() {
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "あ"
-        statusItem.button?.toolTip = "Translater"
+        statusItem.length = 24
+        if let button = statusItem.button {
+            button.title = ""
+            button.image = makeStatusBarIcon()
+            button.imagePosition = .imageOnly
+            button.imageScaling = .scaleNone
+            button.toolTip = "Yaku"
+        }
 
         let menu = NSMenu()
         menu.delegate = self
 
-        let status = NSMenuItem(title: "Translater", action: nil, keyEquivalent: "")
-        status.tag = MenuItemTag.appStatus.rawValue
-        status.isEnabled = false
-        menu.addItem(status)
-
-        let accessibilityStatus = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        accessibilityStatus.tag = MenuItemTag.accessibilityStatus.rawValue
-        accessibilityStatus.isEnabled = false
-        menu.addItem(accessibilityStatus)
-
-        menu.addItem(NSMenuItem.separator())
-
-        let accessibilitySettingsItem = NSMenuItem(
-            title: "Open Accessibility Settings",
+        menu.addItem(makeMenuItem(
+            title: "Accessibility permission required",
+            tag: .permissionNotice,
+            symbolName: "exclamationmark.triangle",
+            isEnabled: false
+        ))
+        menu.addItem(makeMenuItem(
+            title: "Open Accessibility Settings...",
+            tag: .accessibilitySettings,
+            symbolName: "gearshape",
             action: #selector(openAccessibilitySettings),
             keyEquivalent: ""
-        )
-        accessibilitySettingsItem.tag = MenuItemTag.accessibilitySettings.rawValue
-        accessibilitySettingsItem.target = self
-        menu.addItem(accessibilitySettingsItem)
+        ))
 
-        let refreshItem = NSMenuItem(
-            title: "Refresh Accessibility Status",
-            action: #selector(refreshAccessibilityStatus),
-            keyEquivalent: "r"
-        )
-        refreshItem.tag = MenuItemTag.refreshAccessibility.rawValue
-        refreshItem.target = self
-        menu.addItem(refreshItem)
+        let permissionSeparator = NSMenuItem.separator()
+        permissionSeparator.tag = MenuItemTag.permissionSeparator.rawValue
+        menu.addItem(permissionSeparator)
+
+        menu.addItem(makeMenuItem(
+            title: "Ollama setup needed",
+            tag: .bootstrapNotice,
+            symbolName: "bolt.badge.clock",
+            isEnabled: false
+        ))
+        menu.addItem(makeMenuItem(
+            title: "Open Setup...",
+            tag: .bootstrapAction,
+            symbolName: "wrench.and.screwdriver",
+            action: #selector(openOnboardingWindow),
+            keyEquivalent: ""
+        ))
+
+        let bootstrapSeparator = NSMenuItem.separator()
+        bootstrapSeparator.tag = MenuItemTag.bootstrapSeparator.rawValue
+        menu.addItem(bootstrapSeparator)
+
+        menu.addItem(makeMenuItem(
+            title: "Translate My Text...",
+            tag: .translateSelection,
+            symbolName: "text.insert",
+            action: #selector(translateSelectedTextFromMenu),
+            keyEquivalent: "t",
+            keyEquivalentModifierMask: [.control, .command]
+        ))
+
+        menu.addItem(makeMenuItem(
+            title: "Translate Screen Area...",
+            tag: .screenshotArea,
+            symbolName: "viewfinder",
+            action: #selector(translateScreenshotAreaFromMenu),
+            keyEquivalent: "s",
+            keyEquivalentModifierMask: [.control, .command]
+        ))
 
         menu.addItem(NSMenuItem.separator())
 
-        let targetLanguageItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        targetLanguageItem.tag = MenuItemTag.targetLanguage.rawValue
-        targetLanguageItem.submenu = makeTargetLanguageMenu()
-        menu.addItem(targetLanguageItem)
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .targetLanguage,
+            symbolName: "globe",
+            submenu: makeTargetLanguageMenu()
+        ))
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .draftTargetLanguage,
+            symbolName: "text.bubble",
+            submenu: makeDraftTargetLanguageMenu()
+        ))
 
         menu.addItem(NSMenuItem.separator())
-
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
-        quitItem.tag = MenuItemTag.quit.rawValue
-        quitItem.target = self
-        menu.addItem(quitItem)
+        menu.addItem(makeMenuItem(
+            title: "Quit",
+            tag: .quit,
+            symbolName: "power",
+            action: #selector(quit),
+            keyEquivalent: "q"
+        ))
 
         statusItem.menu = menu
         self.statusItem = statusItem
         updateMenuState()
+    }
+
+    private func makeMenuItem(
+        title: String,
+        tag: MenuItemTag,
+        symbolName: String? = nil,
+        action: Selector? = nil,
+        keyEquivalent: String = "",
+        keyEquivalentModifierMask: NSEvent.ModifierFlags = .command,
+        isEnabled: Bool = true,
+        submenu: NSMenu? = nil
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
+        item.tag = tag.rawValue
+        item.isEnabled = isEnabled
+        item.keyEquivalentModifierMask = keyEquivalentModifierMask
+        item.submenu = submenu
+        if action != nil {
+            item.target = self
+        }
+        if let symbolName {
+            item.image = menuSymbol(symbolName)
+        }
+        return item
+    }
+
+    private func menuSymbol(_ name: String) -> NSImage? {
+        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil) else {
+            return nil
+        }
+
+        image.isTemplate = true
+        return image
+    }
+
+    private func makeStatusBarIcon() -> NSImage {
+        let size = NSSize(width: 22, height: 22)
+        let image = NSImage(size: size)
+        image.lockFocus()
+
+        let backgroundDiameter: CGFloat = 18.5
+        let backgroundOrigin = (size.width - backgroundDiameter) / 2
+        let backgroundRect = NSRect(
+            x: backgroundOrigin,
+            y: backgroundOrigin,
+            width: backgroundDiameter,
+            height: backgroundDiameter
+        )
+        NSColor(calibratedWhite: 0.12, alpha: 0.92).setFill()
+        NSBezierPath(ovalIn: backgroundRect).fill()
+
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13.5, weight: .semibold),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: paragraphStyle
+        ]
+        ("あ" as NSString).draw(
+            in: NSRect(x: 0, y: 3.25, width: size.width, height: 16),
+            withAttributes: attributes
+        )
+
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
     }
 
     private func makeTargetLanguageMenu() -> NSMenu {
@@ -395,9 +789,30 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
         return menu
     }
 
+    private func makeDraftTargetLanguageMenu() -> NSMenu {
+        let menu = NSMenu()
+        for language in TranslationLanguage.all {
+            let item = NSMenuItem(
+                title: language.displayName,
+                action: #selector(selectDraftTargetLanguage(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = language.id
+            menu.addItem(item)
+        }
+        return menu
+    }
+
     private func startMouseMonitor() {
-        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp, .rightMouseUp]) { [weak self] event in
-            self?.handleMouseUp(event)
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .rightMouseUp]) { [weak self] event in
+            guard let self else { return }
+            if event.type == .leftMouseDown {
+                self.lastLeftMouseDownLocation = NSEvent.mouseLocation
+                return
+            }
+
+            self.handleMouseUp(event)
         }
     }
 
@@ -415,24 +830,47 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
             guard let self else { return }
+            let allowClipboardFallback = self.shouldAttemptClipboardSelectionFallback(for: event)
 
-            guard let selection = self.selectionReader.readSelectedText(), !selection.text.isEmpty else {
-                self.translateButtonController?.close()
-                self.translateButtonController = nil
-                self.cancelPrefetch()
-                return
+            self.selectionReader.readSelectedText(allowClipboardFallback: allowClipboardFallback) { [weak self] selectedText in
+                guard let self else { return }
+
+                guard let selectedText, !selectedText.isEmpty else {
+                    self.translateButtonController?.close()
+                    self.translateButtonController = nil
+                    self.cancelPrefetch()
+                    return
+                }
+
+                let cleanedSelection = TextNormalizer.cleanedSelection(selectedText)
+                guard !cleanedSelection.isEmpty else {
+                    self.translateButtonController?.close()
+                    self.translateButtonController = nil
+                    self.cancelPrefetch()
+                    return
+                }
+
+                self.showTranslateButton(for: cleanedSelection, near: NSEvent.mouseLocation)
             }
-
-            let cleanedSelection = TextNormalizer.cleanedSelection(selection.text)
-            guard !cleanedSelection.isEmpty else {
-                self.translateButtonController?.close()
-                self.translateButtonController = nil
-                self.cancelPrefetch()
-                return
-            }
-
-            self.showTranslateButton(for: cleanedSelection, near: NSEvent.mouseLocation)
         }
+    }
+
+    private func shouldAttemptClipboardSelectionFallback(for event: NSEvent) -> Bool {
+        guard event.type == .leftMouseUp else {
+            return false
+        }
+
+        if event.clickCount >= 2 {
+            return true
+        }
+
+        guard let downLocation = lastLeftMouseDownLocation else {
+            return false
+        }
+
+        let upLocation = NSEvent.mouseLocation
+        let distance = hypot(upLocation.x - downLocation.x, upLocation.y - downLocation.y)
+        return distance >= 5
     }
 
     @MainActor
@@ -460,23 +898,32 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    private func translate(_ text: String, near screenPoint: NSPoint) {
-        let language = targetLanguage
+    private func translate(
+        _ text: String,
+        near screenPoint: NSPoint,
+        targetLanguage explicitTargetLanguage: TranslationLanguage? = nil,
+        mode: TranslationMode = .selection,
+        useCache: Bool = true,
+        onReplace: ((String) -> Void)? = nil
+    ) {
+        let language = explicitTargetLanguage ?? targetLanguage
         let controller = TranslationPanelController(
             screenPoint: screenPoint,
             sourceText: text,
-            targetLanguage: language
+            targetLanguage: language,
+            onReplace: onReplace
         )
         translationPanelController?.close()
         translationPanelController = controller
         controller.showLoading()
 
-        if let cachedTranslation = translationCache.translation(for: text, targetLanguage: language) {
+        if useCache, let cachedTranslation = translationCache.translation(for: text, targetLanguage: language) {
             controller.showTranslation(cachedTranslation)
             return
         }
 
-        if let translationPrefetch,
+        if useCache,
+           let translationPrefetch,
            translationPrefetch.text == text,
            translationPrefetch.targetLanguage == language {
             translationPrefetch.subscribe { partialTranslation in
@@ -490,20 +937,35 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
 
         Task {
             do {
-                let translated = try await ollamaClient.translate(text, to: language) { partialTranslation in
+                let translated = try await ollamaClient.translate(text, to: language, mode: mode) { partialTranslation in
                     Task { @MainActor in
                         controller.showTranslation(partialTranslation)
                     }
                 }
                 await MainActor.run {
-                    self.translationCache.store(translated, for: text, targetLanguage: language)
+                    if useCache {
+                        self.translationCache.store(translated, for: text, targetLanguage: language)
+                    }
                     controller.showTranslation(translated)
                 }
             } catch {
                 await MainActor.run {
                     controller.showError(error.localizedDescription)
+                    self.handleTranslationFailure(error)
                 }
             }
+        }
+    }
+
+    @MainActor
+    private func handleTranslationFailure(_ error: Error) {
+        guard let translationError = error as? TranslationError else { return }
+        switch translationError {
+        case .serverUnavailable, .modelMissing, .signInRequired:
+            bootstrap.refresh()
+            presentOnboardingWindow()
+        case .ollama, .emptyResponse:
+            break
         }
     }
 
@@ -552,18 +1014,40 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
         }
 
         let trusted = accessibilityIsTrusted()
-        menu.item(withTag: MenuItemTag.appStatus.rawValue)?.title = trusted
-            ? "Translater Ready"
-            : "Translater Needs Permission"
-        menu.item(withTag: MenuItemTag.accessibilityStatus.rawValue)?.title = trusted
-            ? "Accessibility: Enabled"
-            : "Enable Accessibility, then quit and reopen"
-        menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.title = "Translate To: \(targetLanguage.displayName)"
+        menu.item(withTag: MenuItemTag.permissionNotice.rawValue)?.isHidden = trusted
+        menu.item(withTag: MenuItemTag.accessibilitySettings.rawValue)?.isHidden = trusted
+        menu.item(withTag: MenuItemTag.permissionSeparator.rawValue)?.isHidden = trusted
+
+        let bootstrapReady = bootstrap.state.isReady
+        menu.item(withTag: MenuItemTag.bootstrapNotice.rawValue)?.isHidden = bootstrapReady
+        menu.item(withTag: MenuItemTag.bootstrapAction.rawValue)?.title = bootstrapReady
+            ? "Ollama Setup..."
+            : "Open Setup..."
+        menu.item(withTag: MenuItemTag.bootstrapSeparator.rawValue)?.isHidden = bootstrapReady
+        menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.title = "Read translations: \(targetLanguage.displayName)"
+        menu.item(withTag: MenuItemTag.draftTargetLanguage.rawValue)?.title = "Write messages in \(draftTargetLanguage.displayName)"
+        if let translateSelectionItem = menu.item(withTag: MenuItemTag.translateSelection.rawValue) {
+            translateSelectionItem.title = "Translate My Text to \(draftTargetLanguage.displayName)..."
+            translateSelectionItem.isEnabled = trusted
+        }
+        if let screenshotItem = menu.item(withTag: MenuItemTag.screenshotArea.rawValue) {
+            screenshotItem.title = isScreenshotTranslationRunning
+                ? "Selecting Screen Area..."
+                : "Translate Screen Area..."
+            screenshotItem.isEnabled = !isScreenshotTranslationRunning
+        }
 
         if let languageMenu = menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.submenu {
             for item in languageMenu.items {
                 guard let languageID = item.representedObject as? String else { continue }
                 item.state = languageID == targetLanguage.id ? .on : .off
+            }
+        }
+
+        if let draftLanguageMenu = menu.item(withTag: MenuItemTag.draftTargetLanguage.rawValue)?.submenu {
+            for item in draftLanguageMenu.items {
+                guard let languageID = item.representedObject as? String else { continue }
+                item.state = languageID == draftTargetLanguage.id ? .on : .off
             }
         }
     }
@@ -573,8 +1057,144 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(url)
     }
 
-    @objc private func refreshAccessibilityStatus() {
+    @MainActor
+    @objc private func openOnboardingWindow() {
+        presentOnboardingWindow()
+    }
+
+    @MainActor
+    @objc private func translateScreenshotAreaFromMenu() {
+        startScreenshotTranslation()
+    }
+
+    @MainActor
+    @objc private func translateSelectedTextFromMenu() {
+        startSelectedTextTranslationForReplacement()
+    }
+
+    @MainActor
+    private func startSelectedTextTranslationForReplacement() {
+        guard accessibilityIsTrusted() else {
+            requestAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        translateButtonController?.close()
+        translateButtonController = nil
+        cancelPrefetch()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+
+            self.selectionReader.readSelectedText(allowClipboardFallback: true) { [weak self] selectedText in
+                guard let self else { return }
+
+                guard let selectedText else {
+                    self.presentSelectionTranslationError("Select text first, then press \(GlobalHotKeyDefinition.translateSelectionDisplayString).")
+                    return
+                }
+
+                let cleanedDraft = TextNormalizer.cleanedDraftMessage(selectedText)
+                guard !cleanedDraft.isEmpty else {
+                    self.presentSelectionTranslationError("Select text first, then press \(GlobalHotKeyDefinition.translateSelectionDisplayString).")
+                    return
+                }
+
+                let language = self.draftTargetLanguage
+                self.translate(
+                    cleanedDraft,
+                    near: NSEvent.mouseLocation,
+                    targetLanguage: language,
+                    mode: .draftMessage,
+                    useCache: false
+                ) { [weak self] translation in
+                    self?.replaceCurrentSelection(with: translation)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func replaceCurrentSelection(with translation: String) {
+        let cleanTranslation = TextNormalizer.cleanedTranslation(translation)
+        guard !cleanTranslation.isEmpty else {
+            return
+        }
+
+        PasteboardTextInserter.replaceCurrentSelection(with: cleanTranslation)
+        translationPanelController?.close()
+        translationPanelController = nil
+    }
+
+    @MainActor
+    private func startScreenshotTranslation() {
+        guard !isScreenshotTranslationRunning else {
+            return
+        }
+
+        isScreenshotTranslationRunning = true
         updateMenuState()
+        translateButtonController?.close()
+        translateButtonController = nil
+        translationPanelController?.close()
+        translationPanelController = nil
+        cancelPrefetch()
+
+        Task { [weak self] in
+            do {
+                let screenshotURL = try await ScreenshotCapture.captureInteractiveArea()
+                defer {
+                    try? FileManager.default.removeItem(at: screenshotURL)
+                }
+
+                let recognizedText = try await ImageTextRecognizer.recognizeText(in: screenshotURL)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isScreenshotTranslationRunning = false
+                    self.updateMenuState()
+
+                    let sourceText = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !TextNormalizer.cleanedSelection(sourceText).isEmpty else {
+                        self.presentScreenshotTranslationError(ScreenshotTranslationError.noTextRecognized)
+                        return
+                    }
+
+                    self.translate(sourceText, near: NSEvent.mouseLocation)
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isScreenshotTranslationRunning = false
+                    self.updateMenuState()
+                    guard !ScreenshotTranslationError.isCancellation(error) else {
+                        return
+                    }
+                    self.presentScreenshotTranslationError(error)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func presentScreenshotTranslationError(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Screenshot translation failed"
+        alert.informativeText = error.localizedDescription
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    @MainActor
+    private func presentSelectionTranslationError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Selection translation failed"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     @MainActor
@@ -590,17 +1210,42 @@ final class TranslaterApp: NSObject, NSApplicationDelegate {
         updateMenuState()
     }
 
+    @MainActor
+    @objc private func selectDraftTargetLanguage(_ sender: NSMenuItem) {
+        guard let languageID = sender.representedObject as? String else {
+            return
+        }
+
+        draftTargetLanguage = TranslationLanguage.language(id: languageID)
+        translationPanelController?.close()
+        translationPanelController = nil
+        updateMenuState()
+    }
+
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
     }
 }
 
-struct SelectedText {
-    let text: String
-}
-
 final class SelectionReader {
-    func readSelectedText() -> SelectedText? {
+    func readSelectedText(
+        allowClipboardFallback: Bool,
+        completion: @escaping (String?) -> Void
+    ) {
+        if let selectedText = readSelectedText() {
+            completion(selectedText)
+            return
+        }
+
+        guard allowClipboardFallback else {
+            completion(nil)
+            return
+        }
+
+        ClipboardSelectionReader.readSelectedText(completion: completion)
+    }
+
+    func readSelectedText() -> String? {
         let systemWideElement = AXUIElementCreateSystemWide()
         var focusedValue: CFTypeRef?
         let focusedResult = AXUIElementCopyAttributeValue(
@@ -625,7 +1270,7 @@ final class SelectionReader {
             return nil
         }
 
-        return SelectedText(text: trimmed)
+        return trimmed
     }
 
     private func selectedText(from element: AXUIElement) -> String? {
@@ -699,6 +1344,250 @@ final class SelectionReader {
     }
 }
 
+enum ClipboardSelectionReader {
+    private static let markerPrefix = "YakuSelectionProbe:"
+
+    static func readSelectedText(completion: @escaping (String?) -> Void) {
+        let pasteboard = NSPasteboard.general
+        let snapshot = PasteboardSnapshot.capture(from: pasteboard)
+        let marker = "\(markerPrefix)\(UUID().uuidString)"
+
+        pasteboard.clearContents()
+        pasteboard.setString(marker, forType: .string)
+
+        postCommandC()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+            let copiedText = pasteboard.string(forType: .string)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            snapshot.restore(to: pasteboard)
+
+            guard let copiedText,
+                  !copiedText.isEmpty,
+                  copiedText != marker
+            else {
+                completion(nil)
+                return
+            }
+
+            completion(copiedText)
+        }
+    }
+
+    private static func postCommandC() {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: true)
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: false)
+        keyDown?.flags = .maskCommand
+        keyUp?.flags = .maskCommand
+        keyDown?.post(tap: .cghidEventTap)
+        keyUp?.post(tap: .cghidEventTap)
+    }
+}
+
+private struct PasteboardSnapshot {
+    private let items: [[NSPasteboard.PasteboardType: Data]]
+
+    static func capture(from pasteboard: NSPasteboard) -> PasteboardSnapshot {
+        let capturedItems = (pasteboard.pasteboardItems ?? []).map { item in
+            var capturedTypes: [NSPasteboard.PasteboardType: Data] = [:]
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    capturedTypes[type] = data
+                }
+            }
+            return capturedTypes
+        }
+
+        return PasteboardSnapshot(items: capturedItems)
+    }
+
+    func restore(to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        let restoredItems = items.map { capturedTypes in
+            let item = NSPasteboardItem()
+            for (type, data) in capturedTypes {
+                item.setData(data, forType: type)
+            }
+            return item
+        }
+
+        if !restoredItems.isEmpty {
+            pasteboard.writeObjects(restoredItems)
+        }
+    }
+}
+
+enum PasteboardTextInserter {
+    static func replaceCurrentSelection(with text: String) {
+        let pasteboard = NSPasteboard.general
+        let snapshot = PasteboardSnapshot.capture(from: pasteboard)
+
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        let replacementChangeCount = pasteboard.changeCount
+
+        postCommandV()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+            guard pasteboard.changeCount == replacementChangeCount else {
+                return
+            }
+            snapshot.restore(to: pasteboard)
+        }
+    }
+
+    private static func postCommandV() {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true)
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false)
+        keyDown?.flags = .maskCommand
+        keyUp?.flags = .maskCommand
+        keyDown?.post(tap: .cghidEventTap)
+        keyUp?.post(tap: .cghidEventTap)
+    }
+}
+
+enum ScreenshotTranslationError: LocalizedError {
+    case captureCancelled
+    case captureFailed(Int32)
+    case noTextRecognized
+
+    var errorDescription: String? {
+        switch self {
+        case .captureCancelled:
+            "Screenshot selection was cancelled."
+        case .captureFailed(let status):
+            "Screenshot capture failed with exit code \(status)."
+        case .noTextRecognized:
+            "No readable text was found in the selected area."
+        }
+    }
+
+    static func isCancellation(_ error: Error) -> Bool {
+        guard let screenshotError = error as? ScreenshotTranslationError else {
+            return false
+        }
+
+        if case .captureCancelled = screenshotError {
+            return true
+        }
+        return false
+    }
+}
+
+enum ScreenshotCapture {
+    static func captureInteractiveArea() async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let outputURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("yaku-screenshot-\(UUID().uuidString)")
+                    .appendingPathExtension("png")
+
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                process.arguments = ["-i", "-x", outputURL.path]
+
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+
+                    let fileExists = FileManager.default.fileExists(atPath: outputURL.path)
+                    if process.terminationStatus != 0 {
+                        if !fileExists {
+                            continuation.resume(throwing: ScreenshotTranslationError.captureCancelled)
+                        } else {
+                            continuation.resume(throwing: ScreenshotTranslationError.captureFailed(process.terminationStatus))
+                        }
+                        return
+                    }
+
+                    guard fileExists,
+                          let attributes = try? FileManager.default.attributesOfItem(atPath: outputURL.path),
+                          let fileSize = attributes[.size] as? NSNumber,
+                          fileSize.intValue > 0
+                    else {
+                        continuation.resume(throwing: ScreenshotTranslationError.captureCancelled)
+                        return
+                    }
+
+                    continuation.resume(returning: outputURL)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+}
+
+enum ImageTextRecognizer {
+    private struct RecognizedLine {
+        let text: String
+        let boundingBox: CGRect
+    }
+
+    static func recognizeText(in imageURL: URL) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let request = VNRecognizeTextRequest()
+                    request.recognitionLevel = .accurate
+                    request.usesLanguageCorrection = true
+                    request.automaticallyDetectsLanguage = true
+
+                    let supportedLanguages = (try? request.supportedRecognitionLanguages()) ?? []
+                    if !supportedLanguages.isEmpty {
+                        request.recognitionLanguages = supportedLanguages
+                    }
+
+                    let handler = VNImageRequestHandler(url: imageURL, options: [:])
+                    try handler.perform([request])
+
+                    let lines = (request.results ?? []).compactMap { observation -> RecognizedLine? in
+                        guard let candidate = observation.topCandidates(1).first else {
+                            return nil
+                        }
+
+                        let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !text.isEmpty else {
+                            return nil
+                        }
+
+                        return RecognizedLine(text: text, boundingBox: observation.boundingBox)
+                    }
+
+                    let orderedLines = lines.sorted { lhs, rhs in
+                        let rowTolerance: CGFloat = 0.025
+                        let lhsMidY = lhs.boundingBox.midY
+                        let rhsMidY = rhs.boundingBox.midY
+
+                        if abs(lhsMidY - rhsMidY) <= rowTolerance {
+                            return lhs.boundingBox.minX < rhs.boundingBox.minX
+                        }
+
+                        return lhsMidY > rhsMidY
+                    }
+
+                    let recognizedText = orderedLines
+                        .map(\.text)
+                        .joined(separator: "\n")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                    guard !recognizedText.isEmpty else {
+                        continuation.resume(throwing: ScreenshotTranslationError.noTextRecognized)
+                        return
+                    }
+
+                    continuation.resume(returning: recognizedText)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+}
+
 final class FloatingTranslateButtonController {
     private let panel: NSPanel
     private let selectedText: String
@@ -708,10 +1597,15 @@ final class FloatingTranslateButtonController {
         self.selectedText = selectedText
         self.onTranslate = onTranslate
 
-        let size = NSSize(width: 28, height: 28)
-        let origin = NSPoint(x: screenPoint.x + 5, y: screenPoint.y - size.height - 5)
+        let buttonSize: CGFloat = 30
+        let shadowPadding: CGFloat = 15
+        let totalSize: CGFloat = buttonSize + shadowPadding * 2
+        let origin = NSPoint(
+            x: screenPoint.x + 5 - shadowPadding,
+            y: screenPoint.y - buttonSize - 5 - shadowPadding
+        )
         panel = NSPanel(
-            contentRect: NSRect(origin: origin, size: size),
+            contentRect: NSRect(origin: origin, size: NSSize(width: totalSize, height: totalSize)),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -721,13 +1615,18 @@ final class FloatingTranslateButtonController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.ignoresMouseEvents = false
-        panel.contentView = FloatingTranslateButtonView { [weak self] in
+
+        let container = NSView(frame: NSRect(origin: .zero, size: NSSize(width: totalSize, height: totalSize)))
+        let buttonView = FloatingTranslateButtonView { [weak self] in
             guard let self else { return }
             self.onTranslate(self.selectedText)
         }
+        buttonView.frame = NSRect(x: shadowPadding, y: shadowPadding, width: buttonSize, height: buttonSize)
+        container.addSubview(buttonView)
+        panel.contentView = container
     }
 
     func show() {
@@ -744,7 +1643,7 @@ final class FloatingTranslateButtonView: NSView {
 
     init(onClick: @escaping () -> Void) {
         self.onClick = onClick
-        super.init(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
+        super.init(frame: NSRect(x: 0, y: 0, width: 30, height: 30))
         wantsLayer = true
         buildUI()
     }
@@ -753,18 +1652,30 @@ final class FloatingTranslateButtonView: NSView {
         nil
     }
 
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        guard let layer = self.layer else { return }
+        layer.shadowColor = NSColor.black.cgColor
+        layer.shadowOpacity = 0.38
+        layer.shadowRadius = 8
+        layer.shadowOffset = CGSize(width: 0, height: -3)
+        layer.shadowPath = CGPath(ellipseIn: bounds, transform: nil)
+        layer.masksToBounds = false
+    }
+
     private func buildUI() {
         let glass = GlassHostView(
             frame: bounds,
-            cornerRadius: 9,
-            tintColor: NSColor(calibratedRed: 0.08, green: 0.15, blue: 0.28, alpha: 0.52),
+            cornerRadius: bounds.width / 2,
+            tintColor: NSColor(srgbRed: 0.06, green: 0.12, blue: 0.22, alpha: 0.55),
             style: .regular
         )
         glass.autoresizingMask = [.width, .height]
         addSubview(glass)
 
         let button = NSButton(title: "あ", target: self, action: #selector(buttonTapped))
-        button.frame = glass.contentView.bounds
+        button.frame = bounds
         button.autoresizingMask = [.width, .height]
         button.isBordered = false
         button.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
@@ -787,7 +1698,12 @@ final class TranslationPanelController {
     var panelFrame: NSRect { panel.frame }
     var isVisible: Bool { panel.isVisible }
 
-    init(screenPoint: NSPoint, sourceText: String, targetLanguage: TranslationLanguage) {
+    init(
+        screenPoint: NSPoint,
+        sourceText: String,
+        targetLanguage: TranslationLanguage,
+        onReplace: ((String) -> Void)? = nil
+    ) {
         let visibleFrame = NSScreen.visibleFrame(containing: screenPoint)
         let panelHeight = min(
             TranslationContentView.preferredHeight(sourceText: sourceText, resultText: "Translating..."),
@@ -799,7 +1715,11 @@ final class TranslationPanelController {
             y: max(screenPoint.y - panelSize.height - 10, visibleFrame.minY + 16)
         )
 
-        contentView = TranslationContentView(sourceText: sourceText, targetLanguage: targetLanguage)
+        contentView = TranslationContentView(
+            sourceText: sourceText,
+            targetLanguage: targetLanguage,
+            onReplace: onReplace
+        )
         panel = NSPanel(
             contentRect: NSRect(origin: origin, size: panelSize),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -994,9 +1914,10 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     private static let sectionGap: CGFloat = 14
     private static let buttonSize: CGFloat = 18
     private static let sourceFontSize: CGFloat = 15
-    private static let resultFontSize: CGFloat = 17
+    private static let resultFontSize: CGFloat = 15
     private static let boxInsetX: CGFloat = 14
     private static let boxInsetY: CGFloat = 10
+    private static let scrollableTextBottomPadding: CGFloat = 18
 
     var onClose: (() -> Void)?
 
@@ -1014,16 +1935,19 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     private var resultBox: GlassHostView?
     private var closeButton: NSButton?
     private var copyButton: NSButton?
+    private var replaceButton: NSButton?
     private var selectionCopyBubble: GlassHostView?
     private var selectionCopyButton: NSButton?
     private var selectedSnippetToCopy: String?
     private weak var selectedTextView: NSTextView?
     private var shouldScrollSourceToTop = true
     private var shouldScrollResultToTop = true
+    private let onReplace: ((String) -> Void)?
 
-    init(sourceText: String, targetLanguage: TranslationLanguage) {
+    init(sourceText: String, targetLanguage: TranslationLanguage, onReplace: ((String) -> Void)? = nil) {
         self.sourceText = sourceText
         self.targetLanguage = targetLanguage
+        self.onReplace = onReplace
         super.init(frame: NSRect(
             x: 0,
             y: 0,
@@ -1048,7 +1972,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         )
         let resultBoxHeight = boxHeight(
             for: resultText,
-            font: NSFont.systemFont(ofSize: resultFontSize, weight: .medium),
+            font: NSFont.systemFont(ofSize: resultFontSize, weight: .regular),
             width: contentWidth - boxInsetX * 2,
             minimum: minimumResultBoxHeight,
             maximum: maximumResultBoxHeight
@@ -1079,17 +2003,22 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     ) {
         scrollView.frame = scrollFrame
 
-        let fitsInScrollFrame = rawTextHeight + 4 <= scrollFrame.height
+        let minimumVerticalTextPadding: CGFloat = 4
+        let fitsInScrollFrame = rawTextHeight + minimumVerticalTextPadding * 2 <= scrollFrame.height
         let verticalInset: CGFloat
         let textViewHeight: CGFloat
         if fitsInScrollFrame {
             verticalInset = floor(max(2, (scrollFrame.height - rawTextHeight) / 2))
             textViewHeight = scrollFrame.height
         } else {
-            verticalInset = 2
-            textViewHeight = max(scrollFrame.height, rawTextHeight + 8)
+            verticalInset = minimumVerticalTextPadding
+            textViewHeight = max(
+                scrollFrame.height + 1,
+                rawTextHeight + verticalInset * 2 + scrollableTextBottomPadding
+            )
         }
 
+        let scrollerInset: CGFloat = 8
         textView.textContainerInset = NSSize(width: 0, height: verticalInset)
         textView.frame = NSRect(
             origin: .zero,
@@ -1097,7 +2026,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         )
         textView.minSize = NSSize(width: 0, height: scrollFrame.height)
         textView.textContainer?.containerSize = NSSize(
-            width: scrollFrame.width,
+            width: max(0, scrollFrame.width - scrollerInset),
             height: CGFloat.greatestFiniteMagnitude
         )
         scrollView.hasVerticalScroller = !fitsInScrollFrame
@@ -1107,15 +2036,18 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         let cleanText = text.isEmpty ? " " : text
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
-        let rect = (cleanText as NSString).boundingRect(
-            with: NSSize(width: width, height: CGFloat.greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [
-                .font: font,
-                .paragraphStyle: paragraph
-            ]
-        )
-        return ceil(rect.height)
+        let storage = NSTextStorage(string: cleanText, attributes: [
+            .font: font,
+            .paragraphStyle: paragraph
+        ])
+        let layoutManager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: width, height: CGFloat.greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        container.widthTracksTextView = false
+        layoutManager.addTextContainer(container)
+        storage.addLayoutManager(layoutManager)
+        layoutManager.ensureLayout(for: container)
+        return ceil(layoutManager.usedRect(for: container).height)
     }
 
     private func buildUI() {
@@ -1142,19 +2074,10 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
             to: content
         )
 
-        let sourceBox = GlassHostView(
-            frame: .zero,
-            cornerRadius: 12,
-            tintColor: NSColor(calibratedWhite: 0.0, alpha: 0.22),
-            style: .clear
-        )
-        content.addSubview(sourceBox)
+        let sourceBox = makeTextBox(in: content)
         self.sourceBox = sourceBox
 
-        sourceScrollView.drawsBackground = false
-        sourceScrollView.hasVerticalScroller = true
-        sourceScrollView.autohidesScrollers = true
-        sourceScrollView.borderType = .noBorder
+        configureScrollView(sourceScrollView)
         configureTextView(
             sourceTextView,
             text: sourceText,
@@ -1175,6 +2098,20 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
             action: #selector(copyResult),
             to: content
         )
+
+        if onReplace != nil {
+            let replaceButton = makeIconButton(
+                symbolName: "text.insert",
+                accessibilityDescription: "Replace selected text",
+                pointSize: 12,
+                target: self,
+                action: #selector(replaceSelectedText),
+                to: content
+            )
+            replaceButton.isEnabled = false
+            replaceButton.contentTintColor = NSColor(calibratedWhite: 1.0, alpha: 0.42)
+            self.replaceButton = replaceButton
+        }
 
         let copyBubble = GlassHostView(
             frame: NSRect(x: 0, y: 0, width: 34, height: 34),
@@ -1199,24 +2136,14 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         selectionCopyButton?.contentTintColor = NSColor(calibratedWhite: 1.0, alpha: 0.78)
         selectionCopyButton?.sendAction(on: [.leftMouseDown])
 
-        let resultBox = GlassHostView(
-            frame: .zero,
-            cornerRadius: 12,
-            tintColor: NSColor(calibratedWhite: 0.0, alpha: 0.22),
-            style: .clear
-        )
-        content.addSubview(resultBox)
+        let resultBox = makeTextBox(in: content)
         self.resultBox = resultBox
 
-        resultScrollView.drawsBackground = false
-        resultScrollView.hasVerticalScroller = true
-        resultScrollView.autohidesScrollers = true
-        resultScrollView.borderType = .noBorder
-
+        configureScrollView(resultScrollView)
         configureTextView(
             resultTextView,
             text: resultText,
-            font: NSFont.systemFont(ofSize: Self.resultFontSize, weight: .medium),
+            font: NSFont.systemFont(ofSize: Self.resultFontSize, weight: .regular),
             color: .white
         )
         resultScrollView.documentView = resultTextView
@@ -1227,6 +2154,26 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         }
 
         setResult(resultText)
+    }
+
+    private func makeTextBox(in parent: NSView) -> GlassHostView {
+        let box = GlassHostView(
+            frame: .zero,
+            cornerRadius: 12,
+            tintColor: NSColor(calibratedWhite: 0.0, alpha: 0.22),
+            style: .clear
+        )
+        parent.addSubview(box)
+        return box
+    }
+
+    private func configureScrollView(_ scrollView: NSScrollView) {
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.verticalScroller?.knobStyle = .light
+        scrollView.borderType = .noBorder
     }
 
     private func configureTextView(_ textView: NSTextView, text: String, font: NSFont, color: NSColor) {
@@ -1242,6 +2189,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 0
         textView.textContainerInset = NSSize(width: 0, height: 2)
     }
 
@@ -1346,14 +2294,23 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         }
 
         y -= Self.sectionGap + Self.labelHeight
+        let targetActionButtonCount = replaceButton == nil ? 1 : 2
+        let targetActionWidth = CGFloat(targetActionButtonCount) * Self.buttonSize
+            + CGFloat(max(0, targetActionButtonCount - 1)) * 8
         targetTitleLabel.frame = NSRect(
             x: Self.panelPaddingX,
             y: y,
-            width: Self.contentWidth - Self.buttonSize - 8,
+            width: Self.contentWidth - targetActionWidth - 8,
             height: Self.labelHeight
         )
         copyButton?.frame = NSRect(
             x: bounds.width - Self.panelPaddingX - Self.buttonSize,
+            y: y + (Self.labelHeight - Self.buttonSize) / 2,
+            width: Self.buttonSize,
+            height: Self.buttonSize
+        )
+        replaceButton?.frame = NSRect(
+            x: bounds.width - Self.panelPaddingX - Self.buttonSize * 2 - 8,
             y: y + (Self.labelHeight - Self.buttonSize) / 2,
             width: Self.buttonSize,
             height: Self.buttonSize
@@ -1375,7 +2332,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         )
         let resultRawTextHeight = Self.textHeight(
             for: resultText,
-            font: NSFont.systemFont(ofSize: Self.resultFontSize, weight: .medium),
+            font: NSFont.systemFont(ofSize: Self.resultFontSize, weight: .regular),
             width: resultScrollFrame.width
         )
         Self.layoutScrollableTextView(
@@ -1406,7 +2363,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         if isStreamingAppend, let textStorage = resultTextView.textStorage {
             let suffix = String(cleanedText.dropFirst(resultText.count))
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: resultTextView.font ?? NSFont.systemFont(ofSize: Self.resultFontSize, weight: .medium),
+                .font: resultTextView.font ?? NSFont.systemFont(ofSize: Self.resultFontSize, weight: .regular),
                 .foregroundColor: resultTextView.textColor ?? NSColor.white
             ]
             textStorage.append(NSAttributedString(string: suffix, attributes: attrs))
@@ -1415,6 +2372,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         }
 
         resultText = cleanedText
+        updateReplaceButtonState()
         layoutForCurrentSize()
     }
 
@@ -1439,6 +2397,18 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     @objc private func copyResult() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(resultTextView.string, forType: .string)
+    }
+
+    @objc private func replaceSelectedText() {
+        let replacement = TextNormalizer.cleanedTranslation(resultTextView.string)
+        guard !replacement.isEmpty,
+              replacement != "Translating...",
+              !replacement.hasPrefix("Error:")
+        else {
+            return
+        }
+
+        onReplace?(replacement)
     }
 
     @objc private func copySelectedSnippet() {
@@ -1516,8 +2486,43 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         }
     }
 
+    private func updateReplaceButtonState() {
+        guard let replaceButton else {
+            return
+        }
+
+        let replacement = TextNormalizer.cleanedTranslation(resultTextView.string)
+        let canReplace = !replacement.isEmpty
+            && replacement != "Translating..."
+            && !replacement.hasPrefix("Error:")
+        replaceButton.isEnabled = canReplace
+        replaceButton.contentTintColor = NSColor(calibratedWhite: 1.0, alpha: canReplace ? 0.70 : 0.35)
+    }
+
     override func mouseDown(with event: NSEvent) {
         window?.performDrag(with: event)
+    }
+}
+
+enum TranslationMode {
+    case selection
+    case draftMessage
+
+    func systemPrompt(targetLanguage: TranslationLanguage) -> String {
+        switch self {
+        case .selection:
+            """
+            Translate the user's text into natural \(targetLanguage.promptName) by preserving the intended meaning, not by translating word-for-word. First infer what the text is trying to say in context, then express that idea as a fluent native \(targetLanguage.promptName) speaker would. Silently clean accidental line breaks, repeated spaces, OCR artifacts, and hyphenated line wraps. Preserve proper names, dates, numbers, URLs, and concrete facts. Prefer clear idiomatic wording over literal phrasing. Return only the \(targetLanguage.promptName) translation, with no commentary.
+            """
+        case .draftMessage:
+            """
+            Rewrite the user's drafted outgoing message as a natural message in \(targetLanguage.promptName). Do not translate mechanically. Infer the user's actual intent, emotion, and social situation, then say it the way a native \(targetLanguage.promptName) speaker would send it in a chat or message.
+
+            Preserve the original meaning, tone, politeness level, formatting, line breaks, emojis, URLs, usernames, product names, and concrete details. Adapt idioms, word order, honorifics, and phrasing so the result feels culturally and conversationally natural. If the draft is blunt, awkward, or phrased like a direct translation, smooth it while keeping the same intent. If the draft is a fragment, return a natural sendable fragment without inventing extra context. If the draft is already in \(targetLanguage.promptName), lightly polish it only when needed.
+
+            Return only the final \(targetLanguage.promptName) message, with no commentary, labels, alternatives, quotes, or explanations.
+            """
+        }
     }
 }
 
@@ -1525,8 +2530,19 @@ struct OllamaClient {
     let baseURL: URL
     let model: String
 
-    func translate(_ text: String, to targetLanguage: TranslationLanguage, onPartial: @escaping (String) -> Void) async throws -> String {
-        let sourceText = TextNormalizer.cleanedSelection(text)
+    func translate(
+        _ text: String,
+        to targetLanguage: TranslationLanguage,
+        mode: TranslationMode = .selection,
+        onPartial: @escaping (String) -> Void
+    ) async throws -> String {
+        let sourceText: String
+        switch mode {
+        case .selection:
+            sourceText = TextNormalizer.cleanedSelection(text)
+        case .draftMessage:
+            sourceText = TextNormalizer.cleanedDraftMessage(text)
+        }
         guard !sourceText.isEmpty else {
             throw TranslationError.emptyResponse
         }
@@ -1544,20 +2560,36 @@ struct OllamaClient {
             messages: [
                 ChatMessage(
                     role: "system",
-                    content: """
-                    Translate the user's text into natural \(targetLanguage.promptName). The source may come from a messy UI text selection, so silently clean accidental line breaks, repeated spaces, and hyphenated line wraps before translating. Preserve the intended meaning, proper names, dates, and paragraph-like readability. Return only the \(targetLanguage.promptName) translation, with no commentary.
-                    """
+                    content: mode.systemPrompt(targetLanguage: targetLanguage)
                 ),
                 ChatMessage(role: "user", content: sourceText)
             ]
         )
         request.httpBody = try JSONEncoder().encode(body)
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200..<300).contains(httpResponse.statusCode)
-        else {
-            throw TranslationError.ollama("HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (bytes, response) = try await URLSession.shared.bytes(for: request)
+        } catch let urlError as URLError where urlError.code == .cannotConnectToHost
+            || urlError.code == .cannotFindHost
+            || urlError.code == .networkConnectionLost
+            || urlError.code == .notConnectedToInternet {
+            throw TranslationError.serverUnavailable
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw TranslationError.ollama("invalid response")
+        }
+
+        if httpResponse.statusCode == 404 {
+            throw TranslationError.modelMissing(model)
+        }
+        if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+            throw TranslationError.signInRequired
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw TranslationError.ollama("HTTP \(httpResponse.statusCode)")
         }
 
         var translated = ""
@@ -1565,6 +2597,11 @@ struct OllamaClient {
         for try await line in bytes.lines {
             guard !line.isEmpty, let data = line.data(using: .utf8) else {
                 continue
+            }
+
+            if let streamError = try? decoder.decode(StreamError.self, from: data),
+               let message = streamError.error {
+                throw OllamaClient.classifyStreamError(message: message, model: model)
             }
 
             let decoded = try decoder.decode(ChatResponse.self, from: data)
@@ -1587,6 +2624,22 @@ struct OllamaClient {
 
         return finalTranslation
     }
+
+    static func classifyStreamError(message: String, model: String) -> TranslationError {
+        let lowered = message.lowercased()
+        if lowered.contains("not found") && (lowered.contains("model") || lowered.contains("manifest")) {
+            return .modelMissing(model)
+        }
+        if lowered.contains("unauthorized")
+            || lowered.contains("sign in")
+            || lowered.contains("not signed in")
+            || lowered.contains("signin")
+            || lowered.contains("authenticate")
+            || lowered.contains("forbidden") {
+            return .signInRequired
+        }
+        return .ollama(message)
+    }
 }
 
 struct ChatRequest: Encodable {
@@ -1606,9 +2659,16 @@ struct ChatResponse: Decodable {
     let done: Bool
 }
 
+struct StreamError: Decodable {
+    let error: String?
+}
+
 enum TranslationError: LocalizedError {
     case ollama(String)
     case emptyResponse
+    case serverUnavailable
+    case modelMissing(String)
+    case signInRequired
 
     var errorDescription: String? {
         switch self {
@@ -1616,11 +2676,17 @@ enum TranslationError: LocalizedError {
             "Ollama request failed: \(message)"
         case .emptyResponse:
             "Ollama returned an empty translation."
+        case .serverUnavailable:
+            "Ollama isn't running. Open Yaku setup to install or start it."
+        case .modelMissing(let name):
+            "Model \(name) isn't available. Open Yaku setup to pull it."
+        case .signInRequired:
+            "Ollama needs sign-in for the cloud model. Open Yaku setup to finish."
         }
     }
 }
 
-extension TranslaterApp: NSMenuDelegate {
+extension YakuApp: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         updateMenuState()
     }
