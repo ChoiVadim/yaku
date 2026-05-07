@@ -311,8 +311,8 @@ final class FloatingTranslateButtonController {
         self.selectedText = selectedText
         self.onTranslate = onTranslate
 
-        let size = NSSize(width: 42, height: 42)
-        let origin = NSPoint(x: screenPoint.x + 6, y: screenPoint.y - size.height - 6)
+        let size = NSSize(width: 28, height: 28)
+        let origin = NSPoint(x: screenPoint.x + 5, y: screenPoint.y - size.height - 5)
         panel = NSPanel(
             contentRect: NSRect(origin: origin, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -347,7 +347,7 @@ final class FloatingTranslateButtonView: NSView {
 
     init(onClick: @escaping () -> Void) {
         self.onClick = onClick
-        super.init(frame: NSRect(x: 0, y: 0, width: 42, height: 42))
+        super.init(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
         wantsLayer = true
         buildUI()
     }
@@ -359,7 +359,7 @@ final class FloatingTranslateButtonView: NSView {
     private func buildUI() {
         let glass = GlassHostView(
             frame: bounds,
-            cornerRadius: 14,
+            cornerRadius: 9,
             tintColor: NSColor(calibratedRed: 0.08, green: 0.15, blue: 0.28, alpha: 0.52),
             style: .regular
         )
@@ -370,7 +370,7 @@ final class FloatingTranslateButtonView: NSView {
         button.frame = glass.contentView.bounds
         button.autoresizingMask = [.width, .height]
         button.isBordered = false
-        button.font = NSFont.systemFont(ofSize: 24, weight: .semibold)
+        button.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
         button.contentTintColor = .white
         button.toolTip = "Translate selection"
         glass.contentView.addSubview(button)
