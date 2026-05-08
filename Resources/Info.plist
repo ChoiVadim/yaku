@@ -2,35 +2,35 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleExecutable</key>
-    <string>Yaku</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIdentifier</key>
-    <string>local.vadim.yaku</string>
-    <key>CFBundleName</key>
-    <string>Yaku</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>Yaku uses Accessibility to read the currently selected text and translate it.</string>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>Yaku captures the selected screen area so it can recognize visible text and translate it.</string>
-    <key>SUFeedURL</key>
-    <string>https://raw.githubusercontent.com/ChoiVadim/yaku/main/appcast.xml</string>
-    <key>SUEnableAutomaticChecks</key>
-    <true/>
-    <key>SUScheduledCheckInterval</key>
-    <integer>86400</integer>
-    <key>SUPublicEDKey</key>
-    <string>zIip1qSsidz0YJK2L4DEkUBhH8iiUcmZ4qfyhDcR/s4=</string>
+	<key>CFBundleExecutable</key>
+	<string>Yaku</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.vadim.yaku</string>
+	<key>CFBundleName</key>
+	<string>Yaku</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.0</string>
+	<key>CFBundleVersion</key>
+	<string>2</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Yaku uses Accessibility to read the currently selected text and translate it.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Yaku captures the selected screen area so it can recognize visible text and translate it.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/ChoiVadim/yaku/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>zIip1qSsidz0YJK2L4DEkUBhH8iiUcmZ4qfyhDcR/s4=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>
