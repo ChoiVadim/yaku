@@ -64,6 +64,10 @@ cp "$BINARY_PATH" "$MACOS_DIR/Yaku"
 cp "$ROOT/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 cp "$ICNS_PATH" "$RESOURCES_DIR/AppIcon.icns"
 
+# SwiftPM-built binaries don't auto-embed @executable_path/../Frameworks in
+# their rpath, so dyld can't locate Sparkle.framework. Add it explicitly.
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/Yaku" 2>/dev/null || true
+
 # --- Sparkle.framework bundling ---
 # Sparkle.framework is fetched as a SwiftPM binary xcframework. Prefer the
 # universal slice for distribution; fall back to whatever is in .build.
@@ -88,25 +92,27 @@ mkdir -p "$CONTENTS_DIR/Frameworks"
 rm -rf "$CONTENTS_DIR/Frameworks/Sparkle.framework"
 cp -R "$SPARKLE_FRAMEWORK_PATH" "$CONTENTS_DIR/Frameworks/Sparkle.framework"
 
-# Codesign Sparkle's inner helpers explicitly (--deep is brittle with XPC
-# services). Order matters: deepest first.
+# Sign each Sparkle component explicitly with --options runtime so the whole
+# load chain (XPC services → framework → app) shares the same hardened-runtime
+# flags. Mixed runtime/non-runtime signatures make dyld reject the framework
+# with "different Team IDs" on launch. Order matters: deepest first.
 SPARKLE_VERSIONS_B="$CONTENTS_DIR/Frameworks/Sparkle.framework/Versions/B"
-codesign --force --sign - --timestamp=none \
-    "$SPARKLE_VERSIONS_B/XPCServices/Downloader.xpc" 2>/dev/null || true
-codesign --force --sign - --timestamp=none \
-    "$SPARKLE_VERSIONS_B/XPCServices/Installer.xpc" 2>/dev/null || true
-for helper in "$SPARKLE_VERSIONS_B/Autoupdate" "$SPARKLE_VERSIONS_B/Updater.app"; do
-    if [ -e "$helper" ]; then
-        codesign --force --sign - --timestamp=none "$helper" 2>/dev/null || true
+for component in \
+    "$SPARKLE_VERSIONS_B/XPCServices/Downloader.xpc" \
+    "$SPARKLE_VERSIONS_B/XPCServices/Installer.xpc" \
+    "$SPARKLE_VERSIONS_B/Updater.app" \
+    "$SPARKLE_VERSIONS_B/Autoupdate"; do
+    if [ -e "$component" ]; then
+        codesign --force --sign - --options runtime "$component"
     fi
 done
-codesign --force --sign - --timestamp=none \
-    "$CONTENTS_DIR/Frameworks/Sparkle.framework"
+codesign --force --sign - --options runtime "$CONTENTS_DIR/Frameworks/Sparkle.framework"
 
 codesign \
     --force \
     --sign - \
     --options runtime \
+    --entitlements "$ROOT/Resources/Yaku.entitlements" \
     --requirements '=designated => identifier "local.vadim.yaku"' \
     "$APP_DIR"
 

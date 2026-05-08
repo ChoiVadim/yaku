@@ -64,4 +64,4 @@ swift run Yaku                    # debug build, no .app bundle, Sparkle inert.
 bash Scripts/build-app-bundle.sh  # full universal release bundle + DMG.
 ```
 
-In `swift run` mode Sparkle won't actually install updates (no `.app`), but the menu item still appears and feed fetching works for end-to-end testing.
+In `swift run` mode Sparkle is fully inert: `updaterController` is `nil` and the "Check for Updates..." menu item is hidden. Sparkle requires a real `.app` bundle (Frameworks/Sparkle.framework + hardened runtime + Info.plist), so end-to-end update testing must use `bash Scripts/build-app-bundle.sh` and run `dist/Yaku.app`.

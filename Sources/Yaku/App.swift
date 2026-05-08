@@ -642,11 +642,17 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         model: selectedModelID
     )
     private var onboardingWindowController: OnboardingWindowController?
-    private lazy var updaterController: SPUStandardUpdaterController = SPUStandardUpdaterController(
-        startingUpdater: true,
-        updaterDelegate: self,
-        userDriverDelegate: nil
-    )
+    private lazy var updaterController: SPUStandardUpdaterController? = {
+        guard isRunningFromAppBundle else { return nil }
+        return SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: self,
+            userDriverDelegate: nil
+        )
+    }()
+    private var isRunningFromAppBundle: Bool {
+        Bundle.main.bundleURL.pathExtension == "app"
+    }
     private var targetLanguage: TranslationLanguage {
         get {
             TranslationLanguage.language(
@@ -1404,6 +1410,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         menu.item(withTag: MenuItemTag.floatingDefaultMode.rawValue)?.title = floatingDefaultMode.menuTitle
         menu.item(withTag: MenuItemTag.thinkingLevel.rawValue)?.title = thinkingLevel.settingsTitle
         menu.item(withTag: MenuItemTag.selectedModel.rawValue)?.title = "Model: \(OllamaModelOption.option(id: selectedModelID).displayName)"
+        menu.item(withTag: MenuItemTag.checkForUpdates.rawValue)?.isHidden = !isRunningFromAppBundle
         if let translateSelectionItem = menu.item(withTag: MenuItemTag.translateSelection.rawValue) {
             translateSelectionItem.title = "Translate My Text to \(draftTargetLanguage.displayName)..."
             translateSelectionItem.isEnabled = trusted
@@ -1689,7 +1696,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     @objc private func checkForUpdates() {
-        updaterController.checkForUpdates(nil)
+        updaterController?.checkForUpdates(nil)
     }
 }
 

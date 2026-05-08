@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        Yaku is ad-hoc signed for personal/dev distribution. With hardened
+        runtime enabled (required by Sparkle 2), library validation rejects
+        Sparkle.framework because ad-hoc signatures have no Team Identifier
+        to match. Disabling library validation allows the framework to load
+        while keeping the rest of the runtime hardening.
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
