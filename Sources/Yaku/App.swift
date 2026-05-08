@@ -2889,7 +2889,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     }
 
     static func anchorY(for screenY: CGFloat, panelOriginY: CGFloat, panelHeight: CGFloat) -> CGFloat {
-        min(max(screenY - panelOriginY, tailMargin + tailHeight / 2), panelHeight - tailMargin - tailHeight / 2)
+        min(max(screenY - panelOriginY, 0), panelHeight)
     }
 
     func setAnchorY(_ anchorY: CGFloat) {
@@ -3044,12 +3044,8 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     }
 
     private func buildUI() {
-        let tailView = PopoverTailView(frame: .zero)
-        addSubview(tailView)
-        self.tailView = tailView
-
         let panelGlass = GlassHostView(
-            frame: NSRect(x: Self.tailWidth, y: 0, width: Self.bodyWidth, height: bounds.height),
+            frame: NSRect(x: 0, y: 0, width: Self.bodyWidth, height: bounds.height),
             cornerRadius: 22,
             tintColor: NSColor(calibratedRed: 0.05, green: 0.07, blue: 0.10, alpha: 0.60),
             style: .regular
@@ -3222,16 +3218,8 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         defer { CATransaction.commit() }
 
         let bodyHeight = bounds.height
-        let maxTailY = max(Self.tailMargin, bodyHeight - Self.tailHeight - Self.tailMargin)
-        let tailY = min(max(anchorYValue - Self.tailHeight / 2, Self.tailMargin), maxTailY)
-        tailView?.frame = NSRect(
-            x: 0,
-            y: tailY,
-            width: Self.tailWidth + 2,
-            height: Self.tailHeight
-        )
         panelGlass?.frame = NSRect(
-            x: Self.tailWidth,
+            x: 0,
             y: 0,
             width: Self.bodyWidth,
             height: bodyHeight
