@@ -64,10 +64,49 @@ cp "$BINARY_PATH" "$MACOS_DIR/Yaku"
 cp "$ROOT/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 cp "$ICNS_PATH" "$RESOURCES_DIR/AppIcon.icns"
 
+# --- Sparkle.framework bundling ---
+# Sparkle.framework is fetched as a SwiftPM binary xcframework. Prefer the
+# universal slice for distribution; fall back to whatever is in .build.
+SPARKLE_FRAMEWORK_PATH=""
+for candidate in \
+    "$ROOT/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework" \
+    "$ROOT/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos/Sparkle.framework"; do
+    if [ -d "$candidate" ]; then
+        SPARKLE_FRAMEWORK_PATH="$candidate"
+        break
+    fi
+done
+if [ -z "$SPARKLE_FRAMEWORK_PATH" ]; then
+    SPARKLE_FRAMEWORK_PATH="$(find "$ROOT/.build" -name "Sparkle.framework" -type d -not -path '*/checkouts/*' | head -n1 || true)"
+fi
+if [ -z "$SPARKLE_FRAMEWORK_PATH" ]; then
+    echo "Sparkle.framework not found under .build — make sure swift build resolved Sparkle." >&2
+    exit 1
+fi
+
+mkdir -p "$CONTENTS_DIR/Frameworks"
+rm -rf "$CONTENTS_DIR/Frameworks/Sparkle.framework"
+cp -R "$SPARKLE_FRAMEWORK_PATH" "$CONTENTS_DIR/Frameworks/Sparkle.framework"
+
+# Codesign Sparkle's inner helpers explicitly (--deep is brittle with XPC
+# services). Order matters: deepest first.
+SPARKLE_VERSIONS_B="$CONTENTS_DIR/Frameworks/Sparkle.framework/Versions/B"
+codesign --force --sign - --timestamp=none \
+    "$SPARKLE_VERSIONS_B/XPCServices/Downloader.xpc" 2>/dev/null || true
+codesign --force --sign - --timestamp=none \
+    "$SPARKLE_VERSIONS_B/XPCServices/Installer.xpc" 2>/dev/null || true
+for helper in "$SPARKLE_VERSIONS_B/Autoupdate" "$SPARKLE_VERSIONS_B/Updater.app"; do
+    if [ -e "$helper" ]; then
+        codesign --force --sign - --timestamp=none "$helper" 2>/dev/null || true
+    fi
+done
+codesign --force --sign - --timestamp=none \
+    "$CONTENTS_DIR/Frameworks/Sparkle.framework"
+
 codesign \
     --force \
-    --deep \
     --sign - \
+    --options runtime \
     --requirements '=designated => identifier "local.vadim.yaku"' \
     "$APP_DIR"
 

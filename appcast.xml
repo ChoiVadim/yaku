@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+    <channel>
+        <title>Yaku Updates</title>
+        <link>https://github.com/ChoiVadim/yaku</link>
+        <description>Yaku application updates</description>
+        <language>en</language>
+        <!--
+            New <item> entries are appended by Scripts/release.sh.
+            Each release item must include a sparkle:edSignature attribute
+            generated via sign_update so installers will accept the update.
+        -->
+    </channel>
+</rss>

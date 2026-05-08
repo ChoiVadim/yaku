@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Carbon.HIToolbox
 import Foundation
+import Sparkle
 import Vision
 
 private enum MenuItemTag: Int {
@@ -17,6 +18,44 @@ private enum MenuItemTag: Int {
     case translateSelection = 109
     case draftTargetLanguage = 110
     case floatingDefaultMode = 111
+    case thinkingLevel = 112
+    case selectedModel = 113
+    case checkForUpdates = 114
+}
+
+struct OllamaModelOption: Equatable {
+    let id: String
+    let displayName: String
+    let isCloud: Bool
+
+    static let all: [OllamaModelOption] = [
+        .init(id: "gpt-oss:120b-cloud", displayName: "gpt-oss 120B (Cloud)", isCloud: true),
+        .init(id: "gpt-oss:20b", displayName: "gpt-oss 20B (Local, offline)", isCloud: false)
+    ]
+
+    static let defaultModel = all[0]
+
+    static func option(id: String) -> OllamaModelOption {
+        all.first { $0.id == id } ?? defaultModel
+    }
+}
+
+enum ThinkingLevel: String, CaseIterable {
+    case low
+    case medium
+    case high
+
+    var menuTitle: String {
+        switch self {
+        case .low: return "Low"
+        case .medium: return "Medium"
+        case .high: return "High"
+        }
+    }
+
+    var settingsTitle: String {
+        "Thinking: \(menuTitle)"
+    }
 }
 
 private enum FloatingButtonDefaultMode: String {
@@ -425,22 +464,25 @@ private final class TranslationPrefetch {
 
     let text: String
     let targetLanguage: TranslationLanguage
+    let thinkingLevel: ThinkingLevel
     private let ollamaClient: OllamaClient
     private var task: Task<Void, Never>?
     private var state: State = .pending
     private var partialTranslation = ""
     private var subscribers: [(String) -> Void] = []
     private var failureSubscribers: [(String) -> Void] = []
-    private let onComplete: (String, TranslationLanguage, String) -> Void
+    private let onComplete: (String, TranslationLanguage, ThinkingLevel, String) -> Void
 
     init(
         text: String,
         targetLanguage: TranslationLanguage,
+        thinkingLevel: ThinkingLevel,
         ollamaClient: OllamaClient,
-        onComplete: @escaping (String, TranslationLanguage, String) -> Void
+        onComplete: @escaping (String, TranslationLanguage, ThinkingLevel, String) -> Void
     ) {
         self.text = text
         self.targetLanguage = targetLanguage
+        self.thinkingLevel = thinkingLevel
         self.ollamaClient = ollamaClient
         self.onComplete = onComplete
     }
@@ -499,13 +541,13 @@ private final class TranslationPrefetch {
         state = .running
 
         do {
-            let finalTranslation = try await ollamaClient.translate(text, to: targetLanguage) { [weak self] partial in
+            let finalTranslation = try await ollamaClient.translate(text, to: targetLanguage, thinkingLevel: thinkingLevel) { [weak self] partial in
                 Task { @MainActor in
                     self?.publishPartial(partial)
                 }
             }
             state = .completed(finalTranslation)
-            onComplete(text, targetLanguage, finalTranslation)
+            onComplete(text, targetLanguage, thinkingLevel, finalTranslation)
             publishPartial(finalTranslation)
         } catch is CancellationError {
             markCancelled()
@@ -539,8 +581,8 @@ private final class TranslationCache {
         self.maxEntries = maxEntries
     }
 
-    func translation(for text: String, targetLanguage: TranslationLanguage) -> String? {
-        let key = cacheKey(for: text, targetLanguage: targetLanguage)
+    func translation(for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel) -> String? {
+        let key = cacheKey(for: text, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel)
         guard let translation = entries[key] else {
             return nil
         }
@@ -549,8 +591,8 @@ private final class TranslationCache {
         return translation
     }
 
-    func store(_ translation: String, for text: String, targetLanguage: TranslationLanguage) {
-        let key = cacheKey(for: text, targetLanguage: targetLanguage)
+    func store(_ translation: String, for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel) {
+        let key = cacheKey(for: text, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel)
         guard !key.isEmpty, !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return
         }
@@ -560,8 +602,8 @@ private final class TranslationCache {
         trimIfNeeded()
     }
 
-    private func cacheKey(for text: String, targetLanguage: TranslationLanguage) -> String {
-        "\(targetLanguage.id):\(TextNormalizer.cleanedSelection(text))"
+    private func cacheKey(for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel) -> String {
+        "\(targetLanguage.id):\(thinkingLevel.rawValue):\(TextNormalizer.cleanedSelection(text))"
     }
 
     private func markRecentlyUsed(_ key: String) {
@@ -584,22 +626,27 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     private var mouseMonitor: Any?
     private var lastLeftMouseDownLocation: NSPoint?
     private let selectionReader = SelectionReader()
-    private let ollamaClient = OllamaClient(
-        baseURL: URL(string: "http://127.0.0.1:11434")!,
-        model: "gpt-oss:120b-cloud"
-    )
+    private let ollamaBaseURL = URL(string: "http://127.0.0.1:11434")!
+    private var ollamaClient: OllamaClient {
+        OllamaClient(baseURL: ollamaBaseURL, model: selectedModelID)
+    }
 
     private var translateButtonController: FloatingTranslateButtonController?
     private var translationPanelController: TranslationPanelController?
     private var translationPrefetch: TranslationPrefetch?
     private var isScreenshotTranslationRunning = false
     private var globalHotKeys: [GlobalHotKey] = []
-    private lazy var translationCache = TranslationCache()
+    private var translationCache = TranslationCache()
     private lazy var bootstrap: OllamaBootstrap = OllamaBootstrap(
-        baseURL: ollamaClient.baseURL,
-        model: ollamaClient.model
+        baseURL: ollamaBaseURL,
+        model: selectedModelID
     )
     private var onboardingWindowController: OnboardingWindowController?
+    private lazy var updaterController: SPUStandardUpdaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: self,
+        userDriverDelegate: nil
+    )
     private var targetLanguage: TranslationLanguage {
         get {
             TranslationLanguage.language(
@@ -629,6 +676,19 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             UserDefaults.standard.set(newValue.rawValue, forKey: "floatingButtonDefaultMode")
         }
     }
+    private var selectedModelID: String {
+        get { UserDefaults.standard.string(forKey: "selectedOllamaModel") ?? OllamaModelOption.defaultModel.id }
+        set { UserDefaults.standard.set(newValue, forKey: "selectedOllamaModel") }
+    }
+    private var thinkingLevel: ThinkingLevel {
+        get {
+            let raw = UserDefaults.standard.string(forKey: "thinkingLevel") ?? ThinkingLevel.low.rawValue
+            return ThinkingLevel(rawValue: raw) ?? .low
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "thinkingLevel")
+        }
+    }
 
     private let prefetchDelayMilliseconds: UInt64 = 220
     private let prefetchMaxCharacterCount = 1_200
@@ -644,9 +704,11 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         requestAccessibilityPermissionIfNeeded()
+        requestScreenRecordingPermissionIfNeeded()
         startMouseMonitor()
         setupGlobalHotKeys()
         setupBootstrap()
+        _ = updaterController
     }
 
     private func setupGlobalHotKeys() {
@@ -672,10 +734,33 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     }
 
     private func setupBootstrap() {
+        wireBootstrap()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard let self else { return }
+            if !self.bootstrap.state.isReady {
+                self.presentOnboardingWindow()
+            }
+        }
+    }
+
+    private func wireBootstrap() {
         bootstrap.onChange = { [weak self] state in
             self?.handleBootstrapStateChange(state)
         }
         bootstrap.refresh()
+    }
+
+    @MainActor
+    private func rebuildBootstrapForCurrentModel() {
+        bootstrap.cancelPull()
+        let staleOnboarding = onboardingWindowController
+        onboardingWindowController = nil
+        staleOnboarding?.close()
+
+        bootstrap = OllamaBootstrap(baseURL: ollamaBaseURL, model: selectedModelID)
+        wireBootstrap()
+
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 800_000_000)
             guard let self else { return }
@@ -798,8 +883,27 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             symbolName: "rectangle.and.hand.point.up.left",
             submenu: makeFloatingDefaultModeMenu()
         ))
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .thinkingLevel,
+            symbolName: "brain.head.profile",
+            submenu: makeThinkingLevelMenu()
+        ))
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .selectedModel,
+            symbolName: "cpu",
+            submenu: makeModelSelectionMenu()
+        ))
 
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(makeMenuItem(
+            title: "Check for Updates...",
+            tag: .checkForUpdates,
+            symbolName: "arrow.down.circle",
+            action: #selector(checkForUpdates),
+            keyEquivalent: ""
+        ))
         menu.addItem(makeMenuItem(
             title: "Quit",
             tag: .quit,
@@ -952,6 +1056,36 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         return menu
     }
 
+    private func makeThinkingLevelMenu() -> NSMenu {
+        let menu = NSMenu()
+        for level in ThinkingLevel.allCases {
+            let item = NSMenuItem(
+                title: level.menuTitle,
+                action: #selector(selectThinkingLevel(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = level.rawValue
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    private func makeModelSelectionMenu() -> NSMenu {
+        let menu = NSMenu()
+        for option in OllamaModelOption.all {
+            let item = NSMenuItem(
+                title: option.displayName,
+                action: #selector(selectModel(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = option.id
+            menu.addItem(item)
+        }
+        return menu
+    }
+
     private func startMouseMonitor() {
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .rightMouseUp]) { [weak self] event in
             guard let self else { return }
@@ -1001,7 +1135,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     return
                 }
 
-                self.showTranslateButton(for: cleanedSelection, near: selection.anchorPoint ?? mouseLocation)
+                self.showTranslateButton(for: cleanedSelection, near: mouseLocation)
             }
         }
     }
@@ -1034,7 +1168,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         translationPanelController?.close()
         translateButtonController?.close()
         let language = targetLanguage
-        if translationCache.translation(for: selectedText, targetLanguage: language) == nil {
+        let currentThinkingLevel = thinkingLevel
+        if translationCache.translation(for: selectedText, targetLanguage: language, thinkingLevel: currentThinkingLevel) == nil {
             startPrefetchIfEligible(for: selectedText)
         } else {
             cancelPrefetch()
@@ -1081,6 +1216,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         onReplace: ((String) -> Void)? = nil
     ) {
         let language = explicitTargetLanguage ?? targetLanguage
+        let currentThinkingLevel = thinkingLevel
         let controller = TranslationPanelController(
             screenPoint: screenPoint,
             sourceText: text,
@@ -1092,6 +1228,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     text,
                     targetLanguage: selectedLanguage,
                     mode: mode,
+                    thinkingLevel: currentThinkingLevel,
                     useCache: useCache
                 )
             },
@@ -1104,6 +1241,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             text,
             targetLanguage: language,
             mode: mode,
+            thinkingLevel: currentThinkingLevel,
             useCache: useCache,
             controller: controller,
             requestID: requestID
@@ -1115,6 +1253,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         _ text: String,
         targetLanguage language: TranslationLanguage,
         mode: TranslationMode,
+        thinkingLevel: ThinkingLevel,
         useCache: Bool
     ) {
         guard let controller = translationPanelController else {
@@ -1126,6 +1265,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             text,
             targetLanguage: language,
             mode: mode,
+            thinkingLevel: thinkingLevel,
             useCache: useCache,
             controller: controller,
             requestID: requestID
@@ -1137,11 +1277,12 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         _ text: String,
         targetLanguage language: TranslationLanguage,
         mode: TranslationMode,
+        thinkingLevel: ThinkingLevel,
         useCache: Bool,
         controller: TranslationPanelController,
         requestID: UUID
     ) {
-        if useCache, let cachedTranslation = translationCache.translation(for: text, targetLanguage: language) {
+        if useCache, let cachedTranslation = translationCache.translation(for: text, targetLanguage: language, thinkingLevel: thinkingLevel) {
             controller.showTranslation(cachedTranslation, requestID: requestID)
             return
         }
@@ -1149,7 +1290,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         if useCache,
            let translationPrefetch,
            translationPrefetch.text == text,
-           translationPrefetch.targetLanguage == language {
+           translationPrefetch.targetLanguage == language,
+           translationPrefetch.thinkingLevel == thinkingLevel {
             translationPrefetch.subscribe { partialTranslation in
                 controller.showTranslation(partialTranslation, requestID: requestID)
             } onFailure: { message in
@@ -1161,14 +1303,14 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         Task {
             do {
-                let translated = try await ollamaClient.translate(text, to: language, mode: mode) { partialTranslation in
+                let translated = try await ollamaClient.translate(text, to: language, mode: mode, thinkingLevel: thinkingLevel) { partialTranslation in
                     Task { @MainActor in
                         controller.showTranslation(partialTranslation, requestID: requestID)
                     }
                 }
                 await MainActor.run {
                     if useCache {
-                        self.translationCache.store(translated, for: text, targetLanguage: language)
+                        self.translationCache.store(translated, for: text, targetLanguage: language, thinkingLevel: thinkingLevel)
                     }
                     controller.showTranslation(translated, requestID: requestID)
                 }
@@ -1202,12 +1344,14 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         }
 
         let language = targetLanguage
+        let currentThinkingLevel = thinkingLevel
         let prefetch = TranslationPrefetch(
             text: text,
             targetLanguage: language,
+            thinkingLevel: currentThinkingLevel,
             ollamaClient: ollamaClient
-        ) { [weak self] sourceText, targetLanguage, translation in
-            self?.translationCache.store(translation, for: sourceText, targetLanguage: targetLanguage)
+        ) { [weak self] sourceText, targetLanguage, thinkingLevel, translation in
+            self?.translationCache.store(translation, for: sourceText, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel)
         }
         translationPrefetch = prefetch
         prefetch.startAfterDelay(milliseconds: prefetchDelayMilliseconds)
@@ -1232,6 +1376,13 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         AXIsProcessTrusted()
     }
 
+    private func requestScreenRecordingPermissionIfNeeded() {
+        guard !CGPreflightScreenCaptureAccess() else {
+            return
+        }
+        _ = CGRequestScreenCaptureAccess()
+    }
+
     private func updateMenuState() {
         guard let menu = statusItem?.menu else {
             return
@@ -1248,9 +1399,11 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             ? "Ollama Setup..."
             : "Open Setup..."
         menu.item(withTag: MenuItemTag.bootstrapSeparator.rawValue)?.isHidden = bootstrapReady
-        menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.title = "Read translations: \(targetLanguage.displayName)"
+        menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.title = "Translating to: \(targetLanguage.displayName)"
         menu.item(withTag: MenuItemTag.draftTargetLanguage.rawValue)?.title = "Write messages in \(draftTargetLanguage.displayName)"
         menu.item(withTag: MenuItemTag.floatingDefaultMode.rawValue)?.title = floatingDefaultMode.menuTitle
+        menu.item(withTag: MenuItemTag.thinkingLevel.rawValue)?.title = thinkingLevel.settingsTitle
+        menu.item(withTag: MenuItemTag.selectedModel.rawValue)?.title = "Model: \(OllamaModelOption.option(id: selectedModelID).displayName)"
         if let translateSelectionItem = menu.item(withTag: MenuItemTag.translateSelection.rawValue) {
             translateSelectionItem.title = "Translate My Text to \(draftTargetLanguage.displayName)..."
             translateSelectionItem.isEnabled = trusted
@@ -1281,6 +1434,22 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             for item in defaultModeMenu.items {
                 guard let raw = item.representedObject as? String else { continue }
                 item.state = raw == activeMode ? .on : .off
+            }
+        }
+
+        if let thinkingMenu = menu.item(withTag: MenuItemTag.thinkingLevel.rawValue)?.submenu {
+            let activeLevel = thinkingLevel.rawValue
+            for item in thinkingMenu.items {
+                guard let raw = item.representedObject as? String else { continue }
+                item.state = raw == activeLevel ? .on : .off
+            }
+        }
+
+        if let modelMenu = menu.item(withTag: MenuItemTag.selectedModel.rawValue)?.submenu {
+            let activeModelID = selectedModelID
+            for item in modelMenu.items {
+                guard let modelID = item.representedObject as? String else { continue }
+                item.state = modelID == activeModelID ? .on : .off
             }
         }
     }
@@ -1336,7 +1505,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 let language = self.draftTargetLanguage
                 self.translate(
                     cleanedDraft,
-                    near: selection.anchorPoint ?? NSEvent.mouseLocation,
+                    near: NSEvent.mouseLocation,
                     targetLanguage: language,
                     mode: .draftMessage,
                     useCache: false
@@ -1411,11 +1580,26 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     @MainActor
     private func presentScreenshotTranslationError(_ error: Error) {
         let alert = NSAlert()
+        alert.alertStyle = .warning
+        NSApp.activate(ignoringOtherApps: true)
+
+        if let screenshotError = error as? ScreenshotTranslationError,
+           case .screenRecordingPermissionDenied = screenshotError {
+            alert.messageText = "Screen Recording permission required"
+            alert.informativeText = screenshotError.localizedDescription
+            alert.addButton(withTitle: "Open Settings")
+            alert.addButton(withTitle: "Cancel")
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+                NSWorkspace.shared.open(url)
+            }
+            return
+        }
+
         alert.messageText = "Screenshot translation failed"
         alert.informativeText = error.localizedDescription
-        alert.alertStyle = .warning
         alert.addButton(withTitle: "OK")
-        NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }
 
@@ -1468,8 +1652,50 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         updateMenuState()
     }
 
+    @MainActor
+    @objc private func selectThinkingLevel(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let level = ThinkingLevel(rawValue: raw)
+        else {
+            return
+        }
+
+        thinkingLevel = level
+        cancelPrefetch()
+        updateMenuState()
+    }
+
+    @MainActor
+    @objc private func selectModel(_ sender: NSMenuItem) {
+        guard let modelID = sender.representedObject as? String else {
+            return
+        }
+
+        let option = OllamaModelOption.option(id: modelID)
+        guard option.id != selectedModelID else {
+            return
+        }
+
+        selectedModelID = option.id
+        cancelPrefetch()
+        translationCache = TranslationCache()
+        rebuildBootstrapForCurrentModel()
+        updateMenuState()
+    }
+
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    @MainActor
+    @objc private func checkForUpdates() {
+        updaterController.checkForUpdates(nil)
+    }
+}
+
+extension YakuApp: SPUUpdaterDelegate {
+    nonisolated func feedURLString(for updater: SPUUpdater) -> String? {
+        "https://raw.githubusercontent.com/ChoiVadim/yaku/main/appcast.xml"
     }
 }
 
@@ -1569,7 +1795,7 @@ final class SelectionReader {
 
         return SelectedTextContext(
             text: trimmed,
-            anchorPoint: selectionEndScreenPoint(from: focusedElement)
+            anchorPoint: nil
         )
     }
 
@@ -1728,59 +1954,6 @@ final class SelectionReader {
         return range
     }
 
-    private func selectionEndScreenPoint(from element: AXUIElement) -> NSPoint? {
-        guard let range = selectedTextRange(from: element) else {
-            return nil
-        }
-
-        let lastCharacterRange = CFRange(
-            location: range.location + max(0, range.length - 1),
-            length: 1
-        )
-        if let lastCharacterBounds = boundsForRange(lastCharacterRange, in: element),
-           !lastCharacterBounds.isEmpty {
-            return NSPoint(x: lastCharacterBounds.maxX, y: lastCharacterBounds.midY)
-        }
-
-        if let selectionBounds = boundsForRange(range, in: element),
-           !selectionBounds.isEmpty {
-            return NSPoint(x: selectionBounds.maxX, y: selectionBounds.midY)
-        }
-
-        return nil
-    }
-
-    private func boundsForRange(_ range: CFRange, in element: AXUIElement) -> CGRect? {
-        var mutableRange = range
-        guard let rangeValue = AXValueCreate(.cfRange, &mutableRange) else {
-            return nil
-        }
-
-        var boundsValue: CFTypeRef?
-        let result = AXUIElementCopyParameterizedAttributeValue(
-            element,
-            kAXBoundsForRangeParameterizedAttribute as CFString,
-            rangeValue,
-            &boundsValue
-        )
-
-        guard result == .success,
-              let boundsValue,
-              CFGetTypeID(boundsValue) == AXValueGetTypeID()
-        else {
-            return nil
-        }
-
-        let axBoundsValue = boundsValue as! AXValue
-        var bounds = CGRect.zero
-        guard AXValueGetType(axBoundsValue) == .cgRect,
-              AXValueGetValue(axBoundsValue, .cgRect, &bounds)
-        else {
-            return nil
-        }
-
-        return bounds
-    }
 }
 
 enum ClipboardSelectionReader {
@@ -1900,7 +2073,9 @@ enum PasteboardTextInserter {
 enum ScreenshotTranslationError: LocalizedError {
     case captureCancelled
     case captureFailed(Int32)
+    case captureFailedDetail(String)
     case noTextRecognized
+    case screenRecordingPermissionDenied
 
     var errorDescription: String? {
         switch self {
@@ -1908,8 +2083,12 @@ enum ScreenshotTranslationError: LocalizedError {
             "Screenshot selection was cancelled."
         case .captureFailed(let status):
             "Screenshot capture failed with exit code \(status)."
+        case .captureFailedDetail(let message):
+            "Screenshot capture failed: \(message)"
         case .noTextRecognized:
             "No readable text was found in the selected area."
+        case .screenRecordingPermissionDenied:
+            "Yaku needs Screen Recording permission to capture screenshots. Open System Settings → Privacy & Security → Screen Recording, enable Yaku, then quit and reopen the app."
         }
     }
 
@@ -1927,7 +2106,11 @@ enum ScreenshotTranslationError: LocalizedError {
 
 enum ScreenshotCapture {
     static func captureInteractiveArea() async throws -> URL {
-        try await withCheckedThrowingContinuation { continuation in
+        if !CGPreflightScreenCaptureAccess() {
+            _ = CGRequestScreenCaptureAccess()
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let outputURL = FileManager.default.temporaryDirectory
                     .appendingPathComponent("yaku-screenshot-\(UUID().uuidString)")
@@ -1936,23 +2119,35 @@ enum ScreenshotCapture {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
                 process.arguments = ["-i", "-x", outputURL.path]
+                let stderrPipe = Pipe()
+                process.standardError = stderrPipe
 
                 do {
                     try process.run()
                     process.waitUntilExit()
 
+                    let stderrData = (try? stderrPipe.fileHandleForReading.readToEnd()) ?? Data()
+                    let stderrText = String(data: stderrData, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     let fileExists = FileManager.default.fileExists(atPath: outputURL.path)
-                    if process.terminationStatus != 0 {
-                        if !fileExists {
+
+                    if !fileExists {
+                        if stderrText.isEmpty {
                             continuation.resume(throwing: ScreenshotTranslationError.captureCancelled)
+                        } else if stderrText.localizedCaseInsensitiveContains("could not create image") {
+                            continuation.resume(throwing: ScreenshotTranslationError.screenRecordingPermissionDenied)
                         } else {
-                            continuation.resume(throwing: ScreenshotTranslationError.captureFailed(process.terminationStatus))
+                            continuation.resume(throwing: ScreenshotTranslationError.captureFailedDetail(stderrText))
                         }
                         return
                     }
 
-                    guard fileExists,
-                          let attributes = try? FileManager.default.attributesOfItem(atPath: outputURL.path),
+                    if process.terminationStatus != 0 {
+                        continuation.resume(throwing: ScreenshotTranslationError.captureFailed(process.terminationStatus))
+                        return
+                    }
+
+                    guard let attributes = try? FileManager.default.attributesOfItem(atPath: outputURL.path),
                           let fileSize = attributes[.size] as? NSNumber,
                           fileSize.intValue > 0
                     else {
@@ -1967,6 +2162,7 @@ enum ScreenshotCapture {
             }
         }
     }
+
 }
 
 enum ImageTextRecognizer {
@@ -2403,6 +2599,9 @@ final class TranslationPanelController {
         panel.isMovableByWindowBackground = true
         panel.contentView = contentView
         contentView.onClose = { [weak self] in self?.close() }
+        contentView.onNeedsResize = { [weak self] in
+            self?.resizeToFitContent(animated: true)
+        }
     }
 
     deinit {
@@ -2533,11 +2732,17 @@ final class TranslationPanelController {
         let visibleFrame = NSScreen.visibleFrame(containing: NSPoint(x: currentFrame.midX, y: currentFrame.midY))
         let targetHeight = min(contentView.preferredHeightForCurrentContent(), visibleFrame.height - 32)
         let targetWidth = TranslationContentView.preferredWidth
-        let targetY = Self.panelOriginY(
-            for: anchorScreenPoint.y,
-            panelHeight: targetHeight,
-            visibleFrame: visibleFrame
-        )
+        let preserveCurrentPosition = panel.isVisible
+        let targetY = preserveCurrentPosition
+            ? min(
+                max(currentFrame.maxY - targetHeight, visibleFrame.minY + 16),
+                visibleFrame.maxY - targetHeight - 16
+            )
+            : Self.panelOriginY(
+                for: anchorScreenPoint.y,
+                panelHeight: targetHeight,
+                visibleFrame: visibleFrame
+            )
         let targetAnchorY = TranslationContentView.anchorY(
             for: anchorScreenPoint.y,
             panelOriginY: targetY,
@@ -2546,7 +2751,9 @@ final class TranslationPanelController {
         contentView.setAnchorY(targetAnchorY)
 
         let targetFrame = NSRect(
-            x: Self.panelOriginX(for: anchorScreenPoint.x, panelWidth: targetWidth, visibleFrame: visibleFrame),
+            x: preserveCurrentPosition
+                ? min(max(currentFrame.minX, visibleFrame.minX + 16), visibleFrame.maxX - targetWidth - 16)
+                : Self.panelOriginX(for: anchorScreenPoint.x, panelWidth: targetWidth, visibleFrame: visibleFrame),
             y: targetY,
             width: targetWidth,
             height: targetHeight
@@ -2671,12 +2878,16 @@ final class HairlineSeparatorView: NSView {
 }
 
 final class LanguagePickerButton: NSButton {
+    static let titleLeadingInset: CGFloat = 8
+
+    private static let horizontalPadding: CGFloat = 8
+    private static let chevronGap: CGFloat = 8
+    private static let chevronWidth: CGFloat = 10
+    private static let chevronHeight: CGFloat = 16
+    private static let chevronBackgroundSize: CGFloat = 18
+
     private let titleFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
     private let titleColor = NSColor(calibratedRed: 0.12, green: 0.58, blue: 1.0, alpha: 0.96)
-    private let chevronImage = NSImage(
-        systemSymbolName: "chevron.up.chevron.down",
-        accessibilityDescription: "Choose translation language"
-    )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold))
 
     private var hoverTrackingArea: NSTrackingArea?
     private var displayTitle = ""
@@ -2686,8 +2897,9 @@ final class LanguagePickerButton: NSButton {
 
     var preferredWidth: CGFloat {
         let titleWidth = ceil((displayTitle as NSString).size(withAttributes: [.font: titleFont]).width)
-        let affordanceWidth: CGFloat = pickerEnabled ? 42 : 4
-        return min(max(titleWidth + affordanceWidth, 48), 220)
+        let affordanceWidth = pickerEnabled ? Self.chevronGap + Self.chevronBackgroundSize : 0
+        let paddedWidth = titleWidth + Self.horizontalPadding * 2 + affordanceWidth
+        return min(max(paddedWidth, 64), 220)
     }
 
     override init(frame frameRect: NSRect) {
@@ -2695,8 +2907,8 @@ final class LanguagePickerButton: NSButton {
         wantsLayer = true
         isBordered = false
         alignment = .left
-        imagePosition = .imageTrailing
         focusRingType = .none
+        title = ""
         setButtonType(.momentaryChange)
         applyStyle()
     }
@@ -2735,6 +2947,66 @@ final class LanguagePickerButton: NSButton {
         applyStyle()
     }
 
+    override func draw(_ dirtyRect: NSRect) {
+        let title = NSAttributedString(string: displayTitle, attributes: [
+            .font: titleFont,
+            .foregroundColor: titleColor,
+            .kern: 0
+        ])
+        let titleSize = title.size()
+        let titleOrigin = NSPoint(
+            x: Self.horizontalPadding,
+            y: floor((bounds.height - titleSize.height) / 2) - 1
+        )
+        title.draw(at: titleOrigin)
+
+        guard pickerEnabled && (isHovered || isMenuOpen || isHighlighted),
+              bounds.width > Self.horizontalPadding * 2 + Self.chevronBackgroundSize
+        else {
+            return
+        }
+
+        drawChevronPair()
+    }
+
+    private func drawChevronPair() {
+        let backgroundRect = NSRect(
+            x: bounds.maxX - Self.horizontalPadding - Self.chevronBackgroundSize,
+            y: floor((bounds.height - Self.chevronBackgroundSize) / 2),
+            width: Self.chevronBackgroundSize,
+            height: Self.chevronBackgroundSize
+        )
+        NSColor(calibratedWhite: 1.0, alpha: 0.11).setFill()
+        NSBezierPath(ovalIn: backgroundRect).fill()
+
+        let origin = NSPoint(
+            x: backgroundRect.midX - Self.chevronWidth / 2,
+            y: floor((bounds.height - Self.chevronHeight) / 2)
+        )
+        let midX = origin.x + Self.chevronWidth / 2
+        let rightX = origin.x + Self.chevronWidth
+
+        NSColor(calibratedWhite: 1.0, alpha: 0.88).setStroke()
+
+        let up = NSBezierPath()
+        up.lineWidth = 2.0
+        up.lineCapStyle = .round
+        up.lineJoinStyle = .round
+        up.move(to: NSPoint(x: origin.x + 1, y: origin.y + 10))
+        up.line(to: NSPoint(x: midX, y: origin.y + 14))
+        up.line(to: NSPoint(x: rightX - 1, y: origin.y + 10))
+        up.stroke()
+
+        let down = NSBezierPath()
+        down.lineWidth = 2.0
+        down.lineCapStyle = .round
+        down.lineJoinStyle = .round
+        down.move(to: NSPoint(x: origin.x + 1, y: origin.y + 6))
+        down.line(to: NSPoint(x: midX, y: origin.y + 2))
+        down.line(to: NSPoint(x: rightX - 1, y: origin.y + 6))
+        down.stroke()
+    }
+
     func setTitle(_ title: String, pickerEnabled: Bool) {
         displayTitle = title
         self.pickerEnabled = pickerEnabled
@@ -2750,37 +3022,131 @@ final class LanguagePickerButton: NSButton {
     }
 
     private func applyStyle() {
-        let active = pickerEnabled && (isHovered || isMenuOpen)
-        layer?.cornerRadius = 9
+        layer?.cornerRadius = 0
         layer?.masksToBounds = true
-        layer?.backgroundColor = active
-            ? NSColor(calibratedWhite: 1.0, alpha: 0.10).cgColor
-            : NSColor.clear.cgColor
-        layer?.borderWidth = active ? 1 : 0
-        layer?.borderColor = NSColor(calibratedWhite: 1.0, alpha: 0.08).cgColor
-
-        contentTintColor = active
-            ? NSColor(calibratedWhite: 1.0, alpha: 0.86)
-            : titleColor
-        image = active ? chevronImage : nil
-
-        attributedTitle = NSAttributedString(string: displayTitle, attributes: [
-            .font: titleFont,
-            .foregroundColor: titleColor,
-            .kern: 0
-        ])
+        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.borderWidth = 0
+        layer?.borderColor = NSColor.clear.cgColor
+        needsDisplay = true
     }
 }
 
-final class TranslationContentView: NSView, NSTextViewDelegate {
+final class SourcePreviewView: NSView {
+    private static let moreButtonWidth: CGFloat = 50
+    private static let moreGap: CGFloat = 8
+    private static let sourceTextYOffset: CGFloat = 2
+    private static let moreButtonYOffset: CGFloat = 1
+
+    private let textLabel = NSTextField(labelWithString: "")
+    private let moreButton = NSButton(title: "more", target: nil, action: nil)
+    private var hoverTrackingArea: NSTrackingArea?
+    private var isHovered = false
+    private var canExpand = false
+
+    var onMore: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+
+        textLabel.font = NSFont.systemFont(ofSize: TranslationContentView.sourceFontSize, weight: .semibold)
+        textLabel.textColor = NSColor(calibratedWhite: 1.0, alpha: 0.90)
+        textLabel.lineBreakMode = .byTruncatingTail
+        textLabel.maximumNumberOfLines = 1
+        textLabel.usesSingleLineMode = true
+        addSubview(textLabel)
+
+        moreButton.target = self
+        moreButton.action = #selector(moreTapped)
+        moreButton.isBordered = false
+        moreButton.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        moreButton.contentTintColor = NSColor(calibratedRed: 0.12, green: 0.58, blue: 1.0, alpha: 1.0)
+        moreButton.isHidden = true
+        moreButton.toolTip = "Show full source"
+        addSubview(moreButton)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        hoverTrackingArea = trackingArea
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        updateMoreVisibility()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        updateMoreVisibility()
+    }
+
+    override func layout() {
+        super.layout()
+        let buttonVisible = !moreButton.isHidden
+        let labelWidth = buttonVisible
+            ? max(0, bounds.width - Self.moreButtonWidth - Self.moreGap)
+            : bounds.width
+        let sourceTextHeight = ceil(textLabel.intrinsicContentSize.height)
+        let moreButtonHeight = ceil(moreButton.intrinsicContentSize.height)
+        let rowHeight = max(sourceTextHeight, moreButtonHeight)
+        let rowY = floor((bounds.height - rowHeight) / 2)
+        textLabel.frame = NSRect(
+            x: 0,
+            y: rowY + Self.sourceTextYOffset,
+            width: labelWidth,
+            height: rowHeight
+        )
+        moreButton.frame = NSRect(
+            x: bounds.maxX - Self.moreButtonWidth,
+            y: rowY + Self.moreButtonYOffset,
+            width: Self.moreButtonWidth,
+            height: rowHeight
+        )
+    }
+
+    func configure(text: String, canExpand: Bool) {
+        textLabel.stringValue = text
+        self.canExpand = canExpand
+        updateMoreVisibility()
+    }
+
+    private func updateMoreVisibility() {
+        moreButton.isHidden = !(canExpand && isHovered)
+        needsLayout = true
+    }
+
+    @objc private func moreTapped() {
+        onMore?()
+    }
+}
+
+final class TranslationContentView: NSView {
     static let bodyWidth: CGFloat = 400
     static let preferredWidth: CGFloat = bodyWidth
     private static let minHeight: CGFloat = 168
     private static let maxHeight: CGFloat = 540
     private static let contentWidth: CGFloat = 364
-    private static let minimumSourceBoxHeight: CGFloat = 34
+    static let sourceFontSize: CGFloat = 16
+    private static let collapsedSourceBoxHeight: CGFloat = 34
+    private static let minimumExpandedSourceBoxHeight: CGFloat = 48
     private static let minimumResultBoxHeight: CGFloat = 58
-    private static let maximumSourceBoxHeight: CGFloat = 58
+    private static let maximumSourceBoxHeight: CGFloat = 140
     private static let maximumResultBoxHeight: CGFloat = 340
 
     private static let panelPaddingX: CGFloat = 18
@@ -2792,12 +3158,12 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     private static let dividerToTargetGap: CGFloat = 16
     private static let dividerHeight: CGFloat = 1
     private static let buttonSize: CGFloat = 18
-    private static let sourceFontSize: CGFloat = 16
     private static let resultFontSize: CGFloat = 18
     private static let textInsetY: CGFloat = 3
     private static let scrollableTextBottomPadding: CGFloat = 18
 
     var onClose: (() -> Void)?
+    var onNeedsResize: (() -> Void)?
 
     private let sourceText: String
     private var targetLanguage: TranslationLanguage
@@ -2806,6 +3172,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     private var resultDisplayText = "Translating..."
     private let resultTextView = NSTextView()
     private let sourceTitleLabel = NSTextField(labelWithString: "")
+    private let sourcePreviewView = SourcePreviewView(frame: .zero)
     private let targetTitleButton = LanguagePickerButton(frame: .zero)
     private let sourceTextView = NSTextView()
     private let sourceScrollView = NSScrollView()
@@ -2816,10 +3183,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     private var closeButton: NSButton?
     private var copyButton: NSButton?
     private var replaceButton: NSButton?
-    private var selectionCopyBubble: GlassHostView?
-    private var selectionCopyButton: NSButton?
-    private var selectedSnippetToCopy: String?
-    private weak var selectedTextView: NSTextView?
+    private var sourceExpanded = false
     private var shouldScrollSourceToTop = true
     private var shouldScrollResultToTop = true
     private var anchorYValue: CGFloat
@@ -2860,14 +3224,8 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         nil
     }
 
-    static func preferredHeight(sourceText: String, resultText: String) -> CGFloat {
-        let sourceBoxHeight = boxHeight(
-            for: sourceText,
-            font: NSFont.systemFont(ofSize: sourceFontSize, weight: .semibold),
-            width: contentWidth,
-            minimum: minimumSourceBoxHeight,
-            maximum: maximumSourceBoxHeight
-        )
+    static func preferredHeight(sourceText: String, resultText: String, sourceExpanded: Bool = false) -> CGFloat {
+        let sourceBoxHeight = sourceHeight(for: sourceText, expanded: sourceExpanded)
         let resultBoxHeight = boxHeight(
             for: resultText,
             font: NSFont.systemFont(ofSize: resultFontSize, weight: .semibold),
@@ -2885,7 +3243,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     }
 
     func preferredHeightForCurrentContent() -> CGFloat {
-        Self.preferredHeight(sourceText: sourceText, resultText: resultDisplayText)
+        Self.preferredHeight(sourceText: sourceText, resultText: resultDisplayText, sourceExpanded: sourceExpanded)
     }
 
     static func anchorY(for screenY: CGFloat, panelOriginY: CGFloat, panelHeight: CGFloat) -> CGFloat {
@@ -2910,9 +3268,46 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         layoutForCurrentSize()
     }
 
+    private func expandSource() {
+        guard !sourceExpanded else {
+            return
+        }
+
+        sourceExpanded = true
+        shouldScrollSourceToTop = true
+        onNeedsResize?()
+        layoutForCurrentSize()
+    }
+
     private static func boxHeight(for text: String, font: NSFont, width: CGFloat, minimum: CGFloat, maximum: CGFloat) -> CGFloat {
         let height = textHeight(for: text, font: font, width: width) + textInsetY * 2 + 4
         return min(max(height, minimum), maximum)
+    }
+
+    private static func sourceHeight(for text: String, expanded: Bool) -> CGFloat {
+        guard expanded else {
+            return collapsedSourceBoxHeight
+        }
+
+        return boxHeight(
+            for: text,
+            font: NSFont.systemFont(ofSize: sourceFontSize, weight: .semibold),
+            width: contentWidth,
+            minimum: minimumExpandedSourceBoxHeight,
+            maximum: maximumSourceBoxHeight
+        )
+    }
+
+    private static func singleLineWidth(for text: String, font: NSFont) -> CGFloat {
+        ceil((text as NSString).size(withAttributes: [.font: font]).width)
+    }
+
+    private static func collapsedSourceText(_ text: String) -> String {
+        text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private static func layoutScrollableTextView(
@@ -3047,7 +3442,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         let panelGlass = GlassHostView(
             frame: NSRect(x: 0, y: 0, width: Self.bodyWidth, height: bounds.height),
             cornerRadius: 22,
-            tintColor: NSColor(calibratedRed: 0.05, green: 0.07, blue: 0.10, alpha: 0.60),
+            tintColor: NSColor(calibratedRed: 0.10, green: 0.095, blue: 0.045, alpha: 0.72),
             style: .regular
         )
         panelGlass.autoresizingMask = [.height]
@@ -3079,6 +3474,11 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
             color: NSColor(calibratedWhite: 1.0, alpha: 0.90)
         )
         sourceScrollView.documentView = sourceTextView
+        sourceScrollView.isHidden = true
+        sourcePreviewView.onMore = { [weak self] in
+            self?.expandSource()
+        }
+        content.addSubview(sourcePreviewView)
         content.addSubview(sourceScrollView)
         content.addSubview(sourceDivider)
 
@@ -3111,29 +3511,6 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
             self.replaceButton = replaceButton
         }
 
-        let copyBubble = GlassHostView(
-            frame: NSRect(x: 0, y: 0, width: 34, height: 34),
-            cornerRadius: 17,
-            tintColor: NSColor(calibratedRed: 0.07, green: 0.12, blue: 0.20, alpha: 0.58),
-            style: .regular
-        )
-        copyBubble.isHidden = true
-        content.addSubview(copyBubble)
-        selectionCopyBubble = copyBubble
-
-        selectionCopyButton = makeIconButton(
-            symbolName: "doc.on.doc",
-            accessibilityDescription: "Copy selection",
-            pointSize: 14,
-            target: self,
-            action: #selector(copySelectedSnippet),
-            to: copyBubble.contentView
-        )
-        selectionCopyButton?.frame = copyBubble.contentView.bounds
-        selectionCopyButton?.autoresizingMask = [.width, .height]
-        selectionCopyButton?.contentTintColor = NSColor(calibratedWhite: 1.0, alpha: 0.78)
-        selectionCopyButton?.sendAction(on: [.leftMouseDown])
-
         configureScrollView(resultScrollView)
         configureTextView(
             resultTextView,
@@ -3143,10 +3520,6 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         )
         resultScrollView.documentView = resultTextView
         content.addSubview(resultScrollView)
-        if let selectionCopyBubble {
-            selectionCopyBubble.removeFromSuperview()
-            content.addSubview(selectionCopyBubble)
-        }
 
         let chromeOverlay = GlassChromeOverlayView(frame: content.bounds)
         chromeOverlay.autoresizingMask = [.width, .height]
@@ -3172,7 +3545,6 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         textView.isSelectable = true
         textView.textColor = color
         textView.font = font
-        textView.delegate = self
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
@@ -3226,25 +3598,19 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         )
         chromeOverlay?.frame = NSRect(x: 0, y: 0, width: Self.bodyWidth, height: bodyHeight)
 
-        let sourceBoxHeight = Self.boxHeight(
-            for: sourceText,
-            font: NSFont.systemFont(ofSize: Self.sourceFontSize, weight: .semibold),
-            width: Self.contentWidth,
-            minimum: Self.minimumSourceBoxHeight,
-            maximum: Self.maximumSourceBoxHeight
-        )
+        let sourceBoxHeight = Self.sourceHeight(for: sourceText, expanded: sourceExpanded)
         let fixedHeight = Self.panelPaddingTop
             + Self.labelHeight + Self.labelToBoxGap
             + Self.sourceToDividerGap + Self.dividerHeight + Self.dividerToTargetGap
             + Self.labelHeight + Self.labelToBoxGap
             + Self.panelPaddingBottom
         let availableBoxHeight = max(
-            Self.minimumSourceBoxHeight + Self.minimumResultBoxHeight,
+            Self.collapsedSourceBoxHeight + Self.minimumResultBoxHeight,
             bounds.height - fixedHeight
         )
         let resolvedSourceBoxHeight = min(
             sourceBoxHeight,
-            max(Self.minimumSourceBoxHeight, availableBoxHeight - Self.minimumResultBoxHeight)
+            max(Self.collapsedSourceBoxHeight, availableBoxHeight - Self.minimumResultBoxHeight)
         )
         let resolvedResultBoxHeight = max(Self.minimumResultBoxHeight, availableBoxHeight - resolvedSourceBoxHeight)
 
@@ -3269,21 +3635,35 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
             width: Self.contentWidth,
             height: resolvedSourceBoxHeight
         )
-        let sourceRawTextHeight = Self.textHeight(
-            for: sourceText,
-            font: NSFont.systemFont(ofSize: Self.sourceFontSize, weight: .semibold),
-            width: sourceScrollFrame.width
-        )
-        Self.layoutScrollableTextView(
-            sourceTextView,
-            inside: sourceScrollView,
-            scrollFrame: sourceScrollFrame,
-            rawTextHeight: sourceRawTextHeight,
-            showsOverflowScroller: false
-        )
-        if shouldScrollSourceToTop {
-            scrollToTop(sourceScrollView)
-            shouldScrollSourceToTop = false
+        let collapsedSourceText = Self.collapsedSourceText(sourceText)
+        let sourceCanExpand = Self.singleLineWidth(
+            for: collapsedSourceText,
+            font: NSFont.systemFont(ofSize: Self.sourceFontSize, weight: .semibold)
+        ) > Self.contentWidth
+            || collapsedSourceText != sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        sourcePreviewView.frame = sourceScrollFrame
+        sourcePreviewView.configure(text: collapsedSourceText, canExpand: sourceCanExpand)
+        sourcePreviewView.isHidden = sourceExpanded
+        sourceScrollView.isHidden = !sourceExpanded
+
+        if sourceExpanded {
+            let sourceRawTextHeight = Self.textHeight(
+                for: sourceText,
+                font: NSFont.systemFont(ofSize: Self.sourceFontSize, weight: .semibold),
+                width: sourceScrollFrame.width
+            )
+            Self.layoutScrollableTextView(
+                sourceTextView,
+                inside: sourceScrollView,
+                scrollFrame: sourceScrollFrame,
+                rawTextHeight: sourceRawTextHeight,
+                showsOverflowScroller: true
+            )
+            if shouldScrollSourceToTop {
+                scrollToTop(sourceScrollView)
+                shouldScrollSourceToTop = false
+            }
         }
 
         y -= Self.sourceToDividerGap + Self.dividerHeight
@@ -3298,11 +3678,15 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         let targetActionButtonCount = replaceButton == nil ? 1 : 2
         let targetActionWidth = CGFloat(targetActionButtonCount) * Self.buttonSize
             + CGFloat(max(0, targetActionButtonCount - 1)) * 8
+        let targetTitleLeadingInset = LanguagePickerButton.titleLeadingInset
         targetTitleButton.frame = NSRect(
-            x: Self.panelPaddingX,
-            y: y - 7,
-            width: min(targetTitleButton.preferredWidth, Self.contentWidth - targetActionWidth - 8),
-            height: 32
+            x: Self.panelPaddingX - targetTitleLeadingInset,
+            y: y + (Self.labelHeight - Self.buttonSize) / 2,
+            width: min(
+                targetTitleButton.preferredWidth,
+                Self.contentWidth - targetActionWidth - 8 + targetTitleLeadingInset
+            ),
+            height: Self.buttonSize
         )
         copyButton?.frame = NSRect(
             x: Self.bodyWidth - Self.panelPaddingX - Self.buttonSize,
@@ -3345,7 +3729,6 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         if !isInternalLoadingUpdate {
             stopLoadingAnimation()
         }
-        hideSelectionCopyButtonIfNeeded(for: resultTextView)
         let cleanedText = TextNormalizer.cleanedTranslation(text)
 
         if cleanedText == resultText {
@@ -3488,79 +3871,8 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         onReplace?(replacement)
     }
 
-    @objc private func copySelectedSnippet() {
-        guard let selectedSnippetToCopy, !selectedSnippetToCopy.isEmpty else {
-            return
-        }
-
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(selectedSnippetToCopy, forType: .string)
-        hideSelectionCopyButton()
-    }
-
     @objc private func closeTapped() {
         onClose?()
-    }
-
-    func textViewDidChangeSelection(_ notification: Notification) {
-        guard let textView = notification.object as? NSTextView else {
-            return
-        }
-
-        updateSelectionCopyButton(for: textView)
-    }
-
-    private func updateSelectionCopyButton(for textView: NSTextView) {
-        guard let selectedText = selectedText(in: textView), !selectedText.isEmpty else {
-            hideSelectionCopyButtonIfNeeded(for: textView)
-            return
-        }
-
-        selectedSnippetToCopy = selectedText
-        selectedTextView = textView
-
-        positionSelectionCopyBubbleNearMouse()
-        selectionCopyBubble?.isHidden = false
-    }
-
-    private func positionSelectionCopyBubbleNearMouse() {
-        let bubbleSize = NSSize(width: 34, height: 34)
-        let mouseInWindow = window?.convertPoint(fromScreen: NSEvent.mouseLocation) ?? convert(NSEvent.mouseLocation, from: nil)
-        let mouseInView = convert(mouseInWindow, from: nil)
-        let targetOrigin = NSPoint(
-            x: mouseInView.x + 10,
-            y: mouseInView.y + 10
-        )
-        let clampedOrigin = NSPoint(
-            x: min(max(8, targetOrigin.x), max(8, bounds.width - bubbleSize.width - 8)),
-            y: min(max(8, targetOrigin.y), max(8, bounds.height - bubbleSize.height - 8))
-        )
-        selectionCopyBubble?.frame = NSRect(origin: clampedOrigin, size: bubbleSize)
-    }
-
-    private func selectedText(in textView: NSTextView) -> String? {
-        let range = textView.selectedRange()
-        guard range.length > 0, let stringRange = Range(range, in: textView.string) else {
-            return nil
-        }
-
-        return String(textView.string[stringRange]).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func hideSelectionCopyButtonIfNeeded(for textView: NSTextView) {
-        guard selectedTextView === textView else {
-            return
-        }
-
-        hideSelectionCopyButton(clearSelection: false)
-    }
-
-    private func hideSelectionCopyButton(clearSelection: Bool = true) {
-        selectionCopyBubble?.isHidden = true
-        if clearSelection {
-            selectedSnippetToCopy = nil
-            selectedTextView = nil
-        }
     }
 
     private func updateReplaceButtonState() {
@@ -3647,6 +3959,7 @@ struct OllamaClient {
         _ text: String,
         to targetLanguage: TranslationLanguage,
         mode: TranslationMode = .selection,
+        thinkingLevel: ThinkingLevel,
         onPartial: @escaping (String) -> Void
     ) async throws -> String {
         let sourceText: String
@@ -3669,7 +3982,7 @@ struct OllamaClient {
         let body = ChatRequest(
             model: model,
             stream: true,
-            think: "low",
+            think: thinkingLevel.rawValue,
             messages: [
                 ChatMessage(
                     role: "system",

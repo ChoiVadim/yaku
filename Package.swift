@@ -10,8 +10,16 @@ let package = Package(
     products: [
         .executable(name: "Yaku", targets: ["Yaku"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.7.0")
+    ],
     targets: [
-        .executableTarget(name: "Yaku")
+        .executableTarget(
+            name: "Yaku",
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle")
+            ]
+        )
     ],
     swiftLanguageModes: [.v5]
 )

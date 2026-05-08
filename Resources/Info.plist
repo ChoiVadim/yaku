@@ -24,5 +24,13 @@
     <string>Yaku uses Accessibility to read the currently selected text and translate it.</string>
     <key>NSScreenCaptureUsageDescription</key>
     <string>Yaku captures the selected screen area so it can recognize visible text and translate it.</string>
+    <key>SUFeedURL</key>
+    <string>https://raw.githubusercontent.com/ChoiVadim/yaku/main/appcast.xml</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    <key>SUPublicEDKey</key>
+    <string>zIip1qSsidz0YJK2L4DEkUBhH8iiUcmZ4qfyhDcR/s4=</string>
 </dict>
 </plist>
