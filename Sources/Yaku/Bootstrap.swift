@@ -4,6 +4,7 @@ import Foundation
 enum BootstrapStepID: String, CaseIterable {
     case ollamaInstalled
     case serverRunning
+    case ollamaSignedIn
     case modelReady
 }
 
@@ -24,10 +25,11 @@ enum BootstrapStepStatus: Equatable {
 struct BootstrapState: Equatable {
     var ollamaInstalled: BootstrapStepStatus = .unknown
     var serverRunning: BootstrapStepStatus = .unknown
+    var ollamaSignedIn: BootstrapStepStatus = .unknown
     var modelReady: BootstrapStepStatus = .unknown
 
     var isReady: Bool {
-        ollamaInstalled.isTerminalOK && serverRunning.isTerminalOK && modelReady.isTerminalOK
+        ollamaInstalled.isTerminalOK && serverRunning.isTerminalOK && ollamaSignedIn.isTerminalOK && modelReady.isTerminalOK
     }
 }
 
@@ -53,6 +55,10 @@ final class OllamaBootstrap {
     init(baseURL: URL, model: String) {
         self.baseURL = baseURL
         self.model = model
+    }
+
+    var requiresOllamaAccount: Bool {
+        model.localizedCaseInsensitiveContains("cloud")
     }
 
     // MARK: - Public actions
@@ -97,6 +103,9 @@ final class OllamaBootstrap {
 
     func startModelPull() {
         guard pullTask == nil else { return }
+        if requiresOllamaAccount {
+            update(\.ollamaSignedIn, .working("Checking Ollama account…"))
+        }
         update(\.modelReady, .working("Pulling \(model)…"))
         pullTask = Task { [weak self] in
             await self?.runPull()
@@ -114,6 +123,7 @@ final class OllamaBootstrap {
     private func runRefresh() async {
         update(\.ollamaInstalled, .checking)
         update(\.serverRunning, .checking)
+        update(\.ollamaSignedIn, .checking)
         update(\.modelReady, .checking)
 
         let installed = ollamaAppURL() != nil
@@ -123,6 +133,7 @@ final class OllamaBootstrap {
 
         if !installed {
             update(\.serverRunning, .needsAction("Install Ollama first."))
+            update(\.ollamaSignedIn, .needsAction("Install Ollama first."))
             update(\.modelReady, .needsAction("Install Ollama first."))
             return
         }
@@ -132,6 +143,7 @@ final class OllamaBootstrap {
             update(\.serverRunning, .ok)
         } else {
             update(\.serverRunning, .needsAction("Ollama isn't running."))
+            update(\.ollamaSignedIn, .needsAction("Start Ollama first."))
             update(\.modelReady, .needsAction("Start Ollama first."))
             return
         }
@@ -139,8 +151,12 @@ final class OllamaBootstrap {
         do {
             let hasModel = try await modelIsPresent()
             if hasModel {
+                update(\.ollamaSignedIn, .ok)
                 update(\.modelReady, .ok)
             } else {
+                update(\.ollamaSignedIn, requiresOllamaAccount
+                    ? .needsAction("Open Ollama and sign in with your Ollama account.")
+                    : .ok)
                 update(\.modelReady, .needsAction("Model \(model) isn't pulled yet."))
             }
         } catch {
@@ -214,6 +230,7 @@ final class OllamaBootstrap {
                 return
             }
             if http.statusCode == 401 || http.statusCode == 403 {
+                update(\.ollamaSignedIn, .needsAction("Open Ollama and sign in with your Ollama account."))
                 update(\.modelReady, .needsAction("Sign in to Ollama to use cloud models."))
                 return
             }
@@ -231,6 +248,7 @@ final class OllamaBootstrap {
                    let message = streamError.error {
                     let classified = OllamaClient.classifyStreamError(message: message, model: model)
                     if case .signInRequired = classified {
+                        update(\.ollamaSignedIn, .needsAction("Open Ollama and sign in with your Ollama account."))
                         update(\.modelReady, .needsAction("Sign in to Ollama to use cloud models."))
                     } else {
                         update(\.modelReady, .failed(message))
@@ -246,6 +264,9 @@ final class OllamaBootstrap {
             // Re-check tags to confirm
             do {
                 let present = try await modelIsPresent()
+                if present {
+                    update(\.ollamaSignedIn, .ok)
+                }
                 update(\.modelReady, present ? .ok : .failed("Pull finished but model isn't visible."))
             } catch {
                 update(\.modelReady, .failed(error.localizedDescription))
@@ -303,7 +324,7 @@ final class OnboardingWindowController: NSWindowController {
         self.onClose = onClose
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 360),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 410),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -360,6 +381,17 @@ final class OnboardingWindowController: NSWindowController {
             self?.bootstrap.launchOllamaApp()
         }
 
+        let signInRow = StepRow(
+            title: "Sign in to Ollama",
+            primaryActionTitle: "Open Ollama"
+        ) { [weak self] in
+            self?.bootstrap.openOllamaForSignIn()
+        }
+        signInRow.secondaryAction = { [weak self] in
+            self?.bootstrap.refresh()
+        }
+        signInRow.secondaryActionTitle = "Re-check"
+
         let modelRow = StepRow(
             title: "Pull \(bootstrap.model)",
             primaryActionTitle: "Pull Model"
@@ -373,10 +405,11 @@ final class OnboardingWindowController: NSWindowController {
 
         stepRows[.ollamaInstalled] = installRow
         stepRows[.serverRunning] = serverRow
+        stepRows[.ollamaSignedIn] = signInRow
         stepRows[.modelReady] = modelRow
 
         let footerNote = NSTextField(wrappingLabelWithString:
-            "Cloud models like \(bootstrap.model) need an Ollama account. After installing, open the Ollama app and sign in once.")
+            "Cloud models like \(bootstrap.model) require an Ollama account. Sign in once, then pull the model.")
         footerNote.font = NSFont.systemFont(ofSize: 11)
         footerNote.textColor = .tertiaryLabelColor
         footerNote.translatesAutoresizingMaskIntoConstraints = false
@@ -385,6 +418,7 @@ final class OnboardingWindowController: NSWindowController {
         contentView.addSubview(subtitle)
         contentView.addSubview(installRow)
         contentView.addSubview(serverRow)
+        contentView.addSubview(signInRow)
         contentView.addSubview(modelRow)
         contentView.addSubview(footerNote)
 
@@ -409,7 +443,11 @@ final class OnboardingWindowController: NSWindowController {
             serverRow.leadingAnchor.constraint(equalTo: installRow.leadingAnchor),
             serverRow.trailingAnchor.constraint(equalTo: installRow.trailingAnchor),
 
-            modelRow.topAnchor.constraint(equalTo: serverRow.bottomAnchor, constant: rowSpacing),
+            signInRow.topAnchor.constraint(equalTo: serverRow.bottomAnchor, constant: rowSpacing),
+            signInRow.leadingAnchor.constraint(equalTo: installRow.leadingAnchor),
+            signInRow.trailingAnchor.constraint(equalTo: installRow.trailingAnchor),
+
+            modelRow.topAnchor.constraint(equalTo: signInRow.bottomAnchor, constant: rowSpacing),
             modelRow.leadingAnchor.constraint(equalTo: installRow.leadingAnchor),
             modelRow.trailingAnchor.constraint(equalTo: installRow.trailingAnchor),
 
@@ -423,6 +461,7 @@ final class OnboardingWindowController: NSWindowController {
     private func render(state: BootstrapState) {
         stepRows[.ollamaInstalled]?.apply(state.ollamaInstalled)
         stepRows[.serverRunning]?.apply(state.serverRunning)
+        stepRows[.ollamaSignedIn]?.apply(state.ollamaSignedIn)
         stepRows[.modelReady]?.apply(state.modelReady)
     }
 }
