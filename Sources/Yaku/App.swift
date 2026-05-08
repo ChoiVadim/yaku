@@ -230,31 +230,11 @@ private enum TextNormalizer {
             options: .regularExpression
         )
         cleaned = cleaned.replacingOccurrences(
-            of: #"[ \t]*\n[ \t]*"#,
-            with: " ",
+            of: #"(?<=[.!?。！？])\s*(?=[▶•●▪▸])"#,
+            with: "\n",
             options: .regularExpression
         )
-        cleaned = cleaned.replacingOccurrences(
-            of: #"\s+"#,
-            with: " ",
-            options: .regularExpression
-        )
-        cleaned = cleaned.replacingOccurrences(
-            of: #"\s+([,.;:!?…])"#,
-            with: "$1",
-            options: .regularExpression
-        )
-        cleaned = cleaned.replacingOccurrences(
-            of: #"([(])\s+"#,
-            with: "$1",
-            options: .regularExpression
-        )
-        cleaned = cleaned.replacingOccurrences(
-            of: #"\s+([)])"#,
-            with: "$1",
-            options: .regularExpression
-        )
-        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleanedStructuredSource(cleaned)
     }
 
     static func cleanedTranslation(_ text: String) -> String {
@@ -320,6 +300,96 @@ private enum TextNormalizer {
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "\u{00A0}", with: " ")
             .replacingOccurrences(of: "\u{200B}", with: "")
+    }
+
+    private static func cleanedStructuredSource(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        var resultLines: [String] = []
+        var currentLine = ""
+
+        func flushCurrentLine() {
+            guard !currentLine.isEmpty else { return }
+            resultLines.append(currentLine)
+            currentLine = ""
+        }
+
+        for rawLine in lines {
+            let line = cleanedInlineText(rawLine)
+            if line.isEmpty {
+                flushCurrentLine()
+                if resultLines.last != "" {
+                    resultLines.append("")
+                }
+                continue
+            }
+
+            if isStructuralLine(line) {
+                flushCurrentLine()
+                currentLine = line
+                continue
+            }
+
+            if currentLine.isEmpty {
+                currentLine = line
+            } else {
+                currentLine += joiningTextBetween(currentLine, and: line) + line
+            }
+        }
+
+        flushCurrentLine()
+
+        while resultLines.last == "" {
+            resultLines.removeLast()
+        }
+
+        return resultLines
+            .joined(separator: "\n")
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func cleanedInlineText(_ text: String) -> String {
+        var cleaned = text
+            .replacingOccurrences(of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\s+([,.;:!?…])"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"([(])\s+"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\s+([)])"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        return cleaned
+    }
+
+    private static func isStructuralLine(_ text: String) -> Bool {
+        text.range(
+            of: #"^\s*(?:[▶•●▪▸◆◇○◦\-–—*]|\d+[.)]|[A-Za-z][.)])\s*"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func joiningTextBetween(_ left: String, and right: String) -> String {
+        guard let last = left.unicodeScalars.last, let first = right.unicodeScalars.first else {
+            return " "
+        }
+
+        let noSpaceBefore = CharacterSet(charactersIn: ",.;:!?…)]}）】」』")
+        let noSpaceAfter = CharacterSet(charactersIn: "([{（【「『")
+        if noSpaceBefore.contains(first) || noSpaceAfter.contains(last) {
+            return ""
+        }
+
+        return " "
     }
 }
 
@@ -860,17 +930,22 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             return false
         }
 
+        let isSelectionGesture: Bool
         if event.clickCount >= 2 {
-            return true
+            isSelectionGesture = true
+        } else if let downLocation = lastLeftMouseDownLocation {
+            let upLocation = NSEvent.mouseLocation
+            let distance = hypot(upLocation.x - downLocation.x, upLocation.y - downLocation.y)
+            isSelectionGesture = distance >= 5
+        } else {
+            isSelectionGesture = false
         }
 
-        guard let downLocation = lastLeftMouseDownLocation else {
+        guard isSelectionGesture else {
             return false
         }
 
-        let upLocation = NSEvent.mouseLocation
-        let distance = hypot(upLocation.x - downLocation.x, upLocation.y - downLocation.y)
-        return distance >= 5
+        return !selectionReader.isLikelyEditableElementAtMouseLocation()
     }
 
     @MainActor
@@ -1245,7 +1320,52 @@ final class SelectionReader {
         ClipboardSelectionReader.readSelectedText(completion: completion)
     }
 
+    func isLikelyEditableElementAtMouseLocation() -> Bool {
+        guard let element = elementAtMouseLocation() ?? focusedElement() else {
+            return false
+        }
+
+        var currentElement: AXUIElement? = element
+        for _ in 0..<6 {
+            guard let element = currentElement else {
+                return false
+            }
+
+            if let role = role(of: element), Self.editableTextRoles.contains(role) {
+                return true
+            }
+
+            currentElement = parent(of: element)
+        }
+
+        return false
+    }
+
     func readSelectedText() -> String? {
+        guard let focusedElement = focusedElement() else {
+            return nil
+        }
+
+        guard let text = selectedText(from: focusedElement) else {
+            return nil
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        return trimmed
+    }
+
+    private static let editableTextRoles: Set<String> = [
+        kAXTextFieldRole as String,
+        kAXTextAreaRole as String,
+        kAXComboBoxRole as String,
+        "AXSearchField"
+    ]
+
+    private func focusedElement() -> AXUIElement? {
         let systemWideElement = AXUIElementCreateSystemWide()
         var focusedValue: CFTypeRef?
         let focusedResult = AXUIElementCopyAttributeValue(
@@ -1261,16 +1381,58 @@ final class SelectionReader {
             return nil
         }
 
-        guard let text = selectedText(from: focusedElement as! AXUIElement) else {
+        return (focusedElement as! AXUIElement)
+    }
+
+    private func elementAtMouseLocation() -> AXUIElement? {
+        let systemWideElement = AXUIElementCreateSystemWide()
+        let mouseLocation = NSEvent.mouseLocation
+        var element: AXUIElement?
+        let result = AXUIElementCopyElementAtPosition(
+            systemWideElement,
+            Float(mouseLocation.x),
+            Float(mouseLocation.y),
+            &element
+        )
+
+        guard result == .success else {
             return nil
         }
 
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        return element
+    }
+
+    private func role(of element: AXUIElement) -> String? {
+        var roleValue: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(
+            element,
+            kAXRoleAttribute as CFString,
+            &roleValue
+        )
+
+        guard result == .success else {
             return nil
         }
 
-        return trimmed
+        return roleValue as? String
+    }
+
+    private func parent(of element: AXUIElement) -> AXUIElement? {
+        var parentValue: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(
+            element,
+            kAXParentAttribute as CFString,
+            &parentValue
+        )
+
+        guard result == .success,
+              let parentValue,
+              CFGetTypeID(parentValue) == AXUIElementGetTypeID()
+        else {
+            return nil
+        }
+
+        return (parentValue as! AXUIElement)
     }
 
     private func selectedText(from element: AXUIElement) -> String? {
@@ -1376,13 +1538,28 @@ enum ClipboardSelectionReader {
     }
 
     private static func postCommandC() {
+        KeyboardShortcutPoster.postCommandShortcut(keyCode: CGKeyCode(kVK_ANSI_C))
+    }
+}
+
+enum KeyboardShortcutPoster {
+    static func postCommandShortcut(keyCode: CGKeyCode) {
         let source = CGEventSource(stateID: .hidSystemState)
-        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: true)
-        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: false)
-        keyDown?.flags = .maskCommand
-        keyUp?.flags = .maskCommand
-        keyDown?.post(tap: .cghidEventTap)
-        keyUp?.post(tap: .cghidEventTap)
+        postKey(CGKeyCode(kVK_Command), keyDown: true, flags: .maskCommand, source: source)
+        postKey(keyCode, keyDown: true, flags: .maskCommand, source: source)
+        postKey(keyCode, keyDown: false, flags: .maskCommand, source: source)
+        postKey(CGKeyCode(kVK_Command), keyDown: false, flags: [], source: source)
+    }
+
+    private static func postKey(
+        _ keyCode: CGKeyCode,
+        keyDown: Bool,
+        flags: CGEventFlags,
+        source: CGEventSource?
+    ) {
+        let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: keyDown)
+        event?.flags = flags
+        event?.post(tap: .cghidEventTap)
     }
 }
 
@@ -1439,13 +1616,7 @@ enum PasteboardTextInserter {
     }
 
     private static func postCommandV() {
-        let source = CGEventSource(stateID: .hidSystemState)
-        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true)
-        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false)
-        keyDown?.flags = .maskCommand
-        keyUp?.flags = .maskCommand
-        keyDown?.post(tap: .cghidEventTap)
-        keyUp?.post(tap: .cghidEventTap)
+        KeyboardShortcutPoster.postCommandShortcut(keyCode: CGKeyCode(kVK_ANSI_V))
     }
 }
 
@@ -1924,6 +2095,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     private let sourceText: String
     private let targetLanguage: TranslationLanguage
     private var resultText = "Translating..."
+    private var resultDisplayText = "Translating..."
     private let resultTextView = NSTextView()
     private let sourceTitleLabel = NSTextField(labelWithString: "")
     private let targetTitleLabel = NSTextField(labelWithString: "")
@@ -1987,7 +2159,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
     }
 
     func preferredHeightForCurrentContent() -> CGFloat {
-        Self.preferredHeight(sourceText: sourceText, resultText: resultText)
+        Self.preferredHeight(sourceText: sourceText, resultText: resultDisplayText)
     }
 
     private static func boxHeight(for text: String, font: NSFont, width: CGFloat, minimum: CGFloat, maximum: CGFloat) -> CGFloat {
@@ -2048,6 +2220,78 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
         storage.addLayoutManager(layoutManager)
         layoutManager.ensureLayout(for: container)
         return ceil(layoutManager.usedRect(for: container).height)
+    }
+
+    private static func renderedMarkdownText(_ text: String, font: NSFont, color: NSColor) -> NSAttributedString {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        let rendered = (try? AttributedString(markdown: text, options: options))
+            .map { NSMutableAttributedString($0) }
+            ?? NSMutableAttributedString(string: text)
+
+        guard rendered.length > 0 else {
+            return rendered
+        }
+
+        let fullRange = NSRange(location: 0, length: rendered.length)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.paragraphSpacing = 0
+        rendered.addAttributes([
+            .font: font,
+            .foregroundColor: color,
+            .paragraphStyle: paragraph
+        ], range: fullRange)
+
+        var fontRuns: [(NSRange, NSFont)] = []
+        rendered.enumerateAttribute(.inlinePresentationIntent, in: fullRange) { value, range, _ in
+            guard let intent = (value as? NSNumber)?.intValue else {
+                return
+            }
+
+            if let styledFont = markdownFont(for: intent, baseFont: font) {
+                fontRuns.append((range, styledFont))
+            }
+        }
+        for (range, styledFont) in fontRuns {
+            rendered.addAttribute(.font, value: styledFont, range: range)
+        }
+
+        var linkRuns: [NSRange] = []
+        rendered.enumerateAttribute(.link, in: fullRange) { value, range, _ in
+            if value != nil {
+                linkRuns.append(range)
+            }
+        }
+        for range in linkRuns {
+            rendered.addAttributes([
+                .foregroundColor: NSColor(calibratedRed: 0.72, green: 0.86, blue: 1.0, alpha: 0.96),
+                .underlineStyle: NSUnderlineStyle.single.rawValue
+            ], range: range)
+        }
+
+        return rendered
+    }
+
+    private static func markdownFont(for intent: Int, baseFont: NSFont) -> NSFont? {
+        let emphasized = 1
+        let stronglyEmphasized = 2
+        let code = 4
+
+        if intent & code != 0 {
+            return NSFont.monospacedSystemFont(ofSize: baseFont.pointSize * 0.94, weight: .regular)
+        }
+
+        var font = baseFont
+        var changed = false
+        if intent & stronglyEmphasized != 0 {
+            font = NSFont.systemFont(ofSize: baseFont.pointSize, weight: .semibold)
+            changed = true
+        }
+        if intent & emphasized != 0 {
+            font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+            changed = true
+        }
+        return changed ? font : nil
     }
 
     private func buildUI() {
@@ -2331,7 +2575,7 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
             height: resolvedResultBoxHeight - Self.boxInsetY * 2
         )
         let resultRawTextHeight = Self.textHeight(
-            for: resultText,
+            for: resultDisplayText,
             font: NSFont.systemFont(ofSize: Self.resultFontSize, weight: .regular),
             width: resultScrollFrame.width
         )
@@ -2355,23 +2599,23 @@ final class TranslationContentView: NSView, NSTextViewDelegate {
             return
         }
 
-        let isStreamingAppend = !resultText.isEmpty && cleanedText.hasPrefix(resultText)
-        if !isStreamingAppend {
+        if !cleanedText.hasPrefix(resultText) {
             shouldScrollResultToTop = true
         }
 
-        if isStreamingAppend, let textStorage = resultTextView.textStorage {
-            let suffix = String(cleanedText.dropFirst(resultText.count))
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: resultTextView.font ?? NSFont.systemFont(ofSize: Self.resultFontSize, weight: .regular),
-                .foregroundColor: resultTextView.textColor ?? NSColor.white
-            ]
-            textStorage.append(NSAttributedString(string: suffix, attributes: attrs))
+        let renderedText = Self.renderedMarkdownText(
+            cleanedText,
+            font: resultTextView.font ?? NSFont.systemFont(ofSize: Self.resultFontSize, weight: .regular),
+            color: resultTextView.textColor ?? NSColor.white
+        )
+        if let textStorage = resultTextView.textStorage {
+            textStorage.setAttributedString(renderedText)
         } else {
-            resultTextView.string = cleanedText
+            resultTextView.string = renderedText.string
         }
 
         resultText = cleanedText
+        resultDisplayText = resultTextView.string
         updateReplaceButtonState()
         layoutForCurrentSize()
     }
@@ -2512,7 +2756,7 @@ enum TranslationMode {
         switch self {
         case .selection:
             """
-            Translate the user's text into natural \(targetLanguage.promptName) by preserving the intended meaning, not by translating word-for-word. First infer what the text is trying to say in context, then express that idea as a fluent native \(targetLanguage.promptName) speaker would. Silently clean accidental line breaks, repeated spaces, OCR artifacts, and hyphenated line wraps. Preserve proper names, dates, numbers, URLs, and concrete facts. Prefer clear idiomatic wording over literal phrasing. Return only the \(targetLanguage.promptName) translation, with no commentary.
+            Translate the user's text into natural \(targetLanguage.promptName) by preserving the intended meaning, not by translating word-for-word. First infer what the text is trying to say in context, then express that idea as a fluent native \(targetLanguage.promptName) speaker would. Silently clean accidental line breaks, repeated spaces, OCR artifacts, and hyphenated line wraps. Preserve proper names, dates, numbers, URLs, and concrete facts. Preserve paragraph, bullet, and list structure when present. If the source is long or dense, split the translation into readable paragraphs instead of returning one wall of text. Prefer clear idiomatic wording over literal phrasing. Return only the \(targetLanguage.promptName) translation, with no commentary.
             """
         case .draftMessage:
             """

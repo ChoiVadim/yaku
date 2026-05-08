@@ -15,7 +15,7 @@ swift run Yaku
 ```
 
 The first run prompts for Accessibility permission. The app reads selected text from the focused accessibility element after mouse selection and shows a small translation button.
-If an app does not expose selection through Accessibility, Yaku falls back to a temporary copy-and-restore clipboard read after drag or double-click selection.
+If an app does not expose selection through Accessibility, Yaku falls back to a temporary copy-and-restore clipboard read after drag or double-click selection outside editable text fields. `Control` + `Command` + `T` and `fn` + `T` can also use that fallback for explicit replace translation.
 
 Use `Control` + `Command` + `S` or `fn` + `S` to translate text you read from a selected screen area.
 Use `Control` + `Command` + `T` or `fn` + `T` to translate text you wrote into the separate writing language, then replace it after review.
