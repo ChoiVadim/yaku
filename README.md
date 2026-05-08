@@ -65,8 +65,29 @@ Yaku ships an in-app updater. The running app polls `appcast.xml` daily and can 
 ### Cutting a release
 
 ```sh
+# Optional: signs with Developer ID and notarizes via Apple notary.
+# Without these env vars the build is ad-hoc signed (works but shows
+# "unidentified developer" on first launch).
+export DEVELOPER_ID='Developer ID Application: Your Name (XXXXXXXXXX)'
+export NOTARIZE_PROFILE='yaku-notarize'   # see below
+
 bash Scripts/release.sh 0.2.0
 ```
+
+To enable Developer ID + notarization, do the one-time setup once:
+
+1. Enroll in the Apple Developer Program ($99/yr).
+2. Create a **Developer ID Application** certificate in Keychain Access. Copy the full identity name (e.g. `Developer ID Application: Vadim Choi (XXXXXXXXXX)`).
+3. Generate an app-specific password at <https://account.apple.com>.
+4. Store the notary credentials in keychain so notarytool can read them non-interactively:
+   ```sh
+   xcrun notarytool store-credentials yaku-notarize \
+       --apple-id "you@example.com" \
+       --team-id "XXXXXXXXXX" \
+       --password "abcd-efgh-ijkl-mnop"
+   ```
+
+Without `DEVELOPER_ID`/`NOTARIZE_PROFILE`, `release.sh` still produces a working `.dmg`, just ad-hoc signed.
 
 The script:
 

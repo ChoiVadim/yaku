@@ -49,6 +49,53 @@ After the GitHub Release is published, all installed copies of Yaku will see the
 - The Sparkle framework must come from the universal `Sparkle.xcframework/macos-arm64_x86_64` slice. The script falls back to a generic `find` only if the universal slice is missing (e.g. host-arch only build).
 - Designated requirement is pinned to `identifier "local.vadim.yaku"` so accessibility/screen-recording permissions persist across rebuilds.
 
+## Distribution signing modes
+
+The build script picks the signing identity from `DEVELOPER_ID` env var. Three modes:
+
+| Mode                     | Env vars                            | Outcome for end user                                                                                        |
+| ------------------------ | ----------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Ad-hoc (default)         | none                                | "unidentified developer" warning; right-click → Open required.                                              |
+| Developer ID, no notary  | `DEVELOPER_ID`                      | Trusted by Gatekeeper but Apple notary check still pings online; first launch triggers a "verifying…" wait. |
+| Developer ID + notarized | `DEVELOPER_ID` + `NOTARIZE_PROFILE` | Stapled ticket. Friend mounts DMG → drags to Applications → launches. Zero prompts, zero terminal.          |
+
+### One-time setup for full notarization
+
+1. Apple Developer Program enrollment ($99/yr): <https://developer.apple.com/programs/enroll/>.
+2. Create a **Developer ID Application** certificate in Keychain Access (Xcode → Settings → Accounts → Manage Certificates). Note the full identity name, e.g. `Developer ID Application: Vadim Choi (XXXXXXXXXX)`.
+3. Generate an app-specific password at <https://account.apple.com> → Sign-In and Security → App-Specific Passwords.
+4. Store credentials in keychain so notarytool can read them non-interactively:
+   ```sh
+   xcrun notarytool store-credentials yaku-notarize \
+       --apple-id "leviosaai2026@gmail.com" \
+       --team-id "XXXXXXXXXX" \
+       --password "abcd-efgh-ijkl-mnop"
+   ```
+5. Save the env vars somewhere (a `.envrc`, shell rc file, or wrapper script — never committed):
+   ```sh
+   export DEVELOPER_ID='Developer ID Application: Vadim Choi (XXXXXXXXXX)'
+   export NOTARIZE_PROFILE='yaku-notarize'
+   ```
+
+### Per-release with full distribution
+
+```sh
+export SPARKLE_BIN="$PWD/.build/artifacts/sparkle/Sparkle/bin"
+export DEVELOPER_ID='Developer ID Application: Vadim Choi (XXXXXXXXXX)'
+export NOTARIZE_PROFILE='yaku-notarize'
+bash Scripts/release.sh 0.2.0
+git add Resources/Info.plist appcast.xml
+git commit -m "Release v0.2.0"
+git tag v0.2.0 && git push origin main --tags
+gh release create v0.2.0 dist/Yaku-0.2.0.dmg --title "v0.2.0" --notes "..."
+```
+
+Notarization adds 2–5 minutes per release; `xcrun notarytool submit --wait` blocks until Apple finishes. The DMG is sent twice (once for the bundled `.app`, once for the DMG container itself) so Gatekeeper can verify offline at every stage.
+
+### Sharing the build with users
+
+Just send the GitHub Release URL: `https://github.com/ChoiVadim/yaku/releases/latest`. Users click "Yaku-X.Y.Z.dmg", mount, drag to Applications. Repeat for the link itself if convenient. After install, the in-app updater takes over.
+
 ## When editing App.swift
 
 - Do not introduce a second source file unless an entire subsystem is being extracted. The single-file layout is intentional — easier to grep, easier to ship as a one-shot.

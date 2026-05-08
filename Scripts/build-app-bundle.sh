@@ -17,6 +17,25 @@ LOCAL_MODULE_CACHE="$ROOT/.build/clang-module-cache-release"
 # Universal (arm64 + x86_64) by default; pass UNIVERSAL=0 to build host-arch only.
 UNIVERSAL="${UNIVERSAL:-1}"
 
+# Signing identity. Default is ad-hoc; set DEVELOPER_ID to a Developer ID
+# certificate name (e.g. 'Developer ID Application: Vadim Choi (XXXXXXXXXX)')
+# for distributable signed builds.
+DEVELOPER_ID="${DEVELOPER_ID:-}"
+if [ -n "$DEVELOPER_ID" ]; then
+    SIGN_IDENTITY="$DEVELOPER_ID"
+else
+    SIGN_IDENTITY="-"
+fi
+
+# Notarization. Set NOTARIZE_PROFILE to a keychain profile name created via
+# `xcrun notarytool store-credentials` to enable submit + staple. Requires
+# DEVELOPER_ID to also be set (Apple notary rejects ad-hoc binaries).
+NOTARIZE_PROFILE="${NOTARIZE_PROFILE:-}"
+if [ -n "$NOTARIZE_PROFILE" ] && [ -z "$DEVELOPER_ID" ]; then
+    echo "NOTARIZE_PROFILE is set but DEVELOPER_ID is empty — Apple's notary cannot accept ad-hoc binaries." >&2
+    exit 1
+fi
+
 cd "$ROOT"
 mkdir -p "$LOCAL_HOME" "$LOCAL_MODULE_CACHE"
 export HOME="$LOCAL_HOME"
@@ -103,20 +122,37 @@ for component in \
     "$SPARKLE_VERSIONS_B/Updater.app" \
     "$SPARKLE_VERSIONS_B/Autoupdate"; do
     if [ -e "$component" ]; then
-        codesign --force --sign - --options runtime "$component"
+        codesign --force --sign "$SIGN_IDENTITY" --options runtime "$component"
     fi
 done
-codesign --force --sign - --options runtime "$CONTENTS_DIR/Frameworks/Sparkle.framework"
+codesign --force --sign "$SIGN_IDENTITY" --options runtime "$CONTENTS_DIR/Frameworks/Sparkle.framework"
 
 codesign \
     --force \
-    --sign - \
+    --sign "$SIGN_IDENTITY" \
     --options runtime \
     --entitlements "$ROOT/Resources/Yaku.entitlements" \
     --requirements '=designated => identifier "local.vadim.yaku"' \
     "$APP_DIR"
 
 xattr -cr "$APP_DIR"
+
+# Notarize and staple the .app *before* it is dropped into the DMG. That way
+# the DMG's contents already carry the notarization ticket so Gatekeeper can
+# verify offline.
+if [ -n "$NOTARIZE_PROFILE" ]; then
+    NOTARIZE_ZIP="$ROOT/.build/Yaku-notarize.zip"
+    rm -f "$NOTARIZE_ZIP"
+    /usr/bin/ditto -c -k --keepParent "$APP_DIR" "$NOTARIZE_ZIP"
+    echo "Submitting Yaku.app to Apple notary…"
+    xcrun notarytool submit "$NOTARIZE_ZIP" \
+        --keychain-profile "$NOTARIZE_PROFILE" \
+        --wait
+    echo "Stapling notarization ticket to Yaku.app…"
+    xcrun stapler staple "$APP_DIR"
+    rm -f "$NOTARIZE_ZIP"
+fi
+
 echo "Built $APP_DIR"
 
 # --- Styled DMG packaging ---
@@ -210,9 +246,29 @@ done
 rm -f "$DMG_RW_PATH"
 rm -rf "$DMG_STAGE"
 
+# Sign + notarize + staple the DMG itself when a Developer ID is provided.
+# Stapling the DMG lets Gatekeeper verify the download offline before mount.
+if [ -n "$DEVELOPER_ID" ]; then
+    codesign --force --sign "$SIGN_IDENTITY" "$DMG_PATH"
+fi
+if [ -n "$NOTARIZE_PROFILE" ]; then
+    echo "Submitting DMG to Apple notary…"
+    xcrun notarytool submit "$DMG_PATH" \
+        --keychain-profile "$NOTARIZE_PROFILE" \
+        --wait
+    echo "Stapling notarization ticket to DMG…"
+    xcrun stapler staple "$DMG_PATH"
+fi
+
 echo "Packaged $DMG_PATH"
 
 ARCHS_OUT="$(/usr/bin/lipo -archs "$MACOS_DIR/Yaku" 2>/dev/null || echo unknown)"
 DMG_SIZE="$(/usr/bin/du -h "$DMG_PATH" | cut -f1)"
 echo "Architectures: $ARCHS_OUT"
 echo "DMG size: $DMG_SIZE"
+if [ -n "$DEVELOPER_ID" ]; then
+    echo "Signed by: $DEVELOPER_ID"
+fi
+if [ -n "$NOTARIZE_PROFILE" ]; then
+    echo "Notarized + stapled."
+fi
