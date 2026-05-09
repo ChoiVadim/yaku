@@ -87,7 +87,6 @@ SIGN_OUTPUT="$("$SIGN_UPDATE" "$DMG_PATH")"
 echo "$SIGN_OUTPUT"
 
 # 4. Append item to appcast.xml.
-DMG_LENGTH="$(stat -f%z "$DMG_PATH")"
 DMG_FILENAME="Yaku-$VERSION.dmg"
 DMG_URL="$DMG_URL_BASE/v$VERSION/$DMG_FILENAME"
 PUB_DATE="$(date -u +"%a, %d %b %Y %H:%M:%S +0000")"
@@ -101,7 +100,6 @@ ITEM_BLOCK=$(cat <<EOF
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
                 url="$DMG_URL"
-                length="$DMG_LENGTH"
                 type="application/octet-stream"
                 $SIGN_OUTPUT />
         </item>
@@ -110,10 +108,7 @@ EOF
 
 # Insert before </channel>.
 TMP_APPCAST="$ROOT/.build/appcast.tmp"
-awk -v block="$ITEM_BLOCK" '
-    /<\/channel>/ { print block }
-    { print }
-' "$APPCAST" > "$TMP_APPCAST"
+ITEM_BLOCK="$ITEM_BLOCK" perl -0pe 's#^[ \t]*</channel>#$ENV{ITEM_BLOCK}\n    </channel>#m' "$APPCAST" > "$TMP_APPCAST"
 mv "$TMP_APPCAST" "$APPCAST"
 
 # Rename the dmg so the GitHub Release URL matches.

@@ -67,7 +67,7 @@ The build script picks the signing identity from `DEVELOPER_ID` env var. Three m
 4. Store credentials in keychain so notarytool can read them non-interactively:
    ```sh
    xcrun notarytool store-credentials yaku-notarize \
-       --apple-id "leviosaai2026@gmail.com" \
+       --apple-id "tsoivadim97@gmail.com" \
        --team-id "XXXXXXXXXX" \
        --password "abcd-efgh-ijkl-mnop"
    ```

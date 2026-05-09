@@ -636,6 +636,10 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     private var translationPanelController: TranslationPanelController?
     private var translationPrefetch: TranslationPrefetch?
     private var isScreenshotTranslationRunning = false
+    private var screenshotDragStartLocation: NSPoint?
+    private var screenshotDragEndLocation: NSPoint?
+    private var screenshotPanelSide: TranslationPanelController.Side?
+    private var screenshotDragTracker: ScreenshotDragTracker?
     private var globalHotKeys: [GlobalHotKey] = []
     private var translationCache = TranslationCache()
     private lazy var bootstrap: OllamaBootstrap = OllamaBootstrap(
@@ -1122,10 +1126,29 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     }
 
     private func startMouseMonitor() {
-        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .rightMouseUp]) { [weak self] event in
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseUp]) { [weak self] event in
             guard let self else { return }
+            let mouseLocation = NSEvent.mouseLocation
             if event.type == .leftMouseDown {
-                self.lastLeftMouseDownLocation = NSEvent.mouseLocation
+                self.lastLeftMouseDownLocation = mouseLocation
+                if self.isScreenshotTranslationRunning {
+                    self.screenshotDragStartLocation = mouseLocation
+                    self.screenshotDragEndLocation = nil
+                }
+                return
+            }
+
+            if event.type == .leftMouseDragged {
+                if self.isScreenshotTranslationRunning {
+                    self.updateScreenshotDrag(to: mouseLocation)
+                }
+                return
+            }
+
+            if self.isScreenshotTranslationRunning {
+                if event.type == .leftMouseUp {
+                    self.updateScreenshotDrag(to: mouseLocation)
+                }
                 return
             }
 
@@ -1196,24 +1219,66 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     return
                 }
 
-                let panelSide: TranslationPanelController.Side = {
-                    guard let down = self.lastLeftMouseDownLocation else { return .right }
-                    let dx = mouseLocation.x - down.x
-                    let dy = mouseLocation.y - down.y
-                    // Need a meaningful horizontal drag — vertical or tiny drags
-                    // give no reliable direction signal, so default to .right.
-                    guard abs(dx) >= 5, abs(dx) > abs(dy) else { return .right }
-                    return dx > 0 ? .right : .left
-                }()
-
                 self.showTranslateButton(
                     for: cleanedSelection,
                     near: mouseLocation,
                     selectionRect: selection.selectionRect,
-                    panelSide: panelSide
+                    panelSide: self.panelSideForSelectionEnding(at: mouseLocation)
                 )
             }
         }
+    }
+
+    private func panelSideForSelectionEnding(at mouseLocation: NSPoint) -> TranslationPanelController.Side {
+        panelSideForDrag(from: lastLeftMouseDownLocation, to: mouseLocation)
+    }
+
+    private func panelSideForScreenshotEnding(at mouseLocation: NSPoint) -> TranslationPanelController.Side {
+        screenshotPanelSide ?? panelSideForDrag(from: screenshotDragStartLocation, to: mouseLocation)
+    }
+
+    private func panelSideForDrag(from startLocation: NSPoint?, to endLocation: NSPoint) -> TranslationPanelController.Side {
+        guard let startLocation else { return .right }
+
+        let dx = endLocation.x - startLocation.x
+        let dy = endLocation.y - startLocation.y
+        // Need a meaningful horizontal drag — vertical or tiny drags
+        // give no reliable direction signal, so default to .right.
+        guard abs(dx) >= 5, abs(dx) > abs(dy) else { return .right }
+        return dx > 0 ? .right : .left
+    }
+
+    private func updateScreenshotDrag(to mouseLocation: NSPoint) {
+        screenshotDragEndLocation = mouseLocation
+        screenshotPanelSide = panelSideForDrag(from: screenshotDragStartLocation, to: mouseLocation)
+    }
+
+    @MainActor
+    private func startScreenshotDragTracking() {
+        resetScreenshotDragTracking()
+        let tracker = ScreenshotDragTracker { [weak self] startLocation, endLocation, panelSide in
+            guard let self else { return }
+            if let startLocation {
+                self.screenshotDragStartLocation = startLocation
+            }
+            if let endLocation {
+                self.screenshotDragEndLocation = endLocation
+            }
+            if let panelSide {
+                self.screenshotPanelSide = panelSide
+            }
+        }
+        screenshotDragTracker = tracker
+        tracker.enable()
+    }
+
+    @MainActor
+    private func resetScreenshotDragTracking() {
+        screenshotDragTracker?.disable()
+        screenshotDragTracker = nil
+        screenshotDragStartLocation = nil
+        screenshotDragEndLocation = nil
+        screenshotPanelSide = nil
     }
 
     private func shouldAttemptClipboardSelectionFallback(for event: NSEvent) -> Bool {
@@ -1272,21 +1337,21 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 selectedText: selectedText,
                 initialMode: floatingDefaultMode.translationMode,
                 onTranslate: { [weak self] text in
-                    self?.petController?.holdReadyUntilPanelCloses()
                     self?.translate(
                         text,
                         near: screenPoint,
                         selectionRect: selectionRect,
-                        panelSide: panelSide
+                        panelSide: panelSide,
+                        keepPetReadyUntilPanelCloses: true
                     )
                 },
                 onSmartReply: { [weak self] text in
-                    self?.petController?.holdReadyUntilPanelCloses()
                     self?.replyToSelection(
                         text,
                         near: screenPoint,
                         selectionRect: selectionRect,
-                        panelSide: panelSide
+                        panelSide: panelSide,
+                        keepPetReadyUntilPanelCloses: true
                     )
                 }
             )
@@ -1328,7 +1393,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         _ text: String,
         near screenPoint: NSPoint,
         selectionRect: NSRect? = nil,
-        panelSide: TranslationPanelController.Side = .right
+        panelSide: TranslationPanelController.Side = .right,
+        keepPetReadyUntilPanelCloses: Bool = false
     ) {
         cancelPrefetch()
         translate(
@@ -1337,7 +1403,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             mode: .smartReply,
             useCache: false,
             selectionRect: selectionRect,
-            panelSide: panelSide
+            panelSide: panelSide,
+            keepPetReadyUntilPanelCloses: keepPetReadyUntilPanelCloses
         )
     }
 
@@ -1350,6 +1417,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         useCache: Bool = true,
         selectionRect: NSRect? = nil,
         panelSide: TranslationPanelController.Side = .right,
+        keepPetReadyUntilPanelCloses: Bool = false,
         onReplace: ((String) -> Void)? = nil
     ) {
         let language = explicitTargetLanguage ?? targetLanguage
@@ -1380,6 +1448,9 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         )
         translationPanelController?.close()
         translationPanelController = controller
+        if keepPetReadyUntilPanelCloses {
+            holdPetReadyUntilActivePanelCloses(mode: mode)
+        }
         let requestID = controller.showLoading()
         runTranslation(
             text,
@@ -1390,6 +1461,19 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             controller: controller,
             requestID: requestID
         )
+    }
+
+    @MainActor
+    private func holdPetReadyUntilActivePanelCloses(mode: TranslationMode) {
+        guard selectionDisplayMode == .pet else {
+            return
+        }
+
+        if petController == nil {
+            petController = PetController(initialMode: mode)
+        }
+        petController?.show()
+        petController?.holdReadyUntilPanelCloses(mode: mode)
     }
 
     @MainActor
@@ -1637,7 +1721,6 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         translateButtonController?.close()
         translateButtonController = nil
-        petController?.clearReady()
         cancelPrefetch()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
@@ -1647,24 +1730,29 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 guard let self else { return }
 
                 guard let selection else {
+                    self.petController?.clearReady()
                     self.presentSelectionTranslationError("Select text first, then press \(GlobalHotKeyDefinition.translateSelectionDisplayString).")
                     return
                 }
 
                 let cleanedDraft = TextNormalizer.cleanedDraftMessage(selection.text)
                 guard !cleanedDraft.isEmpty else {
+                    self.petController?.clearReady()
                     self.presentSelectionTranslationError("Select text first, then press \(GlobalHotKeyDefinition.translateSelectionDisplayString).")
                     return
                 }
 
                 let language = self.draftTargetLanguage
+                let mouseLocation = NSEvent.mouseLocation
                 self.translate(
                     cleanedDraft,
-                    near: NSEvent.mouseLocation,
+                    near: mouseLocation,
                     targetLanguage: language,
                     mode: .draftMessage,
                     useCache: false,
-                    selectionRect: selection.selectionRect
+                    selectionRect: selection.selectionRect,
+                    panelSide: self.panelSideForSelectionEnding(at: mouseLocation),
+                    keepPetReadyUntilPanelCloses: true
                 ) { [weak self] translation in
                     self?.replaceCurrentSelection(with: translation)
                 }
@@ -1691,6 +1779,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         }
 
         isScreenshotTranslationRunning = true
+        startScreenshotDragTracking()
         updateMenuState()
         translateButtonController?.close()
         translateButtonController = nil
@@ -1714,16 +1803,26 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
                     let sourceText = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !TextNormalizer.cleanedSelection(sourceText).isEmpty else {
+                        self.resetScreenshotDragTracking()
                         self.presentScreenshotTranslationError(ScreenshotTranslationError.noTextRecognized)
                         return
                     }
 
-                    self.translate(sourceText, near: NSEvent.mouseLocation)
+                    let mouseLocation = NSEvent.mouseLocation
+                    let panelSide = self.panelSideForScreenshotEnding(at: mouseLocation)
+                    self.resetScreenshotDragTracking()
+                    self.translate(
+                        sourceText,
+                        near: mouseLocation,
+                        panelSide: panelSide,
+                        keepPetReadyUntilPanelCloses: true
+                    )
                 }
             } catch {
                 await MainActor.run {
                     guard let self else { return }
                     self.isScreenshotTranslationRunning = false
+                    self.resetScreenshotDragTracking()
                     self.updateMenuState()
                     guard !ScreenshotTranslationError.isCancellation(error) else {
                         return
@@ -2470,6 +2569,118 @@ enum ImageTextRecognizer {
     }
 }
 
+final class ScreenshotDragTracker {
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private var startLocation: NSPoint?
+    private var lastLocation: NSPoint?
+    private var currentPanelSide: TranslationPanelController.Side?
+    private let onUpdate: @MainActor (NSPoint?, NSPoint?, TranslationPanelController.Side?) -> Void
+
+    init(onUpdate: @escaping @MainActor (NSPoint?, NSPoint?, TranslationPanelController.Side?) -> Void) {
+        self.onUpdate = onUpdate
+    }
+
+    func enable() {
+        guard eventTap == nil else { return }
+
+        let mask =
+            CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
+            | CGEventMask(1 << CGEventType.leftMouseDragged.rawValue)
+            | CGEventMask(1 << CGEventType.leftMouseUp.rawValue)
+        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: mask,
+            callback: { _, type, event, userInfo in
+                guard let userInfo else {
+                    return Unmanaged.passUnretained(event)
+                }
+
+                let tracker = Unmanaged<ScreenshotDragTracker>.fromOpaque(userInfo).takeUnretainedValue()
+                tracker.handle(type: type, event: event)
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: selfPointer
+        ) else {
+            return
+        }
+
+        eventTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        runLoopSource = source
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    func disable() {
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+        }
+        if let runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        }
+        runLoopSource = nil
+        eventTap = nil
+        startLocation = nil
+        lastLocation = nil
+        currentPanelSide = nil
+    }
+
+    private func handle(type: CGEventType, event: CGEvent) {
+        let location = event.location
+        switch type {
+        case .leftMouseDown:
+            startLocation = location
+            lastLocation = location
+            currentPanelSide = nil
+            notify(startLocation: location, endLocation: nil, panelSide: nil)
+        case .leftMouseDragged, .leftMouseUp:
+            let referenceLocation = startLocation ?? lastLocation
+            if let panelSide = Self.meaningfulPanelSideForDrag(from: referenceLocation, to: location) {
+                currentPanelSide = panelSide
+            }
+            notify(startLocation: startLocation, endLocation: location, panelSide: currentPanelSide)
+            lastLocation = location
+            if type == .leftMouseUp {
+                startLocation = nil
+                lastLocation = nil
+            }
+        default:
+            break
+        }
+    }
+
+    private func notify(
+        startLocation: NSPoint?,
+        endLocation: NSPoint?,
+        panelSide: TranslationPanelController.Side?
+    ) {
+        Task { @MainActor in
+            onUpdate(startLocation, endLocation, panelSide)
+        }
+    }
+
+    private static func meaningfulPanelSideForDrag(
+        from startLocation: NSPoint?,
+        to endLocation: NSPoint
+    ) -> TranslationPanelController.Side? {
+        guard let startLocation else { return nil }
+
+        let dx = endLocation.x - startLocation.x
+        let dy = endLocation.y - startLocation.y
+        guard abs(dx) >= 5, abs(dx) > abs(dy) else { return nil }
+        return dx > 0 ? .right : .left
+    }
+
+    deinit {
+        disable()
+    }
+}
+
 final class TabKeyInterceptor {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -2688,7 +2899,10 @@ final class PetController {
         show()
     }
 
-    func holdReadyUntilPanelCloses() {
+    func holdReadyUntilPanelCloses(mode: TranslationMode? = nil) {
+        if let mode {
+            currentMode = mode
+        }
         selectedText = nil
         onTranslate = nil
         onSmartReply = nil

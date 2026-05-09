@@ -22,5 +22,16 @@
                 type="application/octet-stream"
                 sparkle:edSignature="xCiszvsZZHIHjIM7iJk7LKHuOPi2r3Ru7fG0WzdnFrm1oP9Bx7moOCLRWO37a1oEHDMjUIlnHU7KHX+2hNt3DQ==" />
         </item>
+        <item>
+            <title>Version 0.3.0</title>
+            <pubDate>Sat, 09 May 2026 07:24:20 +0000</pubDate>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/ChoiVadim/yaku/releases/download/v0.3.0/Yaku-0.3.0.dmg"
+                type="application/octet-stream"
+                sparkle:edSignature="ewf8OlWJyNTj59C5lfSLFdJfnB2z7lU/O1JJz0vj9zipPZfjtO700q4EdufnFijrrhKCTHMNKsRI8D51QKNxAg==" length="4063257" />
+        </item>
     </channel>
 </rss>
