@@ -25,6 +25,8 @@ private enum MenuItemTag: Int {
     case usageStatsSummary = 116
     case writingStyle = 117
     case cleanupLevel = 118
+    case snippets = 119
+    case replacementMode = 120
 }
 
 struct OllamaModelOption: Equatable {
@@ -96,6 +98,22 @@ private enum SelectionDisplayMode: String, CaseIterable {
 
     var settingsTitle: String {
         "Display: \(menuTitle)"
+    }
+}
+
+private enum ReplacementMode: String, CaseIterable {
+    case instantInsert
+    case showPanel
+
+    var menuTitle: String {
+        switch self {
+        case .instantInsert: return "Insert without preview"
+        case .showPanel: return "Show preview panel"
+        }
+    }
+
+    var settingsTitle: String {
+        "Replace Action: \(menuTitle)"
     }
 }
 
@@ -564,6 +582,7 @@ private final class TranslationPrefetch {
                 appCategory: appCategory,
                 style: .casual,
                 cleanup: cleanup,
+                snippets: [],
                 thinkingLevel: thinkingLevel
             ) { [weak self] partial in
                 Task { @MainActor in
@@ -671,13 +690,16 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     private var screenshotPanelSide: TranslationPanelController.Side?
     private var screenshotDragTracker: ScreenshotDragTracker?
     private var globalHotKeys: [GlobalHotKey] = []
+    private var lastReplacementSourcePID: pid_t?
     private var translationCache = TranslationCache()
     private let usageStatsStore = UsageStatsStore()
+    private let snippetsStore = SnippetsStore()
     private lazy var bootstrap: OllamaBootstrap = OllamaBootstrap(
         baseURL: ollamaBaseURL,
         model: selectedModelID
     )
     private var onboardingWindowController: OnboardingWindowController?
+    private var snippetsWindowController: SnippetsWindowController?
     private lazy var updaterController: SPUStandardUpdaterController? = {
         guard isRunningFromAppBundle else { return nil }
         return SPUStandardUpdaterController(
@@ -750,6 +772,16 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    private var replacementMode: ReplacementMode {
+        get {
+            let raw = UserDefaults.standard.string(forKey: "replacementMode") ?? ReplacementMode.instantInsert.rawValue
+            return ReplacementMode(rawValue: raw) ?? .instantInsert
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "replacementMode")
+        }
+    }
+
     private func writingStyle(for category: AppCategory) -> WritingStyle {
         let key = "writingStyle.\(category.rawValue)"
         if let raw = UserDefaults.standard.string(forKey: key),
@@ -793,6 +825,10 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         applySelectionDisplayMode()
         setupGlobalHotKeys()
         setupBootstrap()
+        snippetsStore.onChange = { [weak self] in
+            self?.translationCache = TranslationCache()
+            self?.cancelPrefetch()
+        }
         _ = updaterController
     }
 
@@ -947,6 +983,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        menu.addItem(makeSectionHeader("Languages"))
         menu.addItem(makeMenuItem(
             title: "",
             tag: .targetLanguage,
@@ -959,6 +996,22 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             symbolName: "text.bubble",
             submenu: makeDraftTargetLanguageMenu()
         ))
+
+        menu.addItem(makeSectionHeader("Output"))
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .writingStyle,
+            symbolName: "textformat",
+            submenu: makeWritingStyleMenu()
+        ))
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .cleanupLevel,
+            symbolName: "sparkles",
+            submenu: makeCleanupLevelMenu()
+        ))
+
+        menu.addItem(makeSectionHeader("Behavior"))
         menu.addItem(makeMenuItem(
             title: "",
             tag: .selectionDisplayMode,
@@ -973,10 +1026,12 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         ))
         menu.addItem(makeMenuItem(
             title: "",
-            tag: .thinkingLevel,
-            symbolName: "brain.head.profile",
-            submenu: makeThinkingLevelMenu()
+            tag: .replacementMode,
+            symbolName: "return",
+            submenu: makeReplacementModeMenu()
         ))
+
+        menu.addItem(makeSectionHeader("AI engine"))
         menu.addItem(makeMenuItem(
             title: "",
             tag: .selectedModel,
@@ -985,15 +1040,18 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         ))
         menu.addItem(makeMenuItem(
             title: "",
-            tag: .writingStyle,
-            symbolName: "textformat",
-            submenu: makeWritingStyleMenu()
+            tag: .thinkingLevel,
+            symbolName: "brain.head.profile",
+            submenu: makeThinkingLevelMenu()
         ))
+
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(makeMenuItem(
-            title: "",
-            tag: .cleanupLevel,
-            symbolName: "sparkles",
-            submenu: makeCleanupLevelMenu()
+            title: "Snippets & Dictionary…",
+            tag: .snippets,
+            symbolName: "text.append",
+            action: #selector(openSnippetsWindow),
+            keyEquivalent: ""
         ))
 
         menu.addItem(NSMenuItem.separator())
@@ -1048,6 +1106,20 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         image.isTemplate = true
         return image
+    }
+
+    private func makeSectionHeader(_ title: String) -> NSMenuItem {
+        if #available(macOS 14.0, *) {
+            return NSMenuItem.sectionHeader(title: title)
+        }
+        let item = NSMenuItem(title: title.uppercased(), action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        let attributed = NSAttributedString(string: title.uppercased(), attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ])
+        item.attributedTitle = attributed
+        return item
     }
 
     private func makeStatusBarIcon(for mode: FloatingButtonDefaultMode) -> NSImage {
@@ -1233,6 +1305,21 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             )
             item.target = self
             item.representedObject = level.rawValue
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    private func makeReplacementModeMenu() -> NSMenu {
+        let menu = NSMenu()
+        for mode in ReplacementMode.allCases {
+            let item = NSMenuItem(
+                title: mode.menuTitle,
+                action: #selector(selectReplacementMode(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = mode.rawValue
             menu.addItem(item)
         }
         return menu
@@ -1541,6 +1628,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         let (_, currentAppCategory) = AppCategoryClassifier.detectFrontmost()
         let currentStyle = writingStyle(for: currentAppCategory)
         let currentCleanup = cleanupLevel
+        let currentSnippets = snippetsStore.usableSnippets()
         let anchor: TranslationPanelController.Anchor =
             selectionRect.map(TranslationPanelController.Anchor.selection)
                 ?? .point(screenPoint, panelSide: panelSide)
@@ -1559,6 +1647,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     appCategory: currentAppCategory,
                     style: currentStyle,
                     cleanup: currentCleanup,
+                    snippets: currentSnippets,
                     useCache: useCache,
                     usageKind: usageKind
                 )
@@ -1583,6 +1672,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             appCategory: currentAppCategory,
             style: currentStyle,
             cleanup: currentCleanup,
+            snippets: currentSnippets,
             useCache: useCache,
             usageKind: usageKind,
             controller: controller,
@@ -1612,6 +1702,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         appCategory: AppCategory,
         style: WritingStyle,
         cleanup: CleanupLevel,
+        snippets: [Snippet],
         useCache: Bool,
         usageKind: UsageStatsEventKind
     ) {
@@ -1628,6 +1719,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             appCategory: appCategory,
             style: style,
             cleanup: cleanup,
+            snippets: snippets,
             useCache: useCache,
             usageKind: usageKind,
             controller: controller,
@@ -1644,6 +1736,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         appCategory: AppCategory,
         style: WritingStyle,
         cleanup: CleanupLevel,
+        snippets: [Snippet],
         useCache: Bool,
         usageKind: UsageStatsEventKind,
         controller: TranslationPanelController,
@@ -1692,6 +1785,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     appCategory: appCategory,
                     style: style,
                     cleanup: cleanup,
+                    snippets: snippets,
                     thinkingLevel: thinkingLevel
                 ) { partialTranslation in
                     Task { @MainActor in
@@ -1890,6 +1984,15 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 item.state = raw == activeLevel ? .on : .off
             }
         }
+
+        menu.item(withTag: MenuItemTag.replacementMode.rawValue)?.title = replacementMode.settingsTitle
+        if let replacementMenu = menu.item(withTag: MenuItemTag.replacementMode.rawValue)?.submenu {
+            let activeMode = replacementMode.rawValue
+            for item in replacementMenu.items {
+                guard let raw = item.representedObject as? String else { continue }
+                item.state = raw == activeMode ? .on : .off
+            }
+        }
     }
 
     @objc private func openAccessibilitySettings() {
@@ -1900,6 +2003,19 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     @MainActor
     @objc private func openOnboardingWindow() {
         presentOnboardingWindow()
+    }
+
+    @MainActor
+    @objc private func openSnippetsWindow() {
+        if let snippetsWindowController {
+            snippetsWindowController.presentAndFocus()
+            return
+        }
+        let controller = SnippetsWindowController(store: snippetsStore) { [weak self] in
+            self?.snippetsWindowController = nil
+        }
+        snippetsWindowController = controller
+        controller.presentAndFocus()
     }
 
     @MainActor
@@ -1922,6 +2038,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         translateButtonController?.close()
         translateButtonController = nil
         cancelPrefetch()
+        lastReplacementSourcePID = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             guard let self else { return }
@@ -1944,18 +2061,71 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
                 let language = self.draftTargetLanguage
                 let mouseLocation = NSEvent.mouseLocation
-                self.translate(
-                    cleanedDraft,
-                    near: mouseLocation,
-                    targetLanguage: language,
+                switch self.replacementMode {
+                case .instantInsert:
+                    self.runInstantTranslation(cleanedDraft, language: language)
+                case .showPanel:
+                    self.translate(
+                        cleanedDraft,
+                        near: mouseLocation,
+                        targetLanguage: language,
+                        mode: .draftMessage,
+                        useCache: false,
+                        usageKind: .draftMessage,
+                        selectionRect: selection.selectionRect,
+                        panelSide: self.panelSideForSelectionEnding(at: mouseLocation),
+                        keepPetReadyUntilPanelCloses: true
+                    ) { [weak self] translation in
+                        self?.replaceCurrentSelection(with: translation)
+                    }
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func runInstantTranslation(_ text: String, language: TranslationLanguage) {
+        let currentThinkingLevel = thinkingLevel
+        let (_, currentAppCategory) = AppCategoryClassifier.detectFrontmost()
+        let currentStyle = writingStyle(for: currentAppCategory)
+        let currentCleanup = cleanupLevel
+        let currentSnippets = snippetsStore.usableSnippets()
+
+        if petController == nil {
+            petController = PetController(initialMode: .draftMessage)
+        }
+        petController?.showThinking()
+
+        let client = ollamaClient
+        Task { [weak self] in
+            do {
+                let translated = try await client.translate(
+                    text,
+                    to: language,
                     mode: .draftMessage,
-                    useCache: false,
-                    usageKind: .draftMessage,
-                    selectionRect: selection.selectionRect,
-                    panelSide: self.panelSideForSelectionEnding(at: mouseLocation),
-                    keepPetReadyUntilPanelCloses: true
-                ) { [weak self] translation in
-                    self?.replaceCurrentSelection(with: translation)
+                    appCategory: currentAppCategory,
+                    style: currentStyle,
+                    cleanup: currentCleanup,
+                    snippets: currentSnippets,
+                    thinkingLevel: currentThinkingLevel
+                ) { _ in }
+                await MainActor.run {
+                    guard let self else { return }
+                    self.usageStatsStore.recordTranslation(
+                        sourceText: text,
+                        resultText: translated,
+                        kind: .draftMessage,
+                        targetLanguage: language
+                    )
+                    self.petController?.clearThinking()
+                    self.replaceCurrentSelection(with: translated)
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.petController?.clearThinking()
+                    self.handleTranslationFailure(error)
+                    self.presentSelectionTranslationError(error.localizedDescription)
                 }
             }
         }
@@ -1968,10 +2138,26 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        PasteboardTextInserter.replaceCurrentSelection(with: cleanTranslation)
-        usageStatsStore.recordReplacement(text: cleanTranslation)
-        translationPanelController?.close()
-        translationPanelController = nil
+        let sourcePID = lastReplacementSourcePID
+        lastReplacementSourcePID = nil
+
+        let performPaste: @MainActor () -> Void = { [weak self] in
+            PasteboardTextInserter.replaceCurrentSelection(with: cleanTranslation)
+            self?.usageStatsStore.recordReplacement(text: cleanTranslation)
+            self?.translationPanelController?.close()
+            self?.translationPanelController = nil
+        }
+
+        if let pid = sourcePID,
+           NSWorkspace.shared.frontmostApplication?.processIdentifier != pid,
+           let runningApp = NSRunningApplication(processIdentifier: pid) {
+            runningApp.activate()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+                performPaste()
+            }
+        } else {
+            performPaste()
+        }
     }
 
     @MainActor
@@ -2179,6 +2365,15 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         updateMenuState()
     }
 
+    @MainActor
+    @objc private func selectReplacementMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = ReplacementMode(rawValue: raw)
+        else { return }
+        replacementMode = mode
+        updateMenuState()
+    }
+
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
     }
@@ -2206,7 +2401,7 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
     private static let width: CGFloat = 330
     private static let horizontalPadding: CGFloat = 16
     private static let verticalPadding: CGFloat = 16
-    private static let shadowMargin: CGFloat = 14
+    private static let shadowMargin: CGFloat = 30
     private static let cornerRadius: CGFloat = 28
     private static let mascotSize = NSSize(width: 42, height: 34)
     private static let titleFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
@@ -2290,9 +2485,9 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
         glass.wantsLayer = true
         glass.layer?.masksToBounds = false
         glass.layer?.shadowColor = NSColor.black.cgColor
-        glass.layer?.shadowOpacity = 0.30
+        glass.layer?.shadowOpacity = 0.24
         glass.layer?.shadowRadius = 18
-        glass.layer?.shadowOffset = CGSize(width: 0, height: -7)
+        glass.layer?.shadowOffset = CGSize(width: 0, height: -4)
         glass.layer?.shadowPath = CGPath(
             roundedRect: NSRect(origin: .zero, size: cardSize),
             cornerWidth: Self.cornerRadius,
@@ -2355,16 +2550,19 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
             let secondaryButton = makeButton(title: secondaryButtonTitle, action: #selector(secondaryTapped))
             contentView.addSubview(secondaryButton)
             constraints.append(contentsOf: [
+                secondaryButton.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
                 secondaryButton.trailingAnchor.constraint(equalTo: primaryButton.leadingAnchor, constant: -8),
                 secondaryButton.bottomAnchor.constraint(equalTo: primaryButton.bottomAnchor),
                 secondaryButton.heightAnchor.constraint(equalTo: primaryButton.heightAnchor),
                 secondaryButton.widthAnchor.constraint(greaterThanOrEqualToConstant: buttonWidth(for: secondaryButtonTitle)),
+                secondaryButton.widthAnchor.constraint(equalTo: primaryButton.widthAnchor),
 
-                primaryButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Self.horizontalPadding)
+                primaryButton.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor)
             ])
         } else {
             constraints.append(contentsOf: [
-                primaryButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Self.horizontalPadding)
+                primaryButton.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+                primaryButton.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor)
             ])
         }
 
@@ -3286,9 +3484,13 @@ final class PetController {
     private var onSmartReply: ((String) -> Void)?
     private var currentMode: TranslationMode
     private var isReadyLockedUntilPanelCloses = false
+    private var isThinking = false
     private var lastCursorLocation = NSEvent.mouseLocation
     private var lastCursorMovementDate = Date.distantPast
     private var cursorOffset = PetController.defaultCursorOffset
+    private var isReadyState: Bool {
+        selectedText != nil || isReadyLockedUntilPanelCloses
+    }
 
     private static let mascotSize = NSSize(width: 42, height: 34)
     private static let appIconSize = NSSize(width: 14, height: 14)
@@ -3326,10 +3528,8 @@ final class PetController {
 
         let container = NSView(frame: NSRect(origin: .zero, size: Self.panelSize))
         petView = PetMascotView(frame: NSRect(
-            x: Self.panelPadding,
-            y: Self.panelPadding,
-            width: Self.mascotSize.width,
-            height: Self.mascotSize.height
+            origin: .zero,
+            size: Self.panelSize
         ))
         petView.wantsLayer = true
         petView.layer?.shadowColor = NSColor.black.cgColor
@@ -3340,7 +3540,7 @@ final class PetController {
         container.addSubview(petView)
 
         appIconView = NSImageView(frame: NSRect(
-            x: 0,
+            x: Self.panelSize.width - Self.appIconSize.width,
             y: Self.panelSize.height - Self.appIconSize.height,
             width: Self.appIconSize.width,
             height: Self.appIconSize.height
@@ -3371,11 +3571,16 @@ final class PetController {
     }
 
     private func refreshAppIcon() {
+        guard !isReadyState, !isThinking else {
+            appIconView.isHidden = true
+            return
+        }
         guard let runningApp = NSWorkspace.shared.frontmostApplication else {
             appIconView.isHidden = true
             return
         }
         if runningApp.bundleIdentifier == Bundle.main.bundleIdentifier {
+            appIconView.isHidden = true
             return
         }
         if let icon = runningApp.icon {
@@ -3417,6 +3622,7 @@ final class PetController {
         isReadyLockedUntilPanelCloses = false
         panel.ignoresMouseEvents = false
         petView.apply(state: .ready, mode: currentMode)
+        appIconView.isHidden = true
         enableTabInterceptor()
         show()
     }
@@ -3433,6 +3639,7 @@ final class PetController {
         tabInterceptor?.disable()
         tabInterceptor = nil
         petView.apply(state: .ready, mode: currentMode)
+        appIconView.isHidden = true
     }
 
     func clearReady() {
@@ -3444,11 +3651,33 @@ final class PetController {
         tabInterceptor?.disable()
         tabInterceptor = nil
         petView.apply(state: .idle, mode: currentMode)
+        refreshAppIcon()
+    }
+
+    func showThinking() {
+        isThinking = true
+        selectedText = nil
+        onTranslate = nil
+        onSmartReply = nil
+        isReadyLockedUntilPanelCloses = false
+        panel.ignoresMouseEvents = true
+        tabInterceptor?.disable()
+        tabInterceptor = nil
+        appIconView.isHidden = true
+        petView.apply(state: .thinking, mode: currentMode)
+        show()
+    }
+
+    func clearThinking() {
+        isThinking = false
+        petView.apply(state: .idle, mode: currentMode)
+        refreshAppIcon()
     }
 
     func setActionMode(_ mode: TranslationMode) {
         currentMode = mode
         petView.apply(state: selectedText == nil && !isReadyLockedUntilPanelCloses ? .idle : .ready, mode: currentMode)
+        refreshAppIcon()
     }
 
     private func startTracking() {
@@ -3467,7 +3696,7 @@ final class PetController {
         guard panel.isVisible else { return }
 
         petView.advanceAnimationFrame()
-        guard selectedText == nil, !isReadyLockedUntilPanelCloses else {
+        guard selectedText == nil, !isReadyLockedUntilPanelCloses, !isThinking else {
             return
         }
 
@@ -3570,6 +3799,7 @@ final class PetMascotView: NSView {
         case idle
         case run
         case ready
+        case thinking
     }
 
     var onClick: (() -> Void)?
@@ -3631,14 +3861,17 @@ final class PetMascotView: NSView {
         let spriteYOffset = spriteYOffset()
         let origin = NSPoint(
             x: floor((bounds.width - spriteSize.width) / 2),
-            y: 6 + spriteYOffset
+            y: floor((bounds.height - spriteSize.height) / 2) + 1 + spriteYOffset
         )
 
-        drawPixelShadow()
+        drawPixelShadow(origin: origin)
         drawPixelTail(origin: origin, cellSize: cellSize)
         drawPixelRows(rows, origin: origin, cellSize: cellSize)
         if state == .ready {
-            drawPixelActionBadge(yOffset: readyBadgeYOffset())
+            drawPixelActionBadge()
+        }
+        if state == .thinking {
+            drawThinkingBadge()
         }
     }
 
@@ -3650,11 +3883,13 @@ final class PetMascotView: NSView {
             return (animationFrame / 4) % 2 == 0 ? 1 : 0
         case .ready:
             return animationFrame % 64 < 8 ? 0.75 : 0
+        case .thinking:
+            let phase = animationFrame % 32
+            if phase < 8 { return 0 }
+            if phase < 16 { return 0.5 }
+            if phase < 24 { return 1 }
+            return 0.5
         }
-    }
-
-    private func readyBadgeYOffset() -> CGFloat {
-        animationFrame % 64 < 8 ? 0.75 : 0
     }
 
     private func idleFaceOffset() -> Int {
@@ -3705,6 +3940,8 @@ final class PetMascotView: NSView {
                 ]
             }
         case .ready:
+            return spriteRows(faceOffset: 0, noseWidth: 1)
+        case .thinking:
             return spriteRows(faceOffset: 0, noseWidth: 1)
         }
     }
@@ -3774,7 +4011,7 @@ final class PetMascotView: NSView {
             } else {
                 cells = [(8, 9), (8, 10), (7, 11), (5, 12), (4, 12)]
             }
-        case .ready:
+        case .ready, .thinking:
             switch (animationFrame / 16) % 2 {
             case 0:
                 cells = [(7, 9), (8, 10), (8, 11), (9, 12), (10, 12)]
@@ -3797,24 +4034,27 @@ final class PetMascotView: NSView {
         }
     }
 
-    private func drawPixelShadow() {
+    private func drawPixelShadow(origin: NSPoint) {
         NSColor(calibratedWhite: 0.0, alpha: 0.18).setFill()
-        NSBezierPath(rect: NSRect(x: 9, y: 5, width: 22, height: 2)).fill()
-        NSBezierPath(rect: NSRect(x: 13, y: 3, width: 14, height: 2)).fill()
+        NSBezierPath(rect: NSRect(x: origin.x + 4, y: origin.y - 1, width: 22, height: 2)).fill()
+        NSBezierPath(rect: NSRect(x: origin.x + 8, y: origin.y - 3, width: 14, height: 2)).fill()
     }
 
-    private func drawPixelActionBadge(yOffset: CGFloat) {
+    private func drawPixelActionBadge() {
         switch mode {
         case .selection, .draftMessage:
-            drawTranslateBadge(yOffset: yOffset)
+            drawTranslateBadge()
         case .smartReply:
-            drawReplyBadge(yOffset: yOffset)
+            drawReplyBadge()
         }
     }
 
-    private func drawTranslateBadge(yOffset: CGFloat) {
-        let origin = NSPoint(x: 23, y: 19 + yOffset)
-        let frame = NSRect(x: origin.x, y: origin.y, width: 19, height: 14)
+    private func badgeOrigin(width: CGFloat, height: CGFloat) -> NSPoint {
+        NSPoint(x: bounds.width - width, y: bounds.height - height)
+    }
+
+    private func drawTranslateBadge() {
+        let frame = NSRect(origin: badgeOrigin(width: 19, height: 14), size: NSSize(width: 19, height: 14))
 
         let context = NSGraphicsContext.current
         let previousAntialiasing = context?.shouldAntialias
@@ -3849,8 +4089,8 @@ final class PetMascotView: NSView {
         drawBadgeText("文", color: NSColor(srgbRed: 0.19, green: 0.34, blue: 0.39, alpha: 1.0), fontSize: 8, in: NSRect(x: rightRect.minX - 0.5, y: rightRect.minY + 0.5, width: rightRect.width + 1, height: rightRect.height))
     }
 
-    private func drawReplyBadge(yOffset: CGFloat) {
-        let origin = NSPoint(x: 24, y: 18 + yOffset)
+    private func drawReplyBadge() {
+        let origin = badgeOrigin(width: 18, height: 16)
         let bubbleRect = NSRect(x: origin.x, y: origin.y + 3, width: 18, height: 13)
 
         let context = NSGraphicsContext.current
@@ -3885,6 +4125,52 @@ final class PetMascotView: NSView {
 
         NSColor(srgbRed: 0.12, green: 0.13, blue: 0.13, alpha: 1.0).setFill()
         for x in [bubbleRect.minX + 5, bubbleRect.midX, bubbleRect.maxX - 5] {
+            NSBezierPath(ovalIn: NSRect(x: x - 1.1, y: bubbleRect.midY - 1.1, width: 2.2, height: 2.2)).fill()
+        }
+    }
+
+    private func drawThinkingBadge() {
+        let origin = badgeOrigin(width: 18, height: 16)
+        let bubbleRect = NSRect(x: origin.x, y: origin.y + 3, width: 18, height: 13)
+
+        let context = NSGraphicsContext.current
+        let previousAntialiasing = context?.shouldAntialias
+        context?.shouldAntialias = true
+        defer {
+            if let previousAntialiasing {
+                context?.shouldAntialias = previousAntialiasing
+            }
+        }
+
+        NSColor(calibratedWhite: 0.0, alpha: 0.22).setFill()
+        NSBezierPath(roundedRect: NSRect(x: origin.x + 2, y: origin.y + 1, width: 14, height: 3), xRadius: 1.5, yRadius: 1.5).fill()
+
+        let outline = NSBezierPath(roundedRect: bubbleRect, xRadius: 3, yRadius: 3)
+        outline.move(to: NSPoint(x: bubbleRect.midX - 2, y: bubbleRect.minY + 1))
+        outline.line(to: NSPoint(x: bubbleRect.midX, y: origin.y))
+        outline.line(to: NSPoint(x: bubbleRect.midX + 2, y: bubbleRect.minY + 1))
+        outline.close()
+        NSColor(srgbRed: 0.42, green: 0.46, blue: 0.47, alpha: 1.0).setFill()
+        outline.fill()
+
+        let fill = NSBezierPath(roundedRect: bubbleRect.insetBy(dx: 1.7, dy: 1.7), xRadius: 2, yRadius: 2)
+        NSColor(srgbRed: 0.98, green: 0.98, blue: 0.96, alpha: 1.0).setFill()
+        fill.fill()
+        let tailFill = NSBezierPath()
+        tailFill.move(to: NSPoint(x: bubbleRect.midX - 1.2, y: bubbleRect.minY + 2))
+        tailFill.line(to: NSPoint(x: bubbleRect.midX, y: origin.y + 2))
+        tailFill.line(to: NSPoint(x: bubbleRect.midX + 1.2, y: bubbleRect.minY + 2))
+        tailFill.close()
+        tailFill.fill()
+
+        // Animated dots: cycle one bright dot at a time
+        let activeDot = (animationFrame / 8) % 3
+        for (index, x) in [bubbleRect.minX + 5, bubbleRect.midX, bubbleRect.maxX - 5].enumerated() {
+            let isActive = index == activeDot
+            let color = isActive
+                ? NSColor(srgbRed: 0.12, green: 0.13, blue: 0.13, alpha: 1.0)
+                : NSColor(srgbRed: 0.55, green: 0.57, blue: 0.58, alpha: 1.0)
+            color.setFill()
             NSBezierPath(ovalIn: NSRect(x: x - 1.1, y: bubbleRect.midY - 1.1, width: 2.2, height: 2.2)).fill()
         }
     }
@@ -3930,6 +4216,8 @@ final class PetMascotView: NSView {
             case .smartReply:
                 return "Generate reply - Tab to switch to Translate"
             }
+        case .thinking:
+            return "Thinking…"
         }
     }
 }
@@ -5580,7 +5868,8 @@ enum TranslationMode {
         targetLanguage: TranslationLanguage,
         appCategory: AppCategory,
         style: WritingStyle,
-        cleanup: CleanupLevel
+        cleanup: CleanupLevel,
+        snippets: [Snippet]
     ) -> String {
         switch self {
         case .selection:
@@ -5589,7 +5878,7 @@ enum TranslationMode {
 
             Context — the source text is from \(appCategory.promptHint)
 
-            Cleanup — \(cleanup.promptDescription)
+            Cleanup — \(cleanup.promptDescription)\(TranslationMode.glossarySection(for: snippets, includeSnippets: false))
 
             Return only the \(targetLanguage.promptName) translation. No preamble, no commentary, no quotes around the output. Never write a wrapper like "Here is the translation:" — output the translated text directly.
             """
@@ -5603,7 +5892,7 @@ enum TranslationMode {
 
             Writing style — \(style.promptDescription)
 
-            Cleanup — \(cleanup.promptDescription)
+            Cleanup — \(cleanup.promptDescription)\(TranslationMode.glossarySection(for: snippets, includeSnippets: true))
 
             Return only the final \(targetLanguage.promptName) message, with no commentary, labels, alternatives, quotes, or explanations.
             """
@@ -5619,11 +5908,47 @@ enum TranslationMode {
 
             Context — the user is replying inside \(appCategory.promptHint)
 
-            Cleanup — \(cleanup.promptDescription)
+            Cleanup — \(cleanup.promptDescription)\(TranslationMode.glossarySection(for: snippets, includeSnippets: false))
 
             Return only the reply or answer text. No commentary, no labels, no preface, no explanation of what you're doing, no quotes around the answer.
             """
         }
+    }
+
+    private static func glossarySection(for snippets: [Snippet], includeSnippets: Bool) -> String {
+        let usable = snippets.filter(\.isUsable)
+        guard !usable.isEmpty else { return "" }
+
+        let expansions = includeSnippets ? usable.filter { $0.kind == .snippet } : []
+        let dictionaryTerms = usable.filter { $0.kind == .dictionaryTerm }
+        guard !expansions.isEmpty || !dictionaryTerms.isEmpty else { return "" }
+
+        var sections: [String] = []
+        sections.append(#"Glossary — apply these user-saved rules exactly when relevant."#)
+
+        if !expansions.isEmpty {
+            let lines = expansions.map { snippet -> String in
+                let trigger = promptLine(snippet.trigger)
+                let value = promptLine(snippet.value)
+                return "- \"\(trigger)\" → \(value)"
+            }
+            sections.append("Snippets — expand BEFORE rewriting for tone/style. After expansion, treat the expanded text as canonical and do not paraphrase it:\n" + lines.joined(separator: "\n"))
+        }
+
+        if !dictionaryTerms.isEmpty {
+            let lines = dictionaryTerms.map { "- \(promptLine($0.trigger))" }
+            sections.append("Dictionary — preserve these terms verbatim. Never translate, paraphrase, or alter spelling/capitalization:\n" + lines.joined(separator: "\n"))
+        }
+
+        return "\n\n" + sections.joined(separator: "\n\n")
+    }
+
+    private static func promptLine(_ text: String) -> String {
+        text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 }
 
@@ -5755,6 +6080,7 @@ struct OllamaClient {
         appCategory: AppCategory,
         style: WritingStyle,
         cleanup: CleanupLevel,
+        snippets: [Snippet],
         thinkingLevel: ThinkingLevel,
         onPartial: @escaping (String) -> Void
     ) async throws -> String {
@@ -5786,7 +6112,8 @@ struct OllamaClient {
                         targetLanguage: targetLanguage,
                         appCategory: appCategory,
                         style: style,
-                        cleanup: cleanup
+                        cleanup: cleanup,
+                        snippets: snippets
                     )
                 ),
                 ChatMessage(role: "user", content: sourceText)
