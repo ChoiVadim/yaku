@@ -1964,33 +1964,54 @@ final class SelectionReader {
 }
 
 enum ClipboardSelectionReader {
-    private static let markerPrefix = "YakuSelectionProbe:"
+    private static let pollingInterval: TimeInterval = 0.02
+    private static let pollingTimeout: TimeInterval = 0.5
 
     static func readSelectedText(completion: @escaping (String?) -> Void) {
         let pasteboard = NSPasteboard.general
         let snapshot = PasteboardSnapshot.capture(from: pasteboard)
-        let marker = "\(markerPrefix)\(UUID().uuidString)"
-
-        pasteboard.clearContents()
-        pasteboard.setString(marker, forType: .string)
+        let originalChangeCount = pasteboard.changeCount
 
         postCommandC()
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+        let deadline = Date().addingTimeInterval(pollingTimeout)
+        pollForPasteboardChange(
+            pasteboard: pasteboard,
+            originalChangeCount: originalChangeCount,
+            deadline: deadline,
+            snapshot: snapshot,
+            completion: completion
+        )
+    }
+
+    private static func pollForPasteboardChange(
+        pasteboard: NSPasteboard,
+        originalChangeCount: Int,
+        deadline: Date,
+        snapshot: PasteboardSnapshot,
+        completion: @escaping (String?) -> Void
+    ) {
+        if pasteboard.changeCount != originalChangeCount {
             let copiedText = pasteboard.string(forType: .string)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-
             snapshot.restore(to: pasteboard)
+            completion((copiedText?.isEmpty == false) ? copiedText : nil)
+            return
+        }
 
-            guard let copiedText,
-                  !copiedText.isEmpty,
-                  copiedText != marker
-            else {
-                completion(nil)
-                return
-            }
+        if Date() >= deadline {
+            completion(nil)
+            return
+        }
 
-            completion(copiedText)
+        DispatchQueue.main.asyncAfter(deadline: .now() + pollingInterval) {
+            pollForPasteboardChange(
+                pasteboard: pasteboard,
+                originalChangeCount: originalChangeCount,
+                deadline: deadline,
+                snapshot: snapshot,
+                completion: completion
+            )
         }
     }
 
@@ -2311,9 +2332,11 @@ final class TabKeyInterceptor {
 final class CommandCopyInterceptor {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private let consumesEvent: Bool
     private let onCopy: @MainActor () -> Void
 
-    init(onCopy: @escaping @MainActor () -> Void) {
+    init(consumesEvent: Bool = true, onCopy: @escaping @MainActor () -> Void) {
+        self.consumesEvent = consumesEvent
         self.onCopy = onCopy
     }
 
@@ -2326,7 +2349,7 @@ final class CommandCopyInterceptor {
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .defaultTap,
+            options: consumesEvent ? .defaultTap : .listenOnly,
             eventsOfInterest: mask,
             callback: { _, type, event, userInfo in
                 guard let userInfo, type == .keyDown else {
@@ -2347,7 +2370,7 @@ final class CommandCopyInterceptor {
                 Task { @MainActor in
                     interceptor.onCopy()
                 }
-                return nil
+                return interceptor.consumesEvent ? nil : Unmanaged.passUnretained(event)
             },
             userInfo: selfPointer
         ) else {
