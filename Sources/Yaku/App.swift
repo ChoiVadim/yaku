@@ -708,6 +708,10 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // AX default messaging timeout is 6s. Parameterized calls (e.g.
+        // kAXBoundsForRangeParameterizedAttribute) can stall the main thread
+        // when an unsupported app responds slowly. Cap it.
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.5)
         setupStatusItem()
         requestAccessibilityPermissionIfNeeded()
         requestScreenRecordingPermissionIfNeeded()
@@ -1141,7 +1145,22 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     return
                 }
 
-                self.showTranslateButton(for: cleanedSelection, near: mouseLocation)
+                let panelSide: TranslationPanelController.Side = {
+                    guard let down = self.lastLeftMouseDownLocation else { return .right }
+                    let dx = mouseLocation.x - down.x
+                    let dy = mouseLocation.y - down.y
+                    // Need a meaningful horizontal drag — vertical or tiny drags
+                    // give no reliable direction signal, so default to .right.
+                    guard abs(dx) >= 5, abs(dx) > abs(dy) else { return .right }
+                    return dx > 0 ? .right : .left
+                }()
+
+                self.showTranslateButton(
+                    for: cleanedSelection,
+                    near: mouseLocation,
+                    selectionRect: selection.selectionRect,
+                    panelSide: panelSide
+                )
             }
         }
     }
@@ -1170,7 +1189,12 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    private func showTranslateButton(for selectedText: String, near screenPoint: NSPoint) {
+    private func showTranslateButton(
+        for selectedText: String,
+        near screenPoint: NSPoint,
+        selectionRect: NSRect? = nil,
+        panelSide: TranslationPanelController.Side = .right
+    ) {
         translationPanelController?.close()
         translateButtonController?.close()
         let language = targetLanguage
@@ -1188,12 +1212,22 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             onTranslate: { [weak self] text in
                 self?.translateButtonController?.close()
                 self?.translateButtonController = nil
-                self?.translate(text, near: screenPoint)
+                self?.translate(
+                    text,
+                    near: screenPoint,
+                    selectionRect: selectionRect,
+                    panelSide: panelSide
+                )
             },
             onSmartReply: { [weak self] text in
                 self?.translateButtonController?.close()
                 self?.translateButtonController = nil
-                self?.replyToSelection(text, near: screenPoint)
+                self?.replyToSelection(
+                    text,
+                    near: screenPoint,
+                    selectionRect: selectionRect,
+                    panelSide: panelSide
+                )
             }
         )
 
@@ -1202,13 +1236,20 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    private func replyToSelection(_ text: String, near screenPoint: NSPoint) {
+    private func replyToSelection(
+        _ text: String,
+        near screenPoint: NSPoint,
+        selectionRect: NSRect? = nil,
+        panelSide: TranslationPanelController.Side = .right
+    ) {
         cancelPrefetch()
         translate(
             text,
             near: screenPoint,
             mode: .smartReply,
-            useCache: false
+            useCache: false,
+            selectionRect: selectionRect,
+            panelSide: panelSide
         )
     }
 
@@ -1219,12 +1260,17 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         targetLanguage explicitTargetLanguage: TranslationLanguage? = nil,
         mode: TranslationMode = .selection,
         useCache: Bool = true,
+        selectionRect: NSRect? = nil,
+        panelSide: TranslationPanelController.Side = .right,
         onReplace: ((String) -> Void)? = nil
     ) {
         let language = explicitTargetLanguage ?? targetLanguage
         let currentThinkingLevel = thinkingLevel
+        let anchor: TranslationPanelController.Anchor =
+            selectionRect.map(TranslationPanelController.Anchor.selection)
+                ?? .point(screenPoint, panelSide: panelSide)
         let controller = TranslationPanelController(
-            screenPoint: screenPoint,
+            anchor: anchor,
             sourceText: text,
             targetLanguage: language,
             resultLabel: mode.resultLabel,
@@ -1515,7 +1561,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     near: NSEvent.mouseLocation,
                     targetLanguage: language,
                     mode: .draftMessage,
-                    useCache: false
+                    useCache: false,
+                    selectionRect: selection.selectionRect
                 ) { [weak self] translation in
                     self?.replaceCurrentSelection(with: translation)
                 }
@@ -1708,7 +1755,7 @@ extension YakuApp: SPUUpdaterDelegate {
 
 struct SelectedTextContext {
     let text: String
-    let anchorPoint: NSPoint?
+    let selectionRect: NSRect?
 }
 
 final class SelectionReader {
@@ -1733,7 +1780,7 @@ final class SelectionReader {
         if preferClipboard {
             ClipboardSelectionReader.readSelectedText { [weak self] clipboardText in
                 if let clipboardText, !clipboardText.isEmpty {
-                    completion(SelectedTextContext(text: clipboardText, anchorPoint: nil))
+                    completion(SelectedTextContext(text: clipboardText, selectionRect: nil))
                     return
                 }
                 completion(self?.readSelectedTextContext())
@@ -1757,7 +1804,7 @@ final class SelectionReader {
                 return
             }
 
-            completion(SelectedTextContext(text: selectedText, anchorPoint: nil))
+            completion(SelectedTextContext(text: selectedText, selectionRect: nil))
         }
     }
 
@@ -1800,9 +1847,12 @@ final class SelectionReader {
             return nil
         }
 
+        let rect = selectedTextRange(from: focusedElement)
+            .flatMap { selectionBounds(from: focusedElement, range: $0) }
+
         return SelectedTextContext(
             text: trimmed,
-            anchorPoint: nil
+            selectionRect: rect
         )
     }
 
@@ -1959,6 +2009,50 @@ final class SelectionReader {
         }
 
         return range
+    }
+
+    private func selectionBounds(from element: AXUIElement, range: CFRange) -> NSRect? {
+        var mutableRange = range
+        guard let rangeAXValue = AXValueCreate(.cfRange, &mutableRange) else {
+            return nil
+        }
+
+        var boundsValue: CFTypeRef?
+        let result = AXUIElementCopyParameterizedAttributeValue(
+            element,
+            kAXBoundsForRangeParameterizedAttribute as CFString,
+            rangeAXValue,
+            &boundsValue
+        )
+
+        guard result == .success,
+              let boundsValue,
+              CFGetTypeID(boundsValue) == AXValueGetTypeID()
+        else {
+            return nil
+        }
+
+        let axValue = boundsValue as! AXValue
+        var rect = CGRect.zero
+        guard AXValueGetType(axValue) == .cgRect,
+              AXValueGetValue(axValue, .cgRect, &rect),
+              rect.width > 0, rect.height > 0,
+              rect.origin.x.isFinite, rect.origin.y.isFinite,
+              rect.size.width.isFinite, rect.size.height.isFinite
+        else {
+            return nil
+        }
+
+        return SelectionReader.convertAXRectToCocoa(rect)
+    }
+
+    // AX uses top-left origin of the menu-bar screen; NSScreen uses bottom-left.
+    // NSScreen.screens.first is the screen at NSScreen-origin (0,0). Don't use NSScreen.main —
+    // it's the screen with the active window, which can be a different display.
+    private static func convertAXRectToCocoa(_ axRect: CGRect) -> NSRect? {
+        guard let primary = NSScreen.screens.first else { return nil }
+        let flippedY = primary.frame.maxY - axRect.maxY
+        return NSRect(x: axRect.origin.x, y: flippedY, width: axRect.width, height: axRect.height)
     }
 
 }
@@ -2564,9 +2658,22 @@ final class FloatingTranslateButtonView: NSView {
 }
 
 final class TranslationPanelController {
+    enum Side { case left, right }
+
+    enum Anchor {
+        // Click point with explicit side. .right = panel goes right of point
+        // (default for LTR drags / unknown direction). .left = panel goes left
+        // of point (used when user dragged right-to-left in non-AX apps).
+        case point(NSPoint, panelSide: Side)
+        case selection(NSRect)      // selection rect, NSScreen coords (bottom-left origin)
+    }
+
+    private static let sideGap: CGFloat = 10
+    private static let edgeMargin: CGFloat = 16
+
     private let panel: NSPanel
     private let contentView: TranslationContentView
-    private let anchorScreenPoint: NSPoint
+    private let anchor: Anchor
     private var activeRequestID = UUID()
     private var globalOutsideClickMonitor: Any?
     private var localOutsideClickMonitor: Any?
@@ -2578,7 +2685,7 @@ final class TranslationPanelController {
     private let loadingPlaceholder: String
 
     init(
-        screenPoint: NSPoint,
+        anchor: Anchor,
         sourceText: String,
         targetLanguage: TranslationLanguage,
         resultLabel: String? = nil,
@@ -2587,21 +2694,18 @@ final class TranslationPanelController {
         onReplace: ((String) -> Void)? = nil
     ) {
         self.loadingPlaceholder = loadingPlaceholder
-        anchorScreenPoint = screenPoint
-        let visibleFrame = NSScreen.visibleFrame(containing: screenPoint)
+        self.anchor = anchor
+        let referencePoint = Self.anchorReferencePoint(for: anchor)
+        let visibleFrame = NSScreen.visibleFrame(containing: referencePoint)
         let panelHeight = min(
             TranslationContentView.preferredHeight(sourceText: sourceText, resultText: "\(loadingPlaceholder)..."),
             visibleFrame.height - 32
         )
         let panelSize = NSSize(width: TranslationContentView.preferredWidth, height: panelHeight)
-        let originY = Self.panelOriginY(for: screenPoint.y, panelHeight: panelHeight, visibleFrame: visibleFrame)
-        let origin = NSPoint(
-            x: Self.panelOriginX(for: screenPoint.x, panelWidth: panelSize.width, visibleFrame: visibleFrame),
-            y: originY
-        )
+        let origin = Self.panelOrigin(anchor: anchor, panelSize: panelSize, visibleFrame: visibleFrame)
         let anchorY = TranslationContentView.anchorY(
-            for: screenPoint.y,
-            panelOriginY: originY,
+            for: Self.anchorY(for: anchor),
+            panelOriginY: origin.y,
             panelHeight: panelHeight
         )
 
@@ -2763,28 +2867,39 @@ final class TranslationPanelController {
         let targetHeight = min(contentView.preferredHeightForCurrentContent(), visibleFrame.height - 32)
         let targetWidth = TranslationContentView.preferredWidth
         let preserveCurrentPosition = panel.isVisible
-        let targetY = preserveCurrentPosition
-            ? min(
-                max(currentFrame.maxY - targetHeight, visibleFrame.minY + 16),
-                visibleFrame.maxY - targetHeight - 16
+        let targetSize = NSSize(width: targetWidth, height: targetHeight)
+
+        let targetOrigin: NSPoint
+        if preserveCurrentPosition {
+            // Resize-in-place: preserve top edge (panel.maxY) and X. Works
+            // identically for both .point and .selection anchors.
+            let preservedY = min(
+                max(currentFrame.maxY - targetHeight, visibleFrame.minY + Self.edgeMargin),
+                visibleFrame.maxY - targetHeight - Self.edgeMargin
             )
-            : Self.panelOriginY(
-                for: anchorScreenPoint.y,
-                panelHeight: targetHeight,
+            let preservedX = min(
+                max(currentFrame.minX, visibleFrame.minX + Self.edgeMargin),
+                visibleFrame.maxX - targetWidth - Self.edgeMargin
+            )
+            targetOrigin = NSPoint(x: preservedX, y: preservedY)
+        } else {
+            targetOrigin = Self.panelOrigin(
+                anchor: anchor,
+                panelSize: targetSize,
                 visibleFrame: visibleFrame
             )
+        }
+
         let targetAnchorY = TranslationContentView.anchorY(
-            for: anchorScreenPoint.y,
-            panelOriginY: targetY,
+            for: Self.anchorY(for: anchor),
+            panelOriginY: targetOrigin.y,
             panelHeight: targetHeight
         )
         contentView.setAnchorY(targetAnchorY)
 
         let targetFrame = NSRect(
-            x: preserveCurrentPosition
-                ? min(max(currentFrame.minX, visibleFrame.minX + 16), visibleFrame.maxX - targetWidth - 16)
-                : Self.panelOriginX(for: anchorScreenPoint.x, panelWidth: targetWidth, visibleFrame: visibleFrame),
-            y: targetY,
+            x: targetOrigin.x,
+            y: targetOrigin.y,
             width: targetWidth,
             height: targetHeight
         )
@@ -2814,14 +2929,74 @@ final class TranslationPanelController {
         }
     }
 
-    private static func panelOriginX(for anchorX: CGFloat, panelWidth: CGFloat, visibleFrame: NSRect) -> CGFloat {
-        let desiredX = anchorX + 5
-        return min(max(desiredX, visibleFrame.minX + 16), visibleFrame.maxX - panelWidth - 16)
+    private static func anchorReferencePoint(for anchor: Anchor) -> NSPoint {
+        switch anchor {
+        case .point(let p, _):    return p
+        case .selection(let r):   return NSPoint(x: r.midX, y: r.midY)
+        }
     }
 
-    private static func panelOriginY(for anchorY: CGFloat, panelHeight: CGFloat, visibleFrame: NSRect) -> CGFloat {
-        let desiredY = anchorY - panelHeight * 0.52
-        return min(max(desiredY, visibleFrame.minY + 16), visibleFrame.maxY - panelHeight - 16)
+    private static func anchorY(for anchor: Anchor) -> CGFloat {
+        switch anchor {
+        case .point(let p, _):    return p.y
+        case .selection(let r):   return r.midY
+        }
+    }
+
+    private static func panelOrigin(
+        anchor: Anchor,
+        panelSize: NSSize,
+        visibleFrame: NSRect
+    ) -> NSPoint {
+        switch anchor {
+        case .point(let p, let panelSide):
+            // X depends on which side we want the panel relative to the point.
+            // .right is the historical default (panel goes right of click point);
+            // .left is used when the user dragged RTL so the panel flips to the
+            // left to avoid overlapping the selection in non-AX apps.
+            let desiredX: CGFloat
+            switch panelSide {
+            case .right: desiredX = p.x + sideGap
+            case .left:  desiredX = p.x - sideGap - panelSize.width
+            }
+            let desiredY = p.y - panelSize.height * 0.52
+            let clampedX = min(max(desiredX, visibleFrame.minX + edgeMargin),
+                               visibleFrame.maxX - panelSize.width - edgeMargin)
+            let clampedY = min(max(desiredY, visibleFrame.minY + edgeMargin),
+                               visibleFrame.maxY - panelSize.height - edgeMargin)
+            return NSPoint(x: clampedX, y: clampedY)
+
+        case .selection(let sel):
+            // Prefer right of the selection; fall back to left; if neither side
+            // fits, gracefully degrade to .point at the selection center.
+            let rightX = sel.maxX + sideGap
+            let leftX  = sel.minX - sideGap - panelSize.width
+            let rightFits = rightX + panelSize.width <= visibleFrame.maxX - edgeMargin
+            let leftFits  = leftX >= visibleFrame.minX + edgeMargin
+
+            let chosenX: CGFloat
+            if rightFits {
+                chosenX = rightX
+            } else if leftFits {
+                chosenX = leftX
+            } else {
+                return panelOrigin(
+                    anchor: .point(NSPoint(x: sel.midX, y: sel.midY), panelSide: .right),
+                    panelSize: panelSize,
+                    visibleFrame: visibleFrame
+                )
+            }
+
+            // Center-align: panel.midY lines up with sel.midY (vertical center of
+            // the selection). Clamp inside the visible frame so a tall panel beside
+            // a short selection doesn't escape the screen.
+            let desiredY = sel.midY - panelSize.height / 2
+            let clampedY = min(max(desiredY, visibleFrame.minY + edgeMargin),
+                               visibleFrame.maxY - panelSize.height - edgeMargin)
+            let clampedX = min(max(chosenX, visibleFrame.minX + edgeMargin),
+                               visibleFrame.maxX - panelSize.width - edgeMargin)
+            return NSPoint(x: clampedX, y: clampedY)
+        }
     }
 }
 
