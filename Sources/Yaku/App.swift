@@ -2398,14 +2398,21 @@ private final class YakuModalPanel: NSPanel {
 
 @MainActor
 private final class YakuAlertController: NSWindowController, NSWindowDelegate {
-    private static let width: CGFloat = 330
     private static let horizontalPadding: CGFloat = 16
     private static let verticalPadding: CGFloat = 16
     private static let shadowMargin: CGFloat = 30
     private static let cornerRadius: CGFloat = 28
     private static let mascotSize = NSSize(width: 42, height: 34)
+    private static let textGap: CGFloat = 10
+    private static let minTextWidth: CGFloat = 168
+    private static let maxTextWidth: CGFloat = 300
     private static let titleFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
     private static let messageFont = NSFont.systemFont(ofSize: 12, weight: .regular)
+
+    private struct AlertLayout {
+        let cardSize: NSSize
+        let textWidth: CGFloat
+    }
 
     init(
         title: String,
@@ -2413,10 +2420,15 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
         primaryButtonTitle: String,
         secondaryButtonTitle: String? = nil
     ) {
-        let cardSize = Self.cardSize(for: message, hasSecondaryButton: secondaryButtonTitle != nil)
+        let layout = Self.layout(
+            title: title,
+            message: message,
+            primaryButtonTitle: primaryButtonTitle,
+            secondaryButtonTitle: secondaryButtonTitle
+        )
         let windowSize = NSSize(
-            width: cardSize.width + Self.shadowMargin * 2,
-            height: cardSize.height + Self.shadowMargin * 2
+            width: layout.cardSize.width + Self.shadowMargin * 2,
+            height: layout.cardSize.height + Self.shadowMargin * 2
         )
         let panel = YakuModalPanel(
             contentRect: NSRect(origin: .zero, size: windowSize),
@@ -2436,7 +2448,7 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
         buildUI(
             in: panel,
             windowSize: windowSize,
-            cardSize: cardSize,
+            layout: layout,
             title: title,
             message: message,
             primaryButtonTitle: primaryButtonTitle,
@@ -2464,7 +2476,7 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
     private func buildUI(
         in panel: NSPanel,
         windowSize: NSSize,
-        cardSize: NSSize,
+        layout: AlertLayout,
         title: String,
         message: String,
         primaryButtonTitle: String,
@@ -2477,7 +2489,7 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
         panel.contentView = rootView
 
         let glass = GlassHostView(
-            frame: NSRect(origin: NSPoint(x: Self.shadowMargin, y: Self.shadowMargin), size: cardSize),
+            frame: NSRect(origin: NSPoint(x: Self.shadowMargin, y: Self.shadowMargin), size: layout.cardSize),
             cornerRadius: Self.cornerRadius,
             tintColor: nil,
             style: .regular
@@ -2489,7 +2501,7 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
         glass.layer?.shadowRadius = 18
         glass.layer?.shadowOffset = CGSize(width: 0, height: -4)
         glass.layer?.shadowPath = CGPath(
-            roundedRect: NSRect(origin: .zero, size: cardSize),
+            roundedRect: NSRect(origin: .zero, size: layout.cardSize),
             cornerWidth: Self.cornerRadius,
             cornerHeight: Self.cornerRadius,
             transform: nil
@@ -2497,6 +2509,9 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
         glass.translatesAutoresizingMaskIntoConstraints = false
         rootView.addSubview(glass)
         let contentView = glass.contentView
+
+        let mascotColumn = NSView()
+        mascotColumn.translatesAutoresizingMaskIntoConstraints = false
 
         let mascotView = PetMascotView(frame: NSRect(origin: .zero, size: Self.mascotSize))
         mascotView.apply(state: .idle, mode: .selection)
@@ -2512,12 +2527,13 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
         messageLabel.font = Self.messageFont
         messageLabel.textColor = .secondaryLabelColor
         messageLabel.maximumNumberOfLines = 0
-        messageLabel.preferredMaxLayoutWidth = Self.textWidth
+        messageLabel.preferredMaxLayoutWidth = layout.textWidth
         messageLabel.translatesAutoresizingMaskIntoConstraints = false
 
         let primaryButton = makeButton(title: primaryButtonTitle, action: #selector(primaryTapped))
 
-        contentView.addSubview(mascotView)
+        contentView.addSubview(mascotColumn)
+        mascotColumn.addSubview(mascotView)
         contentView.addSubview(titleLabel)
         contentView.addSubview(messageLabel)
         contentView.addSubview(primaryButton)
@@ -2525,24 +2541,29 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
         var constraints: [NSLayoutConstraint] = [
             glass.topAnchor.constraint(equalTo: rootView.topAnchor, constant: Self.shadowMargin),
             glass.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: Self.shadowMargin),
-            glass.widthAnchor.constraint(equalToConstant: cardSize.width),
-            glass.heightAnchor.constraint(equalToConstant: cardSize.height),
+            glass.widthAnchor.constraint(equalToConstant: layout.cardSize.width),
+            glass.heightAnchor.constraint(equalToConstant: layout.cardSize.height),
 
-            mascotView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Self.verticalPadding),
-            mascotView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Self.horizontalPadding),
+            mascotColumn.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Self.verticalPadding),
+            mascotColumn.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Self.horizontalPadding),
+            mascotColumn.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Self.verticalPadding),
+            mascotColumn.widthAnchor.constraint(equalToConstant: Self.mascotSize.width),
+
+            mascotView.centerXAnchor.constraint(equalTo: mascotColumn.centerXAnchor),
+            mascotView.centerYAnchor.constraint(equalTo: mascotColumn.centerYAnchor),
             mascotView.widthAnchor.constraint(equalToConstant: Self.mascotSize.width),
             mascotView.heightAnchor.constraint(equalToConstant: Self.mascotSize.height),
 
             titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Self.verticalPadding + 1),
-            titleLabel.leadingAnchor.constraint(equalTo: mascotView.trailingAnchor, constant: 10),
-            titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Self.horizontalPadding),
+            titleLabel.leadingAnchor.constraint(equalTo: mascotColumn.trailingAnchor, constant: Self.textGap),
+            titleLabel.widthAnchor.constraint(equalToConstant: layout.textWidth),
 
             messageLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
             messageLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
             messageLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
 
             primaryButton.heightAnchor.constraint(equalToConstant: 30),
-            primaryButton.widthAnchor.constraint(greaterThanOrEqualToConstant: buttonWidth(for: primaryButtonTitle)),
+            primaryButton.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.buttonWidth(for: primaryButtonTitle)),
             primaryButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Self.verticalPadding)
         ]
 
@@ -2554,7 +2575,7 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
                 secondaryButton.trailingAnchor.constraint(equalTo: primaryButton.leadingAnchor, constant: -8),
                 secondaryButton.bottomAnchor.constraint(equalTo: primaryButton.bottomAnchor),
                 secondaryButton.heightAnchor.constraint(equalTo: primaryButton.heightAnchor),
-                secondaryButton.widthAnchor.constraint(greaterThanOrEqualToConstant: buttonWidth(for: secondaryButtonTitle)),
+                secondaryButton.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.buttonWidth(for: secondaryButtonTitle)),
                 secondaryButton.widthAnchor.constraint(equalTo: primaryButton.widthAnchor),
 
                 primaryButton.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor)
@@ -2593,24 +2614,42 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
         window?.orderOut(nil)
     }
 
-    private static var textWidth: CGFloat {
-        width - horizontalPadding * 2 - mascotSize.width - 10
-    }
+    private static func layout(
+        title: String,
+        message: String,
+        primaryButtonTitle: String,
+        secondaryButtonTitle: String?
+    ) -> AlertLayout {
+        let titleWidth = ceil((title as NSString).size(withAttributes: [.font: titleFont]).width)
+        let messageSingleLineWidth = ceil((message as NSString).size(withAttributes: [.font: messageFont]).width)
+        let primaryButtonWidth = buttonWidth(for: primaryButtonTitle)
+        let buttonWidth: CGFloat
+        if let secondaryButtonTitle {
+            let secondaryButtonWidth = Self.buttonWidth(for: secondaryButtonTitle)
+            buttonWidth = max(primaryButtonWidth, secondaryButtonWidth) * 2 + 8
+        } else {
+            buttonWidth = primaryButtonWidth
+        }
 
-    private static func cardSize(for message: String, hasSecondaryButton: Bool) -> NSSize {
+        let textWidth = min(
+            max(max(titleWidth, messageSingleLineWidth, buttonWidth), minTextWidth),
+            maxTextWidth
+        )
         let messageHeight = ceil((message as NSString).boundingRect(
             with: NSSize(width: textWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: messageFont]
         ).height)
         let textBlockHeight = ceil(titleFont.boundingRectForFont.height) + 4 + messageHeight
-        let contentHeight = max(mascotSize.height, textBlockHeight)
-        let buttonGap: CGFloat = hasSecondaryButton ? 14 : 12
-        let height = verticalPadding + contentHeight + buttonGap + 30 + verticalPadding
-        return NSSize(width: width, height: max(112, ceil(height)))
+        let height = verticalPadding + max(mascotSize.height, textBlockHeight + 12 + 30) + verticalPadding
+        let width = horizontalPadding * 2 + mascotSize.width + textGap + textWidth
+        return AlertLayout(
+            cardSize: NSSize(width: ceil(width), height: max(112, ceil(height))),
+            textWidth: textWidth
+        )
     }
 
-    private func buttonWidth(for title: String) -> CGFloat {
+    private static func buttonWidth(for title: String) -> CGFloat {
         let titleWidth = ceil((title as NSString).size(withAttributes: [
             .font: NSFont.systemFont(ofSize: 12, weight: .semibold)
         ]).width)

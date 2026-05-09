@@ -17,45 +17,29 @@ image.lockFocus()
 
 let backgroundRect = NSRect(origin: .zero, size: size)
 let gradient = NSGradient(colors: [
-    NSColor(calibratedRed: 0.10, green: 0.12, blue: 0.22, alpha: 1.0),
-    NSColor(calibratedRed: 0.28, green: 0.20, blue: 0.55, alpha: 1.0)
+    NSColor(calibratedWhite: 0.42, alpha: 1.0),
+    NSColor(calibratedWhite: 0.34, alpha: 1.0)
 ])!
-gradient.draw(in: backgroundRect, angle: 315)
+gradient.draw(in: backgroundRect, angle: 270)
 
-let yakuFont = NSFont.systemFont(ofSize: 28, weight: .semibold)
-let yakuAttributes: [NSAttributedString.Key: Any] = [
-    .font: yakuFont,
-    .foregroundColor: NSColor.white.withAlphaComponent(0.92),
-    .kern: 1.5
-]
-let yakuText = "Yaku" as NSString
-let yakuSize = yakuText.size(withAttributes: yakuAttributes)
-yakuText.draw(
-    at: NSPoint(x: (size.width - yakuSize.width) / 2, y: size.height - 64),
-    withAttributes: yakuAttributes
-)
+let glassOverlay = NSGradient(colors: [
+    NSColor.white.withAlphaComponent(0.12),
+    NSColor.white.withAlphaComponent(0.03)
+])!
+glassOverlay.draw(in: backgroundRect.insetBy(dx: 1, dy: 1), angle: 90)
 
-let subtitleFont = NSFont.systemFont(ofSize: 13, weight: .regular)
-let subtitleAttributes: [NSAttributedString.Key: Any] = [
-    .font: subtitleFont,
-    .foregroundColor: NSColor.white.withAlphaComponent(0.55)
-]
-let subtitle = "Drag Yaku into Applications" as NSString
-let subtitleSize = subtitle.size(withAttributes: subtitleAttributes)
-subtitle.draw(
-    at: NSPoint(x: (size.width - subtitleSize.width) / 2, y: size.height - 92),
-    withAttributes: subtitleAttributes
-)
+NSColor.white.withAlphaComponent(0.16).setStroke()
+NSBezierPath(rect: NSRect(x: 0, y: size.height - 1, width: size.width, height: 1)).stroke()
 
-let arrowFont = NSFont.systemFont(ofSize: 72, weight: .ultraLight)
+let arrowFont = NSFont.systemFont(ofSize: 64, weight: .ultraLight)
 let arrowAttributes: [NSAttributedString.Key: Any] = [
     .font: arrowFont,
-    .foregroundColor: NSColor.white.withAlphaComponent(0.20)
+    .foregroundColor: NSColor.white.withAlphaComponent(0.28)
 ]
 let arrow = "→" as NSString
 let arrowSize = arrow.size(withAttributes: arrowAttributes)
 arrow.draw(
-    at: NSPoint(x: (size.width - arrowSize.width) / 2, y: 130),
+    at: NSPoint(x: (size.width - arrowSize.width) / 2, y: 164),
     withAttributes: arrowAttributes
 )
 

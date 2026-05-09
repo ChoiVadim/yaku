@@ -166,7 +166,6 @@ rm -rf "$DMG_STAGE" "$DMG_PATH" "$DMG_RW_PATH"
 mkdir -p "$DMG_STAGE/.background"
 cp "$DMG_BG_PATH" "$DMG_STAGE/.background/dmg-background.png"
 cp -R "$APP_DIR" "$DMG_STAGE/Yaku.app"
-ln -s /Applications "$DMG_STAGE/Applications"
 
 # Pre-size the DMG with some headroom over the staged content.
 STAGE_SIZE_KB="$(/usr/bin/du -sk "$DMG_STAGE" | awk '{print $1}')"
@@ -200,19 +199,25 @@ sleep 1
 
 osascript <<APPLESCRIPT
 tell application "Finder"
+    set volumeFolder to POSIX file "$MOUNT_POINT"
+    set applicationsFolder to POSIX file "/Applications"
+    try
+        delete item "Applications" of volumeFolder
+    end try
+    make new alias file at volumeFolder to applicationsFolder with properties {name:"Applications"}
     tell disk "Yaku"
         open
         set current view of container window to icon view
         set toolbar visible of container window to false
         set statusbar visible of container window to false
-        set the bounds of container window to {400, 100, 940, 480}
+        set the bounds of container window to {400, 100, 940, 512}
         set theViewOptions to the icon view options of container window
         set arrangement of theViewOptions to not arranged
         set icon size of theViewOptions to 104
         set text size of theViewOptions to 12
         set background picture of theViewOptions to file ".background:dmg-background.png"
-        set position of item "Yaku.app" of container window to {145, 200}
-        set position of item "Applications" of container window to {395, 200}
+        set position of item "Yaku.app" of container window to {145, 176}
+        set position of item "Applications" of container window to {395, 176}
         try
             set position of item ".background" of container window to {2000, 2000}
         end try

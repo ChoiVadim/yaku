@@ -325,11 +325,14 @@ final class OnboardingWindowController: NSWindowController {
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 410),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "Yaku Setup"
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -360,17 +363,12 @@ final class OnboardingWindowController: NSWindowController {
         let glass = GlassHostView(
             frame: rootView.bounds,
             cornerRadius: 18,
-            tintColor: NSColor(calibratedRed: 0.10, green: 0.095, blue: 0.045, alpha: 0.72),
+            tintColor: nil,
             style: .regular
         )
         glass.translatesAutoresizingMaskIntoConstraints = false
         rootView.addSubview(glass)
         let contentView = glass.contentView
-
-        let chromeOverlay = GlassChromeOverlayView(frame: .zero)
-        chromeOverlay.cornerRadius = 18
-        chromeOverlay.translatesAutoresizingMaskIntoConstraints = false
-        rootView.addSubview(chromeOverlay)
 
         let title = NSTextField(labelWithString: "Set up Yaku")
         title.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
@@ -451,12 +449,7 @@ final class OnboardingWindowController: NSWindowController {
             glass.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
             glass.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
 
-            chromeOverlay.topAnchor.constraint(equalTo: glass.topAnchor),
-            chromeOverlay.leadingAnchor.constraint(equalTo: glass.leadingAnchor),
-            chromeOverlay.trailingAnchor.constraint(equalTo: glass.trailingAnchor),
-            chromeOverlay.bottomAnchor.constraint(equalTo: glass.bottomAnchor),
-
-            title.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 24),
+            title.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 62),
             title.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
             title.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
 

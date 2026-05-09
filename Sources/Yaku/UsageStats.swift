@@ -384,6 +384,9 @@ private struct UsageStatsMenuSummaryView: View {
             .filter { Calendar.current.isDateInToday($0.date) }
             .reduce(0) { $0 + max($1.sourceWordCount, $1.resultWordCount) }
     }
+    private var workflowItems: [UsageStatsModeBreakdown] {
+        snapshot.modeBreakdown.filter { $0.count > 0 }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -440,18 +443,19 @@ private struct UsageStatsMenuSummaryView: View {
                             .fill(Color.primary.opacity(0.08))
                     } else {
                         HStack(spacing: 0) {
-                            ForEach(snapshot.modeBreakdown.filter { $0.count > 0 }) { item in
-                                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            ForEach(workflowItems) { item in
+                                Rectangle()
                                     .fill(item.kind.color.opacity(0.86))
                                     .frame(width: proxy.size.width * item.fraction)
                             }
                         }
+                        .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
                     }
                 }
                 .frame(height: 10)
 
                 HStack(spacing: 7) {
-                    ForEach(snapshot.modeBreakdown.filter { $0.count > 0 }.prefix(3)) { item in
+                    ForEach(workflowItems) { item in
                         Label(item.kind.title, systemImage: item.kind.symbolName)
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(.secondary)
