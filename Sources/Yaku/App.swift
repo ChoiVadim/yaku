@@ -21,6 +21,7 @@ private enum MenuItemTag: Int {
     case thinkingLevel = 112
     case selectedModel = 113
     case checkForUpdates = 114
+    case selectionDisplayMode = 115
 }
 
 struct OllamaModelOption: Equatable {
@@ -77,9 +78,26 @@ private enum FloatingButtonDefaultMode: String {
     }
 }
 
+private enum SelectionDisplayMode: String, CaseIterable {
+    case floatingBar
+    case pet
+    case off
+
+    var menuTitle: String {
+        switch self {
+        case .floatingBar: return "Floating Bar"
+        case .pet: return "Pet Mode"
+        case .off: return "Off"
+        }
+    }
+
+    var settingsTitle: String {
+        "Display: \(menuTitle)"
+    }
+}
+
 private struct GlobalHotKeyDefinition {
     static let signature = OSType(0x54524E53) // TRNS
-    private static let fnModifier = UInt32(kEventKeyModifierFnMask)
 
     let id: UInt32
     let keyCode: UInt32
@@ -90,42 +108,24 @@ private struct GlobalHotKeyDefinition {
 
     static let screenshotArea = GlobalHotKeyDefinition(
         id: 1,
-        keyCode: UInt32(kVK_ANSI_S),
-        carbonModifiers: UInt32(cmdKey | controlKey),
-        requiredModifierFlags: [.command, .control],
-        forbiddenModifierFlags: [.option, .shift],
-        displayString: "⌃⌘S"
-    )
-
-    static let screenshotAreaFn = GlobalHotKeyDefinition(
-        id: 3,
-        keyCode: UInt32(kVK_ANSI_S),
-        carbonModifiers: fnModifier,
-        requiredModifierFlags: [.function],
-        forbiddenModifierFlags: [.command, .control, .option, .shift],
-        displayString: "fn+S"
+        keyCode: UInt32(kVK_ANSI_2),
+        carbonModifiers: UInt32(controlKey),
+        requiredModifierFlags: [.control],
+        forbiddenModifierFlags: [.command, .option, .shift, .function],
+        displayString: "⌃2"
     )
 
     static let translateSelection = GlobalHotKeyDefinition(
         id: 2,
-        keyCode: UInt32(kVK_ANSI_T),
-        carbonModifiers: UInt32(cmdKey | controlKey),
-        requiredModifierFlags: [.command, .control],
-        forbiddenModifierFlags: [.option, .shift],
-        displayString: "⌃⌘T"
+        keyCode: UInt32(kVK_ANSI_1),
+        carbonModifiers: UInt32(controlKey),
+        requiredModifierFlags: [.control],
+        forbiddenModifierFlags: [.command, .option, .shift, .function],
+        displayString: "⌃1"
     )
 
-    static let translateSelectionFn = GlobalHotKeyDefinition(
-        id: 4,
-        keyCode: UInt32(kVK_ANSI_T),
-        carbonModifiers: fnModifier,
-        requiredModifierFlags: [.function],
-        forbiddenModifierFlags: [.command, .control, .option, .shift],
-        displayString: "fn+T"
-    )
-
-    static let screenshotAreaDisplayString = "\(screenshotArea.displayString) or \(screenshotAreaFn.displayString)"
-    static let translateSelectionDisplayString = "\(translateSelection.displayString) or \(translateSelectionFn.displayString)"
+    static let screenshotAreaDisplayString = screenshotArea.displayString
+    static let translateSelectionDisplayString = translateSelection.displayString
 }
 
 private final class GlobalHotKey {
@@ -632,6 +632,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     }
 
     private var translateButtonController: FloatingTranslateButtonController?
+    private var petController: PetController?
     private var translationPanelController: TranslationPanelController?
     private var translationPrefetch: TranslationPrefetch?
     private var isScreenshotTranslationRunning = false
@@ -682,6 +683,15 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             UserDefaults.standard.set(newValue.rawValue, forKey: "floatingButtonDefaultMode")
         }
     }
+    private var selectionDisplayMode: SelectionDisplayMode {
+        get {
+            let raw = UserDefaults.standard.string(forKey: "selectionDisplayMode") ?? SelectionDisplayMode.floatingBar.rawValue
+            return SelectionDisplayMode(rawValue: raw) ?? .floatingBar
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "selectionDisplayMode")
+        }
+    }
     private var selectedModelID: String {
         get { UserDefaults.standard.string(forKey: "selectedOllamaModel") ?? OllamaModelOption.defaultModel.id }
         set { UserDefaults.standard.set(newValue, forKey: "selectedOllamaModel") }
@@ -716,6 +726,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         requestAccessibilityPermissionIfNeeded()
         requestScreenRecordingPermissionIfNeeded()
         startMouseMonitor()
+        applySelectionDisplayMode()
         setupGlobalHotKeys()
         setupBootstrap()
         _ = updaterController
@@ -725,20 +736,12 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         let screenshotHotKey = GlobalHotKey(definition: .screenshotArea) { [weak self] in
             self?.startScreenshotTranslation()
         }
-        let screenshotFnHotKey = GlobalHotKey(definition: .screenshotAreaFn) { [weak self] in
-            self?.startScreenshotTranslation()
-        }
         let translateSelectionHotKey = GlobalHotKey(definition: .translateSelection) { [weak self] in
-            self?.startSelectedTextTranslationForReplacement()
-        }
-        let translateSelectionFnHotKey = GlobalHotKey(definition: .translateSelectionFn) { [weak self] in
             self?.startSelectedTextTranslationForReplacement()
         }
         globalHotKeys = [
             screenshotHotKey,
-            screenshotFnHotKey,
-            translateSelectionHotKey,
-            translateSelectionFnHotKey
+            translateSelectionHotKey
         ]
         globalHotKeys.forEach { $0.register() }
     }
@@ -802,6 +805,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         if let mouseMonitor {
             NSEvent.removeMonitor(mouseMonitor)
         }
+        petController?.close()
         globalHotKeys.forEach { $0.unregister() }
     }
 
@@ -860,8 +864,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             tag: .translateSelection,
             symbolName: "text.insert",
             action: #selector(translateSelectedTextFromMenu),
-            keyEquivalent: "t",
-            keyEquivalentModifierMask: [.control, .command]
+            keyEquivalent: "1",
+            keyEquivalentModifierMask: .control
         ))
 
         menu.addItem(makeMenuItem(
@@ -869,8 +873,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             tag: .screenshotArea,
             symbolName: "viewfinder",
             action: #selector(translateScreenshotAreaFromMenu),
-            keyEquivalent: "s",
-            keyEquivalentModifierMask: [.control, .command]
+            keyEquivalent: "2",
+            keyEquivalentModifierMask: .control
         ))
 
         menu.addItem(NSMenuItem.separator())
@@ -886,6 +890,12 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             tag: .draftTargetLanguage,
             symbolName: "text.bubble",
             submenu: makeDraftTargetLanguageMenu()
+        ))
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .selectionDisplayMode,
+            symbolName: "pawprint.fill",
+            submenu: makeSelectionDisplayModeMenu()
         ))
         menu.addItem(makeMenuItem(
             title: "",
@@ -1044,6 +1054,21 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         return menu
     }
 
+    private func makeSelectionDisplayModeMenu() -> NSMenu {
+        let menu = NSMenu()
+        for mode in SelectionDisplayMode.allCases {
+            let item = NSMenuItem(
+                title: mode.menuTitle,
+                action: #selector(selectSelectionDisplayMode(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = mode.rawValue
+            menu.addItem(item)
+        }
+        return menu
+    }
+
     private func makeFloatingDefaultModeMenu() -> NSMenu {
         let menu = NSMenu()
         let translateItem = NSMenuItem(
@@ -1108,6 +1133,30 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    @MainActor
+    private func applySelectionDisplayMode() {
+        switch selectionDisplayMode {
+        case .floatingBar:
+            petController?.close()
+            petController = nil
+        case .off:
+            petController?.close()
+            petController = nil
+            translateButtonController?.close()
+            translateButtonController = nil
+            cancelPrefetch()
+        case .pet:
+            translateButtonController?.close()
+            translateButtonController = nil
+            if petController == nil {
+                petController = PetController(initialMode: floatingDefaultMode.translationMode)
+            }
+            petController?.show()
+        }
+
+        updateMenuState()
+    }
+
     private func handleMouseUp(_ event: NSEvent) {
         guard accessibilityIsTrusted() else {
             return
@@ -1133,6 +1182,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 guard let selection, !selection.text.isEmpty else {
                     self.translateButtonController?.close()
                     self.translateButtonController = nil
+                    self.petController?.clearReady()
                     self.cancelPrefetch()
                     return
                 }
@@ -1141,6 +1191,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 guard !cleanedSelection.isEmpty else {
                     self.translateButtonController?.close()
                     self.translateButtonController = nil
+                    self.petController?.clearReady()
                     self.cancelPrefetch()
                     return
                 }
@@ -1197,12 +1248,49 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     ) {
         translationPanelController?.close()
         translateButtonController?.close()
+        petController?.clearReady()
+
+        guard selectionDisplayMode != .off else {
+            cancelPrefetch()
+            return
+        }
+
         let language = targetLanguage
         let currentThinkingLevel = thinkingLevel
         if translationCache.translation(for: selectedText, targetLanguage: language, thinkingLevel: currentThinkingLevel) == nil {
             startPrefetchIfEligible(for: selectedText)
         } else {
             cancelPrefetch()
+        }
+
+        if selectionDisplayMode == .pet {
+            if petController == nil {
+                petController = PetController(initialMode: floatingDefaultMode.translationMode)
+            }
+            petController?.show()
+            petController?.showReady(
+                selectedText: selectedText,
+                initialMode: floatingDefaultMode.translationMode,
+                onTranslate: { [weak self] text in
+                    self?.petController?.holdReadyUntilPanelCloses()
+                    self?.translate(
+                        text,
+                        near: screenPoint,
+                        selectionRect: selectionRect,
+                        panelSide: panelSide
+                    )
+                },
+                onSmartReply: { [weak self] text in
+                    self?.petController?.holdReadyUntilPanelCloses()
+                    self?.replyToSelection(
+                        text,
+                        near: screenPoint,
+                        selectionRect: selectionRect,
+                        panelSide: panelSide
+                    )
+                }
+            )
+            return
         }
 
         let controller = FloatingTranslateButtonController(
@@ -1284,7 +1372,11 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     useCache: useCache
                 )
             },
-            onReplace: onReplace
+            onReplace: onReplace,
+            onClose: { [weak self] in
+                self?.translationPanelController = nil
+                self?.petController?.clearReady()
+            }
         )
         translationPanelController?.close()
         translationPanelController = controller
@@ -1453,6 +1545,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         menu.item(withTag: MenuItemTag.bootstrapSeparator.rawValue)?.isHidden = bootstrapReady
         menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.title = "Translating to: \(targetLanguage.displayName)"
         menu.item(withTag: MenuItemTag.draftTargetLanguage.rawValue)?.title = "Write messages in \(draftTargetLanguage.displayName)"
+        menu.item(withTag: MenuItemTag.selectionDisplayMode.rawValue)?.title = selectionDisplayMode.settingsTitle
         menu.item(withTag: MenuItemTag.floatingDefaultMode.rawValue)?.title = floatingDefaultMode.menuTitle
         menu.item(withTag: MenuItemTag.thinkingLevel.rawValue)?.title = thinkingLevel.settingsTitle
         menu.item(withTag: MenuItemTag.selectedModel.rawValue)?.title = "Model: \(OllamaModelOption.option(id: selectedModelID).displayName)"
@@ -1479,6 +1572,14 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             for item in draftLanguageMenu.items {
                 guard let languageID = item.representedObject as? String else { continue }
                 item.state = languageID == draftTargetLanguage.id ? .on : .off
+            }
+        }
+
+        if let displayModeMenu = menu.item(withTag: MenuItemTag.selectionDisplayMode.rawValue)?.submenu {
+            let activeMode = selectionDisplayMode.rawValue
+            for item in displayModeMenu.items {
+                guard let raw = item.representedObject as? String else { continue }
+                item.state = raw == activeMode ? .on : .off
             }
         }
 
@@ -1536,6 +1637,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         translateButtonController?.close()
         translateButtonController = nil
+        petController?.clearReady()
         cancelPrefetch()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
@@ -1592,6 +1694,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         updateMenuState()
         translateButtonController?.close()
         translateButtonController = nil
+        petController?.clearReady()
         translationPanelController?.close()
         translationPanelController = nil
         cancelPrefetch()
@@ -1702,8 +1805,21 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         }
 
         floatingDefaultMode = mode
+        petController?.setActionMode(mode.translationMode)
         refreshStatusBarIcon()
         updateMenuState()
+    }
+
+    @MainActor
+    @objc private func selectSelectionDisplayMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = SelectionDisplayMode(rawValue: raw)
+        else {
+            return
+        }
+
+        selectionDisplayMode = mode
+        applySelectionDisplayMode()
     }
 
     @MainActor
@@ -2495,6 +2611,594 @@ final class CommandCopyInterceptor {
 }
 
 @MainActor
+final class PetController {
+    private let panel: NSPanel
+    private let petView: PetMascotView
+    private var trackingTimer: Timer?
+    private var tabInterceptor: TabKeyInterceptor?
+    private var selectedText: String?
+    private var onTranslate: ((String) -> Void)?
+    private var onSmartReply: ((String) -> Void)?
+    private var currentMode: TranslationMode
+    private var isReadyLockedUntilPanelCloses = false
+    private var lastCursorLocation = NSEvent.mouseLocation
+    private var lastCursorMovementDate = Date.distantPast
+    private var cursorOffset = PetController.defaultCursorOffset
+
+    private static let panelSize = NSSize(width: 42, height: 34)
+    private static let edgeMargin: CGFloat = 6
+    private static let defaultCursorOffset = NSPoint(x: 12, y: -panelSize.height - 8)
+
+    init(initialMode: TranslationMode) {
+        currentMode = initialMode
+        let origin = PetController.originNearCursor(
+            for: NSEvent.mouseLocation,
+            size: Self.panelSize,
+            offset: cursorOffset
+        )
+        panel = NSPanel(
+            contentRect: NSRect(origin: origin, size: Self.panelSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.ignoresMouseEvents = true
+
+        petView = PetMascotView(frame: NSRect(origin: .zero, size: Self.panelSize))
+        panel.contentView = petView
+        petView.onClick = { [weak self] in
+            self?.invokeCurrentMode()
+        }
+    }
+
+    func show() {
+        if !panel.isVisible {
+            panel.orderFrontRegardless()
+        }
+        startTracking()
+    }
+
+    func close() {
+        clearReady()
+        trackingTimer?.invalidate()
+        trackingTimer = nil
+        panel.close()
+    }
+
+    func showReady(
+        selectedText: String,
+        initialMode: TranslationMode,
+        onTranslate: @escaping (String) -> Void,
+        onSmartReply: @escaping (String) -> Void
+    ) {
+        self.selectedText = selectedText
+        self.onTranslate = onTranslate
+        self.onSmartReply = onSmartReply
+        currentMode = initialMode
+        isReadyLockedUntilPanelCloses = false
+        panel.ignoresMouseEvents = false
+        petView.apply(state: .ready, mode: currentMode)
+        enableTabInterceptor()
+        show()
+    }
+
+    func holdReadyUntilPanelCloses() {
+        selectedText = nil
+        onTranslate = nil
+        onSmartReply = nil
+        isReadyLockedUntilPanelCloses = true
+        panel.ignoresMouseEvents = true
+        tabInterceptor?.disable()
+        tabInterceptor = nil
+        petView.apply(state: .ready, mode: currentMode)
+    }
+
+    func clearReady() {
+        selectedText = nil
+        onTranslate = nil
+        onSmartReply = nil
+        isReadyLockedUntilPanelCloses = false
+        panel.ignoresMouseEvents = true
+        tabInterceptor?.disable()
+        tabInterceptor = nil
+        petView.apply(state: .idle, mode: currentMode)
+    }
+
+    func setActionMode(_ mode: TranslationMode) {
+        currentMode = mode
+        petView.apply(state: selectedText == nil && !isReadyLockedUntilPanelCloses ? .idle : .ready, mode: currentMode)
+    }
+
+    private func startTracking() {
+        guard trackingTimer == nil else { return }
+
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.updateTracking()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        trackingTimer = timer
+    }
+
+    private func updateTracking() {
+        guard panel.isVisible else { return }
+
+        petView.advanceAnimationFrame()
+        guard selectedText == nil, !isReadyLockedUntilPanelCloses else {
+            return
+        }
+
+        let cursorLocation = NSEvent.mouseLocation
+        let cursorMovement = hypot(
+            cursorLocation.x - lastCursorLocation.x,
+            cursorLocation.y - lastCursorLocation.y
+        )
+        if cursorMovement > 0.75 {
+            cursorOffset = Self.trailingOffset(
+                forMovement: NSPoint(
+                    x: cursorLocation.x - lastCursorLocation.x,
+                    y: cursorLocation.y - lastCursorLocation.y
+                ),
+                size: Self.panelSize
+            )
+            lastCursorLocation = cursorLocation
+            lastCursorMovementDate = Date()
+        }
+
+        let targetOrigin = Self.originNearCursor(
+            for: cursorLocation,
+            size: Self.panelSize,
+            offset: cursorOffset
+        )
+        let currentOrigin = panel.frame.origin
+        let dx = targetOrigin.x - currentOrigin.x
+        let dy = targetOrigin.y - currentOrigin.y
+        let nextOrigin = NSPoint(
+            x: currentOrigin.x + dx * 0.22,
+            y: currentOrigin.y + dy * 0.22
+        )
+        panel.setFrameOrigin(nextOrigin)
+        let cursorMovedRecently = Date().timeIntervalSince(lastCursorMovementDate) < 0.16
+        petView.apply(state: cursorMovedRecently ? .run : .idle, mode: currentMode)
+    }
+
+    private func enableTabInterceptor() {
+        tabInterceptor?.disable()
+        let interceptor = TabKeyInterceptor { [weak self] in
+            self?.toggleMode()
+        }
+        tabInterceptor = interceptor
+        interceptor.enable()
+    }
+
+    private func toggleMode() {
+        currentMode = currentMode == .smartReply ? .selection : .smartReply
+        petView.apply(state: selectedText == nil && !isReadyLockedUntilPanelCloses ? .idle : .ready, mode: currentMode)
+    }
+
+    private func invokeCurrentMode() {
+        guard let selectedText, !isReadyLockedUntilPanelCloses else { return }
+
+        switch currentMode {
+        case .selection, .draftMessage:
+            onTranslate?(selectedText)
+        case .smartReply:
+            onSmartReply?(selectedText)
+        }
+    }
+
+    private static func originNearCursor(for cursor: NSPoint, size: NSSize, offset: NSPoint) -> NSPoint {
+        let screen = NSScreen.screens.first { $0.frame.contains(cursor) } ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        var origin = NSPoint(x: cursor.x + offset.x, y: cursor.y + offset.y)
+
+        if origin.y < visibleFrame.minY + edgeMargin {
+            origin.y = cursor.y + 12
+        }
+        if origin.y + size.height > visibleFrame.maxY - edgeMargin {
+            origin.y = cursor.y - size.height - 8
+        }
+        if origin.x < visibleFrame.minX + edgeMargin {
+            origin.x = cursor.x + 12
+        }
+        if origin.x + size.width > visibleFrame.maxX - edgeMargin {
+            origin.x = cursor.x - size.width - 12
+        }
+
+        origin.x = min(max(origin.x, visibleFrame.minX + edgeMargin), visibleFrame.maxX - size.width - edgeMargin)
+        origin.y = min(max(origin.y, visibleFrame.minY + edgeMargin), visibleFrame.maxY - size.height - edgeMargin)
+        return origin
+    }
+
+    private static func trailingOffset(forMovement movement: NSPoint, size: NSSize) -> NSPoint {
+        if abs(movement.x) >= abs(movement.y) {
+            let xOffset = movement.x > 0 ? -size.width - 12 : 12
+            return NSPoint(x: xOffset, y: -size.height / 2)
+        }
+
+        let yOffset = movement.y > 0 ? -size.height - 8 : 12
+        return NSPoint(x: -size.width / 2, y: yOffset)
+    }
+}
+
+@MainActor
+final class PetMascotView: NSView {
+    enum State: Equatable {
+        case idle
+        case run
+        case ready
+    }
+
+    var onClick: (() -> Void)?
+
+    private var state: State = .idle
+    private var mode: TranslationMode = .selection
+    private var animationFrame = 0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        toolTip = "Yaku"
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard state == .ready else { return }
+        onClick?()
+    }
+
+    func apply(state: State, mode: TranslationMode) {
+        let didChange = self.state != state || self.mode != mode
+        self.state = state
+        self.mode = mode
+        toolTip = tooltip(for: state, mode: mode)
+        if didChange {
+            needsDisplay = true
+        }
+    }
+
+    func advanceAnimationFrame() {
+        animationFrame = (animationFrame + 1) % 240
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let context = NSGraphicsContext.current
+        let previousAntialiasing = context?.shouldAntialias
+        context?.shouldAntialias = false
+        defer {
+            if let previousAntialiasing {
+                context?.shouldAntialias = previousAntialiasing
+            }
+        }
+
+        let rows = spriteRows()
+        let cellSize: CGFloat = 2
+        let maxColumns = rows.map(\.count).max() ?? 0
+        let spriteSize = NSSize(width: CGFloat(maxColumns) * cellSize, height: CGFloat(rows.count) * cellSize)
+        let spriteYOffset = spriteYOffset()
+        let origin = NSPoint(
+            x: floor((bounds.width - spriteSize.width) / 2),
+            y: 6 + spriteYOffset
+        )
+
+        drawPixelShadow()
+        drawPixelTail(origin: origin, cellSize: cellSize)
+        drawPixelRows(rows, origin: origin, cellSize: cellSize)
+        if state == .ready {
+            drawPixelActionBadge(yOffset: readyBadgeYOffset())
+        }
+    }
+
+    private func spriteYOffset() -> CGFloat {
+        switch state {
+        case .idle:
+            return animationFrame % 90 >= 72 ? 0.5 : 0
+        case .run:
+            return (animationFrame / 4) % 2 == 0 ? 1 : 0
+        case .ready:
+            return animationFrame % 64 < 8 ? 0.75 : 0
+        }
+    }
+
+    private func readyBadgeYOffset() -> CGFloat {
+        animationFrame % 64 < 8 ? 0.75 : 0
+    }
+
+    private func idleFaceOffset() -> Int {
+        switch (animationFrame / 32) % 4 {
+        case 1:
+            return -1
+        case 3:
+            return 1
+        default:
+            return 0
+        }
+    }
+
+    private func spriteRows() -> [String] {
+        switch state {
+        case .idle:
+            return spriteRows(faceOffset: idleFaceOffset(), noseWidth: 1)
+        case .run:
+            if (animationFrame / 5) % 2 == 0 {
+                return [
+                    "................",
+                    "..WG........GW..",
+                    ".GWWW......WWWG.",
+                    ".GWWWWWWWWWWWWG.",
+                    "GWWWWWWWWWWWWWWG",
+                    "WWWWKKWWWWKKWWWW",
+                    "WWWWKKWWWWKKWWWW",
+                    "GWWWWWWPWWWWWWWG",
+                    "WWGWWWWWWWWWWGWW",
+                    ".GWWWWWWWWWWWWG.",
+                    "...WW......WWW..",
+                    "................"
+                ]
+            } else {
+                return [
+                    "................",
+                    "..WG........GW..",
+                    ".GWWW......WWWG.",
+                    ".GWWWWWWWWWWWWG.",
+                    "GWWWWWWWWWWWWWWG",
+                    "WWWWKKWWWWKKWWWW",
+                    "WWWWKKWWWWKKWWWW",
+                    "GWWWWWWPWWWWWWWG",
+                    "WWGWWWWWWWWWWGWW",
+                    ".GWWWWWWWWWWWWG.",
+                    "..WWW......WW...",
+                    "................"
+                ]
+            }
+        case .ready:
+            return spriteRows(faceOffset: 0, noseWidth: 1)
+        }
+    }
+
+    private func spriteRows(faceOffset: Int, noseWidth: Int) -> [String] {
+        let eyeRow: String
+        let noseRow: String
+        switch faceOffset {
+        case ..<0:
+            eyeRow = "WWWKKWWWWKKWWWWW"
+            noseRow = noseWidth == 1 ? "GWWWWWPWWWWWWWWG" : "GWWWWWPPWWWWWWWG"
+        case 1...:
+            eyeRow = "WWWWWKKWWWWKKWWW"
+            noseRow = noseWidth == 1 ? "GWWWWWWWPWWWWWWG" : "GWWWWWWPPWWWWWWG"
+        default:
+            eyeRow = "WWWWKKWWWWKKWWWW"
+            noseRow = noseWidth == 1 ? "GWWWWWWPWWWWWWWG" : "GWWWWWPPWWWWWWG."
+        }
+
+        return [
+            "................",
+            "..WG........GW..",
+            ".GWWW......WWWG.",
+            ".GWWWWWWWWWWWWG.",
+            "GWWWWWWWWWWWWWWG",
+            eyeRow,
+            eyeRow,
+            noseRow,
+            "WWGWWWWWWWWWWGWW",
+            ".GWWWWWWWWWWWWG.",
+            "...WW......WW...",
+            "................"
+        ]
+    }
+
+    private func drawPixelRows(_ rows: [String], origin: NSPoint, cellSize: CGFloat) {
+        for (rowIndex, row) in rows.enumerated() {
+            for (columnIndex, pixel) in row.enumerated() {
+                guard let color = color(for: pixel) else { continue }
+                color.setFill()
+                let rect = NSRect(
+                    x: origin.x + CGFloat(columnIndex) * cellSize,
+                    y: origin.y + CGFloat(rows.count - rowIndex - 1) * cellSize,
+                    width: cellSize,
+                    height: cellSize
+                )
+                NSBezierPath(rect: rect).fill()
+            }
+        }
+    }
+
+    private func drawPixelTail(origin: NSPoint, cellSize: CGFloat) {
+        let cells: [(Int, Int)]
+        switch state {
+        case .idle:
+            switch (animationFrame / 24) % 3 {
+            case 0:
+                cells = [(7, 9), (7, 10), (8, 11), (9, 12), (10, 12)]
+            case 1:
+                cells = [(7, 9), (8, 10), (8, 11), (8, 12), (9, 12)]
+            default:
+                cells = [(7, 9), (8, 10), (7, 11), (6, 12), (5, 12)]
+            }
+        case .run:
+            if (animationFrame / 5) % 2 == 0 {
+                cells = [(7, 9), (7, 10), (8, 11), (10, 12), (11, 12)]
+            } else {
+                cells = [(8, 9), (8, 10), (7, 11), (5, 12), (4, 12)]
+            }
+        case .ready:
+            switch (animationFrame / 16) % 2 {
+            case 0:
+                cells = [(7, 9), (8, 10), (8, 11), (9, 12), (10, 12)]
+            default:
+                cells = [(7, 9), (7, 10), (8, 11), (8, 12), (9, 12)]
+            }
+        }
+
+        let tailColor = NSColor(srgbRed: 0.93, green: 0.94, blue: 0.90, alpha: 1.0)
+        let tailShade = NSColor(srgbRed: 0.68, green: 0.72, blue: 0.73, alpha: 1.0)
+        for (index, cell) in cells.enumerated() {
+            (index == cells.count - 1 ? tailShade : tailColor).setFill()
+            let rect = NSRect(
+                x: origin.x + CGFloat(cell.0) * cellSize,
+                y: origin.y + CGFloat(cell.1) * cellSize,
+                width: cellSize,
+                height: cellSize
+            )
+            NSBezierPath(rect: rect).fill()
+        }
+    }
+
+    private func drawPixelShadow() {
+        NSColor(calibratedWhite: 0.0, alpha: 0.18).setFill()
+        NSBezierPath(rect: NSRect(x: 9, y: 5, width: 22, height: 2)).fill()
+        NSBezierPath(rect: NSRect(x: 13, y: 3, width: 14, height: 2)).fill()
+    }
+
+    private func drawPixelActionBadge(yOffset: CGFloat) {
+        switch mode {
+        case .selection, .draftMessage:
+            drawTranslateBadge(yOffset: yOffset)
+        case .smartReply:
+            drawReplyBadge(yOffset: yOffset)
+        }
+    }
+
+    private func drawTranslateBadge(yOffset: CGFloat) {
+        let origin = NSPoint(x: 23, y: 19 + yOffset)
+        let frame = NSRect(x: origin.x, y: origin.y, width: 19, height: 14)
+
+        let context = NSGraphicsContext.current
+        let previousAntialiasing = context?.shouldAntialias
+        context?.shouldAntialias = true
+        defer {
+            if let previousAntialiasing {
+                context?.shouldAntialias = previousAntialiasing
+            }
+        }
+
+        NSColor(calibratedWhite: 0.0, alpha: 0.25).setFill()
+        NSBezierPath(roundedRect: NSRect(x: frame.minX + 2, y: frame.minY - 1, width: 15, height: 3), xRadius: 1.5, yRadius: 1.5).fill()
+
+        let borderColor = NSColor(srgbRed: 0.42, green: 0.46, blue: 0.47, alpha: 1.0)
+        let shape = NSBezierPath(roundedRect: frame, xRadius: 3, yRadius: 3)
+        borderColor.setFill()
+        shape.fill()
+
+        let inner = frame.insetBy(dx: 1.5, dy: 1.5)
+        let leftRect = NSRect(x: inner.minX, y: inner.minY, width: inner.width * 0.52, height: inner.height)
+        let rightRect = NSRect(x: leftRect.maxX, y: inner.minY, width: inner.maxX - leftRect.maxX, height: inner.height)
+
+        NSGraphicsContext.saveGraphicsState()
+        shape.addClip()
+        NSColor(srgbRed: 0.02, green: 0.55, blue: 0.76, alpha: 1.0).setFill()
+        NSBezierPath(rect: leftRect).fill()
+        NSColor(srgbRed: 0.80, green: 0.86, blue: 0.87, alpha: 1.0).setFill()
+        NSBezierPath(rect: rightRect).fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        drawBadgeText("A", color: .white, fontSize: 8.5, in: NSRect(x: inner.minX - 0.5, y: inner.minY + 0.5, width: leftRect.width, height: inner.height))
+        drawBadgeText("文", color: NSColor(srgbRed: 0.19, green: 0.34, blue: 0.39, alpha: 1.0), fontSize: 8, in: NSRect(x: rightRect.minX - 0.5, y: rightRect.minY + 0.5, width: rightRect.width + 1, height: rightRect.height))
+    }
+
+    private func drawReplyBadge(yOffset: CGFloat) {
+        let origin = NSPoint(x: 24, y: 18 + yOffset)
+        let bubbleRect = NSRect(x: origin.x, y: origin.y + 3, width: 18, height: 13)
+
+        let context = NSGraphicsContext.current
+        let previousAntialiasing = context?.shouldAntialias
+        context?.shouldAntialias = true
+        defer {
+            if let previousAntialiasing {
+                context?.shouldAntialias = previousAntialiasing
+            }
+        }
+
+        NSColor(calibratedWhite: 0.0, alpha: 0.22).setFill()
+        NSBezierPath(roundedRect: NSRect(x: origin.x + 2, y: origin.y + 1, width: 14, height: 3), xRadius: 1.5, yRadius: 1.5).fill()
+
+        let outline = NSBezierPath(roundedRect: bubbleRect, xRadius: 3, yRadius: 3)
+        outline.move(to: NSPoint(x: bubbleRect.midX - 2, y: bubbleRect.minY + 1))
+        outline.line(to: NSPoint(x: bubbleRect.midX, y: origin.y))
+        outline.line(to: NSPoint(x: bubbleRect.midX + 2, y: bubbleRect.minY + 1))
+        outline.close()
+        NSColor(srgbRed: 0.42, green: 0.46, blue: 0.47, alpha: 1.0).setFill()
+        outline.fill()
+
+        let fill = NSBezierPath(roundedRect: bubbleRect.insetBy(dx: 1.7, dy: 1.7), xRadius: 2, yRadius: 2)
+        NSColor(srgbRed: 0.98, green: 0.98, blue: 0.96, alpha: 1.0).setFill()
+        fill.fill()
+        let tailFill = NSBezierPath()
+        tailFill.move(to: NSPoint(x: bubbleRect.midX - 1.2, y: bubbleRect.minY + 2))
+        tailFill.line(to: NSPoint(x: bubbleRect.midX, y: origin.y + 2))
+        tailFill.line(to: NSPoint(x: bubbleRect.midX + 1.2, y: bubbleRect.minY + 2))
+        tailFill.close()
+        tailFill.fill()
+
+        NSColor(srgbRed: 0.12, green: 0.13, blue: 0.13, alpha: 1.0).setFill()
+        for x in [bubbleRect.minX + 5, bubbleRect.midX, bubbleRect.maxX - 5] {
+            NSBezierPath(ovalIn: NSRect(x: x - 1.1, y: bubbleRect.midY - 1.1, width: 2.2, height: 2.2)).fill()
+        }
+    }
+
+    private func drawBadgeText(_ text: String, color: NSColor, fontSize: CGFloat, in rect: NSRect) {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: fontSize, weight: .black),
+            .foregroundColor: color,
+            .paragraphStyle: paragraphStyle
+        ]
+        (text as NSString).draw(in: rect, withAttributes: attributes)
+    }
+
+    private func color(for pixel: Character) -> NSColor? {
+        switch pixel {
+        case "W":
+            return NSColor(srgbRed: 0.95, green: 0.96, blue: 0.92, alpha: 1)
+        case "G":
+            return NSColor(srgbRed: 0.70, green: 0.75, blue: 0.76, alpha: 1)
+        case "K":
+            return NSColor(srgbRed: 0.07, green: 0.09, blue: 0.12, alpha: 1)
+        case "P":
+            return NSColor(srgbRed: 0.96, green: 0.55, blue: 0.65, alpha: 1)
+        case "B":
+            return NSColor(srgbRed: 0.97, green: 0.96, blue: 0.86, alpha: 1)
+        case "D":
+            return NSColor(srgbRed: 0.08, green: 0.16, blue: 0.20, alpha: 1)
+        default:
+            return nil
+        }
+    }
+
+    private func tooltip(for state: State, mode: TranslationMode) -> String {
+        switch state {
+        case .idle, .run:
+            return "Yaku Pet"
+        case .ready:
+            switch mode {
+            case .selection, .draftMessage:
+                return "Translate selection - Tab to switch to Reply"
+            case .smartReply:
+                return "Generate reply - Tab to switch to Translate"
+            }
+        }
+    }
+}
+
+@MainActor
 final class FloatingTranslateButtonController {
     private let panel: NSPanel
     private let selectedText: String
@@ -2678,6 +3382,8 @@ final class TranslationPanelController {
     private var globalOutsideClickMonitor: Any?
     private var localOutsideClickMonitor: Any?
     private var commandCopyInterceptor: CommandCopyInterceptor?
+    private var didClose = false
+    private let onClose: (() -> Void)?
 
     var panelFrame: NSRect { panel.frame }
     var isVisible: Bool { panel.isVisible }
@@ -2691,10 +3397,12 @@ final class TranslationPanelController {
         resultLabel: String? = nil,
         loadingPlaceholder: String = "Translating",
         onTargetLanguageSelected: ((TranslationLanguage) -> Void)? = nil,
-        onReplace: ((String) -> Void)? = nil
+        onReplace: ((String) -> Void)? = nil,
+        onClose: (() -> Void)? = nil
     ) {
         self.loadingPlaceholder = loadingPlaceholder
         self.anchor = anchor
+        self.onClose = onClose
         let referencePoint = Self.anchorReferencePoint(for: anchor)
         let visibleFrame = NSScreen.visibleFrame(containing: referencePoint)
         let panelHeight = min(
@@ -2776,10 +3484,16 @@ final class TranslationPanelController {
     }
 
     func close() {
+        guard !didClose else {
+            return
+        }
+
+        didClose = true
         contentView.stopLoadingAnimation()
         removeOutsideClickMonitors()
         removeCommandCopyInterceptor()
         panel.close()
+        onClose?()
     }
 
     private func installOutsideClickMonitors() {
