@@ -22,6 +22,9 @@ private enum MenuItemTag: Int {
     case selectedModel = 113
     case checkForUpdates = 114
     case selectionDisplayMode = 115
+    case usageStatsSummary = 116
+    case writingStyle = 117
+    case cleanupLevel = 118
 }
 
 struct OllamaModelOption: Equatable {
@@ -465,11 +468,14 @@ private final class TranslationPrefetch {
     let text: String
     let targetLanguage: TranslationLanguage
     let thinkingLevel: ThinkingLevel
+    let appCategory: AppCategory
+    let cleanup: CleanupLevel
     private let ollamaClient: OllamaClient
     private var task: Task<Void, Never>?
     private var state: State = .pending
     private var partialTranslation = ""
     private var subscribers: [(String) -> Void] = []
+    private var completionSubscribers: [(String) -> Void] = []
     private var failureSubscribers: [(String) -> Void] = []
     private let onComplete: (String, TranslationLanguage, ThinkingLevel, String) -> Void
 
@@ -477,12 +483,16 @@ private final class TranslationPrefetch {
         text: String,
         targetLanguage: TranslationLanguage,
         thinkingLevel: ThinkingLevel,
+        appCategory: AppCategory,
+        cleanup: CleanupLevel,
         ollamaClient: OllamaClient,
         onComplete: @escaping (String, TranslationLanguage, ThinkingLevel, String) -> Void
     ) {
         self.text = text
         self.targetLanguage = targetLanguage
         self.thinkingLevel = thinkingLevel
+        self.appCategory = appCategory
+        self.cleanup = cleanup
         self.ollamaClient = ollamaClient
         self.onComplete = onComplete
     }
@@ -501,7 +511,11 @@ private final class TranslationPrefetch {
         }
     }
 
-    func subscribe(onPartial: @escaping (String) -> Void, onFailure: @escaping (String) -> Void) {
+    func subscribe(
+        onPartial: @escaping (String) -> Void,
+        onCompletion: @escaping (String) -> Void,
+        onFailure: @escaping (String) -> Void
+    ) {
         if !partialTranslation.isEmpty {
             onPartial(partialTranslation)
         }
@@ -509,10 +523,12 @@ private final class TranslationPrefetch {
         switch state {
         case .completed(let translation):
             onPartial(translation)
+            onCompletion(translation)
         case .failed(let message):
             onFailure(message)
         default:
             subscribers.append(onPartial)
+            completionSubscribers.append(onCompletion)
             failureSubscribers.append(onFailure)
         }
     }
@@ -533,6 +549,7 @@ private final class TranslationPrefetch {
         task?.cancel()
         state = .cancelled
         subscribers.removeAll()
+        completionSubscribers.removeAll()
         failureSubscribers.removeAll()
     }
 
@@ -541,7 +558,14 @@ private final class TranslationPrefetch {
         state = .running
 
         do {
-            let finalTranslation = try await ollamaClient.translate(text, to: targetLanguage, thinkingLevel: thinkingLevel) { [weak self] partial in
+            let finalTranslation = try await ollamaClient.translate(
+                text,
+                to: targetLanguage,
+                appCategory: appCategory,
+                style: .casual,
+                cleanup: cleanup,
+                thinkingLevel: thinkingLevel
+            ) { [weak self] partial in
                 Task { @MainActor in
                     self?.publishPartial(partial)
                 }
@@ -549,6 +573,10 @@ private final class TranslationPrefetch {
             state = .completed(finalTranslation)
             onComplete(text, targetLanguage, thinkingLevel, finalTranslation)
             publishPartial(finalTranslation)
+            completionSubscribers.forEach { $0(finalTranslation) }
+            subscribers.removeAll()
+            completionSubscribers.removeAll()
+            failureSubscribers.removeAll()
         } catch is CancellationError {
             markCancelled()
         } catch {
@@ -556,6 +584,7 @@ private final class TranslationPrefetch {
             state = .failed(message)
             failureSubscribers.forEach { $0(message) }
             subscribers.removeAll()
+            completionSubscribers.removeAll()
             failureSubscribers.removeAll()
         }
     }
@@ -568,6 +597,7 @@ private final class TranslationPrefetch {
     private func markCancelled() {
         state = .cancelled
         subscribers.removeAll()
+        completionSubscribers.removeAll()
         failureSubscribers.removeAll()
     }
 }
@@ -581,8 +611,8 @@ private final class TranslationCache {
         self.maxEntries = maxEntries
     }
 
-    func translation(for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel) -> String? {
-        let key = cacheKey(for: text, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel)
+    func translation(for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel, cleanup: CleanupLevel) -> String? {
+        let key = cacheKey(for: text, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel, cleanup: cleanup)
         guard let translation = entries[key] else {
             return nil
         }
@@ -591,8 +621,8 @@ private final class TranslationCache {
         return translation
     }
 
-    func store(_ translation: String, for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel) {
-        let key = cacheKey(for: text, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel)
+    func store(_ translation: String, for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel, cleanup: CleanupLevel) {
+        let key = cacheKey(for: text, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel, cleanup: cleanup)
         guard !key.isEmpty, !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return
         }
@@ -602,8 +632,8 @@ private final class TranslationCache {
         trimIfNeeded()
     }
 
-    private func cacheKey(for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel) -> String {
-        "\(targetLanguage.id):\(thinkingLevel.rawValue):\(TextNormalizer.cleanedSelection(text))"
+    private func cacheKey(for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel, cleanup: CleanupLevel) -> String {
+        "\(targetLanguage.id):\(thinkingLevel.rawValue):\(cleanup.rawValue):\(TextNormalizer.cleanedSelection(text))"
     }
 
     private func markRecentlyUsed(_ key: String) {
@@ -642,6 +672,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     private var screenshotDragTracker: ScreenshotDragTracker?
     private var globalHotKeys: [GlobalHotKey] = []
     private var translationCache = TranslationCache()
+    private let usageStatsStore = UsageStatsStore()
     private lazy var bootstrap: OllamaBootstrap = OllamaBootstrap(
         baseURL: ollamaBaseURL,
         model: selectedModelID
@@ -707,6 +738,35 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: "thinkingLevel")
+        }
+    }
+    private var cleanupLevel: CleanupLevel {
+        get {
+            let raw = UserDefaults.standard.string(forKey: "cleanupLevel") ?? CleanupLevel.light.rawValue
+            return CleanupLevel(rawValue: raw) ?? .light
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "cleanupLevel")
+        }
+    }
+
+    private func writingStyle(for category: AppCategory) -> WritingStyle {
+        let key = "writingStyle.\(category.rawValue)"
+        if let raw = UserDefaults.standard.string(forKey: key),
+           let style = WritingStyle(rawValue: raw) {
+            return style
+        }
+        return Self.defaultStyle(for: category)
+    }
+
+    private func setWritingStyle(_ style: WritingStyle, for category: AppCategory) {
+        UserDefaults.standard.set(style.rawValue, forKey: "writingStyle.\(category.rawValue)")
+    }
+
+    private static func defaultStyle(for category: AppCategory) -> WritingStyle {
+        switch category {
+        case .personalMessages, .other: return .casual
+        case .workMessages, .email: return .formal
         }
     }
 
@@ -845,6 +905,10 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         permissionSeparator.tag = MenuItemTag.permissionSeparator.rawValue
         menu.addItem(permissionSeparator)
 
+        let usageSummaryItem = UsageStatsMenuItem(store: usageStatsStore)
+        usageSummaryItem.tag = MenuItemTag.usageStatsSummary.rawValue
+        menu.addItem(usageSummaryItem)
+
         menu.addItem(makeMenuItem(
             title: "Ollama setup needed",
             tag: .bootstrapNotice,
@@ -918,6 +982,18 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             tag: .selectedModel,
             symbolName: "cpu",
             submenu: makeModelSelectionMenu()
+        ))
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .writingStyle,
+            symbolName: "textformat",
+            submenu: makeWritingStyleMenu()
+        ))
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .cleanupLevel,
+            symbolName: "sparkles",
+            submenu: makeCleanupLevelMenu()
         ))
 
         menu.addItem(NSMenuItem.separator())
@@ -1125,6 +1201,43 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         return menu
     }
 
+    private func makeWritingStyleMenu() -> NSMenu {
+        let menu = NSMenu()
+        for category in AppCategory.allCases {
+            let categoryItem = NSMenuItem(title: category.displayName, action: nil, keyEquivalent: "")
+            categoryItem.representedObject = category.rawValue
+            let submenu = NSMenu()
+            for style in WritingStyle.allCases {
+                let item = NSMenuItem(
+                    title: style.displayName,
+                    action: #selector(selectWritingStyle(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = "\(category.rawValue):\(style.rawValue)"
+                submenu.addItem(item)
+            }
+            categoryItem.submenu = submenu
+            menu.addItem(categoryItem)
+        }
+        return menu
+    }
+
+    private func makeCleanupLevelMenu() -> NSMenu {
+        let menu = NSMenu()
+        for level in CleanupLevel.allCases {
+            let item = NSMenuItem(
+                title: level.displayName,
+                action: #selector(selectCleanupLevel(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = level.rawValue
+            menu.addItem(item)
+        }
+        return menu
+    }
+
     private func startMouseMonitor() {
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseUp]) { [weak self] event in
             guard let self else { return }
@@ -1322,7 +1435,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         let language = targetLanguage
         let currentThinkingLevel = thinkingLevel
-        if translationCache.translation(for: selectedText, targetLanguage: language, thinkingLevel: currentThinkingLevel) == nil {
+        let currentCleanup = cleanupLevel
+        if translationCache.translation(for: selectedText, targetLanguage: language, thinkingLevel: currentThinkingLevel, cleanup: currentCleanup) == nil {
             startPrefetchIfEligible(for: selectedText)
         } else {
             cancelPrefetch()
@@ -1402,6 +1516,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             near: screenPoint,
             mode: .smartReply,
             useCache: false,
+            usageKind: .smartReply,
             selectionRect: selectionRect,
             panelSide: panelSide,
             keepPetReadyUntilPanelCloses: keepPetReadyUntilPanelCloses
@@ -1415,6 +1530,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         targetLanguage explicitTargetLanguage: TranslationLanguage? = nil,
         mode: TranslationMode = .selection,
         useCache: Bool = true,
+        usageKind: UsageStatsEventKind = .selection,
         selectionRect: NSRect? = nil,
         panelSide: TranslationPanelController.Side = .right,
         keepPetReadyUntilPanelCloses: Bool = false,
@@ -1422,6 +1538,9 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     ) {
         let language = explicitTargetLanguage ?? targetLanguage
         let currentThinkingLevel = thinkingLevel
+        let (_, currentAppCategory) = AppCategoryClassifier.detectFrontmost()
+        let currentStyle = writingStyle(for: currentAppCategory)
+        let currentCleanup = cleanupLevel
         let anchor: TranslationPanelController.Anchor =
             selectionRect.map(TranslationPanelController.Anchor.selection)
                 ?? .point(screenPoint, panelSide: panelSide)
@@ -1437,7 +1556,11 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     targetLanguage: selectedLanguage,
                     mode: mode,
                     thinkingLevel: currentThinkingLevel,
-                    useCache: useCache
+                    appCategory: currentAppCategory,
+                    style: currentStyle,
+                    cleanup: currentCleanup,
+                    useCache: useCache,
+                    usageKind: usageKind
                 )
             },
             onReplace: onReplace,
@@ -1457,7 +1580,11 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             targetLanguage: language,
             mode: mode,
             thinkingLevel: currentThinkingLevel,
+            appCategory: currentAppCategory,
+            style: currentStyle,
+            cleanup: currentCleanup,
             useCache: useCache,
+            usageKind: usageKind,
             controller: controller,
             requestID: requestID
         )
@@ -1482,7 +1609,11 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         targetLanguage language: TranslationLanguage,
         mode: TranslationMode,
         thinkingLevel: ThinkingLevel,
-        useCache: Bool
+        appCategory: AppCategory,
+        style: WritingStyle,
+        cleanup: CleanupLevel,
+        useCache: Bool,
+        usageKind: UsageStatsEventKind
     ) {
         guard let controller = translationPanelController else {
             return
@@ -1494,7 +1625,11 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             targetLanguage: language,
             mode: mode,
             thinkingLevel: thinkingLevel,
+            appCategory: appCategory,
+            style: style,
+            cleanup: cleanup,
             useCache: useCache,
+            usageKind: usageKind,
             controller: controller,
             requestID: requestID
         )
@@ -1506,11 +1641,21 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         targetLanguage language: TranslationLanguage,
         mode: TranslationMode,
         thinkingLevel: ThinkingLevel,
+        appCategory: AppCategory,
+        style: WritingStyle,
+        cleanup: CleanupLevel,
         useCache: Bool,
+        usageKind: UsageStatsEventKind,
         controller: TranslationPanelController,
         requestID: UUID
     ) {
-        if useCache, let cachedTranslation = translationCache.translation(for: text, targetLanguage: language, thinkingLevel: thinkingLevel) {
+        if useCache, let cachedTranslation = translationCache.translation(for: text, targetLanguage: language, thinkingLevel: thinkingLevel, cleanup: cleanup) {
+            usageStatsStore.recordTranslation(
+                sourceText: text,
+                resultText: cachedTranslation,
+                kind: usageKind,
+                targetLanguage: language
+            )
             controller.showTranslation(cachedTranslation, requestID: requestID)
             return
         }
@@ -1519,9 +1664,18 @@ final class YakuApp: NSObject, NSApplicationDelegate {
            let translationPrefetch,
            translationPrefetch.text == text,
            translationPrefetch.targetLanguage == language,
-           translationPrefetch.thinkingLevel == thinkingLevel {
+           translationPrefetch.thinkingLevel == thinkingLevel,
+           translationPrefetch.appCategory == appCategory,
+           translationPrefetch.cleanup == cleanup {
             translationPrefetch.subscribe { partialTranslation in
                 controller.showTranslation(partialTranslation, requestID: requestID)
+            } onCompletion: { [weak self] finalTranslation in
+                self?.usageStatsStore.recordTranslation(
+                    sourceText: text,
+                    resultText: finalTranslation,
+                    kind: usageKind,
+                    targetLanguage: language
+                )
             } onFailure: { message in
                 controller.showError(message, requestID: requestID)
             }
@@ -1531,15 +1685,29 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         Task {
             do {
-                let translated = try await ollamaClient.translate(text, to: language, mode: mode, thinkingLevel: thinkingLevel) { partialTranslation in
+                let translated = try await ollamaClient.translate(
+                    text,
+                    to: language,
+                    mode: mode,
+                    appCategory: appCategory,
+                    style: style,
+                    cleanup: cleanup,
+                    thinkingLevel: thinkingLevel
+                ) { partialTranslation in
                     Task { @MainActor in
                         controller.showTranslation(partialTranslation, requestID: requestID)
                     }
                 }
                 await MainActor.run {
                     if useCache {
-                        self.translationCache.store(translated, for: text, targetLanguage: language, thinkingLevel: thinkingLevel)
+                        self.translationCache.store(translated, for: text, targetLanguage: language, thinkingLevel: thinkingLevel, cleanup: cleanup)
                     }
+                    self.usageStatsStore.recordTranslation(
+                        sourceText: text,
+                        resultText: translated,
+                        kind: usageKind,
+                        targetLanguage: language
+                    )
                     controller.showTranslation(translated, requestID: requestID)
                 }
             } catch {
@@ -1573,13 +1741,17 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         let language = targetLanguage
         let currentThinkingLevel = thinkingLevel
+        let (_, appCategory) = AppCategoryClassifier.detectFrontmost()
+        let currentCleanup = cleanupLevel
         let prefetch = TranslationPrefetch(
             text: text,
             targetLanguage: language,
             thinkingLevel: currentThinkingLevel,
+            appCategory: appCategory,
+            cleanup: currentCleanup,
             ollamaClient: ollamaClient
         ) { [weak self] sourceText, targetLanguage, thinkingLevel, translation in
-            self?.translationCache.store(translation, for: sourceText, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel)
+            self?.translationCache.store(translation, for: sourceText, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel, cleanup: currentCleanup)
         }
         translationPrefetch = prefetch
         prefetch.startAfterDelay(milliseconds: prefetchDelayMilliseconds)
@@ -1690,6 +1862,34 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 item.state = modelID == activeModelID ? .on : .off
             }
         }
+
+        menu.item(withTag: MenuItemTag.writingStyle.rawValue)?.title = "Writing Style"
+        menu.item(withTag: MenuItemTag.cleanupLevel.rawValue)?.title = "Auto Cleanup: \(cleanupLevel.displayName)"
+
+        if let styleMenu = menu.item(withTag: MenuItemTag.writingStyle.rawValue)?.submenu {
+            for categoryItem in styleMenu.items {
+                guard let categoryRaw = categoryItem.representedObject as? String,
+                      let category = AppCategory(rawValue: categoryRaw),
+                      let submenu = categoryItem.submenu
+                else { continue }
+                let activeStyle = writingStyle(for: category)
+                categoryItem.title = "\(category.displayName) — \(activeStyle.displayName)"
+                for item in submenu.items {
+                    guard let raw = item.representedObject as? String else { continue }
+                    let parts = raw.split(separator: ":", maxSplits: 1).map(String.init)
+                    guard parts.count == 2 else { continue }
+                    item.state = parts[1] == activeStyle.rawValue ? .on : .off
+                }
+            }
+        }
+
+        if let cleanupMenu = menu.item(withTag: MenuItemTag.cleanupLevel.rawValue)?.submenu {
+            let activeLevel = cleanupLevel.rawValue
+            for item in cleanupMenu.items {
+                guard let raw = item.representedObject as? String else { continue }
+                item.state = raw == activeLevel ? .on : .off
+            }
+        }
     }
 
     @objc private func openAccessibilitySettings() {
@@ -1750,6 +1950,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     targetLanguage: language,
                     mode: .draftMessage,
                     useCache: false,
+                    usageKind: .draftMessage,
                     selectionRect: selection.selectionRect,
                     panelSide: self.panelSideForSelectionEnding(at: mouseLocation),
                     keepPetReadyUntilPanelCloses: true
@@ -1768,6 +1969,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         }
 
         PasteboardTextInserter.replaceCurrentSelection(with: cleanTranslation)
+        usageStatsStore.recordReplacement(text: cleanTranslation)
         translationPanelController?.close()
         translationPanelController = nil
     }
@@ -1814,6 +2016,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     self.translate(
                         sourceText,
                         near: mouseLocation,
+                        usageKind: .screenArea,
                         panelSide: panelSide,
                         keepPetReadyUntilPanelCloses: true
                     )
@@ -1835,17 +2038,16 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func presentScreenshotTranslationError(_ error: Error) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
         NSApp.activate(ignoringOtherApps: true)
 
         if let screenshotError = error as? ScreenshotTranslationError,
            case .screenRecordingPermissionDenied = screenshotError {
-            alert.messageText = "Screen Recording permission required"
-            alert.informativeText = screenshotError.localizedDescription
-            alert.addButton(withTitle: "Open Settings")
-            alert.addButton(withTitle: "Cancel")
-            let response = alert.runModal()
+            let response = YakuAlertController(
+                title: "Screen Recording required",
+                message: screenshotError.localizedDescription,
+                primaryButtonTitle: "Open Settings",
+                secondaryButtonTitle: "Cancel"
+            ).showModal()
             if response == .alertFirstButtonReturn {
                 let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
                 NSWorkspace.shared.open(url)
@@ -1853,21 +2055,21 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        alert.messageText = "Screenshot translation failed"
-        alert.informativeText = error.localizedDescription
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        _ = YakuAlertController(
+            title: "Screenshot translation failed",
+            message: error.localizedDescription,
+            primaryButtonTitle: "OK"
+        ).showModal()
     }
 
     @MainActor
     private func presentSelectionTranslationError(_ message: String) {
-        let alert = NSAlert()
-        alert.messageText = "Selection translation failed"
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
+        _ = YakuAlertController(
+            title: "No text selected",
+            message: message,
+            primaryButtonTitle: "OK"
+        ).showModal()
     }
 
     @MainActor
@@ -1952,6 +2154,31 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         updateMenuState()
     }
 
+    @MainActor
+    @objc private func selectWritingStyle(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String else { return }
+        let parts = raw.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2,
+              let category = AppCategory(rawValue: parts[0]),
+              let style = WritingStyle(rawValue: parts[1])
+        else { return }
+        setWritingStyle(style, for: category)
+        cancelPrefetch()
+        translationCache = TranslationCache()
+        updateMenuState()
+    }
+
+    @MainActor
+    @objc private func selectCleanupLevel(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let level = CleanupLevel(rawValue: raw)
+        else { return }
+        cleanupLevel = level
+        cancelPrefetch()
+        translationCache = TranslationCache()
+        updateMenuState()
+    }
+
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
     }
@@ -1965,6 +2192,231 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 extension YakuApp: SPUUpdaterDelegate {
     nonisolated func feedURLString(for updater: SPUUpdater) -> String? {
         "https://raw.githubusercontent.com/ChoiVadim/yaku/main/appcast.xml"
+    }
+}
+
+@MainActor
+private final class YakuModalPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
+@MainActor
+private final class YakuAlertController: NSWindowController, NSWindowDelegate {
+    private static let width: CGFloat = 330
+    private static let horizontalPadding: CGFloat = 16
+    private static let verticalPadding: CGFloat = 16
+    private static let shadowMargin: CGFloat = 14
+    private static let cornerRadius: CGFloat = 28
+    private static let mascotSize = NSSize(width: 42, height: 34)
+    private static let titleFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
+    private static let messageFont = NSFont.systemFont(ofSize: 12, weight: .regular)
+
+    init(
+        title: String,
+        message: String,
+        primaryButtonTitle: String,
+        secondaryButtonTitle: String? = nil
+    ) {
+        let cardSize = Self.cardSize(for: message, hasSecondaryButton: secondaryButtonTitle != nil)
+        let windowSize = NSSize(
+            width: cardSize.width + Self.shadowMargin * 2,
+            height: cardSize.height + Self.shadowMargin * 2
+        )
+        let panel = YakuModalPanel(
+            contentRect: NSRect(origin: .zero, size: windowSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .modalPanel
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.isMovableByWindowBackground = true
+
+        super.init(window: panel)
+        panel.delegate = self
+        buildUI(
+            in: panel,
+            windowSize: windowSize,
+            cardSize: cardSize,
+            title: title,
+            message: message,
+            primaryButtonTitle: primaryButtonTitle,
+            secondaryButtonTitle: secondaryButtonTitle
+        )
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func showModal() -> NSApplication.ModalResponse {
+        guard let window else { return .cancel }
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        return NSApp.runModal(for: window)
+    }
+
+    nonisolated func windowWillClose(_ notification: Notification) {
+        Task { @MainActor in
+            NSApp.stopModal(withCode: .cancel)
+        }
+    }
+
+    private func buildUI(
+        in panel: NSPanel,
+        windowSize: NSSize,
+        cardSize: NSSize,
+        title: String,
+        message: String,
+        primaryButtonTitle: String,
+        secondaryButtonTitle: String?
+    ) {
+        let rootView = NSView(frame: NSRect(origin: .zero, size: windowSize))
+        rootView.wantsLayer = true
+        rootView.layer?.backgroundColor = NSColor.clear.cgColor
+        rootView.layer?.masksToBounds = false
+        panel.contentView = rootView
+
+        let glass = GlassHostView(
+            frame: NSRect(origin: NSPoint(x: Self.shadowMargin, y: Self.shadowMargin), size: cardSize),
+            cornerRadius: Self.cornerRadius,
+            tintColor: nil,
+            style: .regular
+        )
+        glass.wantsLayer = true
+        glass.layer?.masksToBounds = false
+        glass.layer?.shadowColor = NSColor.black.cgColor
+        glass.layer?.shadowOpacity = 0.30
+        glass.layer?.shadowRadius = 18
+        glass.layer?.shadowOffset = CGSize(width: 0, height: -7)
+        glass.layer?.shadowPath = CGPath(
+            roundedRect: NSRect(origin: .zero, size: cardSize),
+            cornerWidth: Self.cornerRadius,
+            cornerHeight: Self.cornerRadius,
+            transform: nil
+        )
+        glass.translatesAutoresizingMaskIntoConstraints = false
+        rootView.addSubview(glass)
+        let contentView = glass.contentView
+
+        let mascotView = PetMascotView(frame: NSRect(origin: .zero, size: Self.mascotSize))
+        mascotView.apply(state: .idle, mode: .selection)
+        mascotView.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = Self.titleFont
+        titleLabel.textColor = .labelColor
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let messageLabel = NSTextField(wrappingLabelWithString: message)
+        messageLabel.font = Self.messageFont
+        messageLabel.textColor = .secondaryLabelColor
+        messageLabel.maximumNumberOfLines = 0
+        messageLabel.preferredMaxLayoutWidth = Self.textWidth
+        messageLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let primaryButton = makeButton(title: primaryButtonTitle, action: #selector(primaryTapped))
+
+        contentView.addSubview(mascotView)
+        contentView.addSubview(titleLabel)
+        contentView.addSubview(messageLabel)
+        contentView.addSubview(primaryButton)
+
+        var constraints: [NSLayoutConstraint] = [
+            glass.topAnchor.constraint(equalTo: rootView.topAnchor, constant: Self.shadowMargin),
+            glass.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: Self.shadowMargin),
+            glass.widthAnchor.constraint(equalToConstant: cardSize.width),
+            glass.heightAnchor.constraint(equalToConstant: cardSize.height),
+
+            mascotView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Self.verticalPadding),
+            mascotView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Self.horizontalPadding),
+            mascotView.widthAnchor.constraint(equalToConstant: Self.mascotSize.width),
+            mascotView.heightAnchor.constraint(equalToConstant: Self.mascotSize.height),
+
+            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Self.verticalPadding + 1),
+            titleLabel.leadingAnchor.constraint(equalTo: mascotView.trailingAnchor, constant: 10),
+            titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Self.horizontalPadding),
+
+            messageLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            messageLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            messageLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            primaryButton.heightAnchor.constraint(equalToConstant: 30),
+            primaryButton.widthAnchor.constraint(greaterThanOrEqualToConstant: buttonWidth(for: primaryButtonTitle)),
+            primaryButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Self.verticalPadding)
+        ]
+
+        if let secondaryButtonTitle {
+            let secondaryButton = makeButton(title: secondaryButtonTitle, action: #selector(secondaryTapped))
+            contentView.addSubview(secondaryButton)
+            constraints.append(contentsOf: [
+                secondaryButton.trailingAnchor.constraint(equalTo: primaryButton.leadingAnchor, constant: -8),
+                secondaryButton.bottomAnchor.constraint(equalTo: primaryButton.bottomAnchor),
+                secondaryButton.heightAnchor.constraint(equalTo: primaryButton.heightAnchor),
+                secondaryButton.widthAnchor.constraint(greaterThanOrEqualToConstant: buttonWidth(for: secondaryButtonTitle)),
+
+                primaryButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Self.horizontalPadding)
+            ])
+        } else {
+            constraints.append(contentsOf: [
+                primaryButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Self.horizontalPadding)
+            ])
+        }
+
+        constraints.append(primaryButton.topAnchor.constraint(greaterThanOrEqualTo: messageLabel.bottomAnchor, constant: 12))
+        NSLayoutConstraint.activate(constraints)
+    }
+
+    private func makeButton(title: String, action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .rounded
+        button.controlSize = .regular
+        button.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        button.focusRingType = .none
+        return button
+    }
+
+    @objc private func primaryTapped() {
+        close(with: .alertFirstButtonReturn)
+    }
+
+    @objc private func secondaryTapped() {
+        close(with: .alertSecondButtonReturn)
+    }
+
+    private func close(with response: NSApplication.ModalResponse) {
+        NSApp.stopModal(withCode: response)
+        window?.orderOut(nil)
+    }
+
+    private static var textWidth: CGFloat {
+        width - horizontalPadding * 2 - mascotSize.width - 10
+    }
+
+    private static func cardSize(for message: String, hasSecondaryButton: Bool) -> NSSize {
+        let messageHeight = ceil((message as NSString).boundingRect(
+            with: NSSize(width: textWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: messageFont]
+        ).height)
+        let textBlockHeight = ceil(titleFont.boundingRectForFont.height) + 4 + messageHeight
+        let contentHeight = max(mascotSize.height, textBlockHeight)
+        let buttonGap: CGFloat = hasSecondaryButton ? 14 : 12
+        let height = verticalPadding + contentHeight + buttonGap + 30 + verticalPadding
+        return NSSize(width: width, height: max(112, ceil(height)))
+    }
+
+    private func buttonWidth(for title: String) -> CGFloat {
+        let titleWidth = ceil((title as NSString).size(withAttributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .semibold)
+        ]).width)
+        return max(54, titleWidth + 28)
     }
 }
 
@@ -2825,6 +3277,8 @@ final class CommandCopyInterceptor {
 final class PetController {
     private let panel: NSPanel
     private let petView: PetMascotView
+    private let appIconView: NSImageView
+    private var workspaceObserver: NSObjectProtocol?
     private var trackingTimer: Timer?
     private var tabInterceptor: TabKeyInterceptor?
     private var selectedText: String?
@@ -2836,9 +3290,18 @@ final class PetController {
     private var lastCursorMovementDate = Date.distantPast
     private var cursorOffset = PetController.defaultCursorOffset
 
-    private static let panelSize = NSSize(width: 42, height: 34)
+    private static let mascotSize = NSSize(width: 42, height: 34)
+    private static let appIconSize = NSSize(width: 14, height: 14)
+    private static let panelPadding: CGFloat = 6
+    private static let panelSize = NSSize(
+        width: mascotSize.width + panelPadding * 2,
+        height: mascotSize.height + panelPadding * 2
+    )
     private static let edgeMargin: CGFloat = 6
-    private static let defaultCursorOffset = NSPoint(x: 12, y: -panelSize.height - 8)
+    private static let defaultCursorOffset = NSPoint(
+        x: 12 - panelPadding,
+        y: -mascotSize.height - 8 - panelPadding
+    )
 
     init(initialMode: TranslationMode) {
         currentMode = initialMode
@@ -2861,10 +3324,65 @@ final class PetController {
         panel.hidesOnDeactivate = false
         panel.ignoresMouseEvents = true
 
-        petView = PetMascotView(frame: NSRect(origin: .zero, size: Self.panelSize))
-        panel.contentView = petView
+        let container = NSView(frame: NSRect(origin: .zero, size: Self.panelSize))
+        petView = PetMascotView(frame: NSRect(
+            x: Self.panelPadding,
+            y: Self.panelPadding,
+            width: Self.mascotSize.width,
+            height: Self.mascotSize.height
+        ))
+        petView.wantsLayer = true
+        petView.layer?.shadowColor = NSColor.black.cgColor
+        petView.layer?.shadowOpacity = 0.32
+        petView.layer?.shadowRadius = 3
+        petView.layer?.shadowOffset = .zero
+        petView.layer?.masksToBounds = false
+        container.addSubview(petView)
+
+        appIconView = NSImageView(frame: NSRect(
+            x: 0,
+            y: Self.panelSize.height - Self.appIconSize.height,
+            width: Self.appIconSize.width,
+            height: Self.appIconSize.height
+        ))
+        appIconView.imageScaling = .scaleProportionallyDown
+        appIconView.isHidden = true
+        container.addSubview(appIconView)
+
+        panel.contentView = container
         petView.onClick = { [weak self] in
             self?.invokeCurrentMode()
+        }
+
+        refreshAppIcon()
+        subscribeToFrontmostAppChanges()
+    }
+
+    private func subscribeToFrontmostAppChanges() {
+        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshAppIcon()
+            }
+        }
+    }
+
+    private func refreshAppIcon() {
+        guard let runningApp = NSWorkspace.shared.frontmostApplication else {
+            appIconView.isHidden = true
+            return
+        }
+        if runningApp.bundleIdentifier == Bundle.main.bundleIdentifier {
+            return
+        }
+        if let icon = runningApp.icon {
+            appIconView.image = icon
+            appIconView.isHidden = false
+        } else {
+            appIconView.isHidden = true
         }
     }
 
@@ -2876,6 +3394,10 @@ final class PetController {
     }
 
     func close() {
+        if let workspaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)
+            self.workspaceObserver = nil
+        }
         clearReady()
         trackingTimer?.invalidate()
         trackingTimer = nil
@@ -5054,17 +5576,34 @@ enum TranslationMode {
         }
     }
 
-    func systemPrompt(targetLanguage: TranslationLanguage) -> String {
+    func systemPrompt(
+        targetLanguage: TranslationLanguage,
+        appCategory: AppCategory,
+        style: WritingStyle,
+        cleanup: CleanupLevel
+    ) -> String {
         switch self {
         case .selection:
             """
-            Translate the user's text into natural \(targetLanguage.promptName) by preserving the intended meaning, not by translating word-for-word. First infer what the text is trying to say in context, then express that idea as a fluent native \(targetLanguage.promptName) speaker would. Silently clean accidental line breaks, repeated spaces, OCR artifacts, and hyphenated line wraps. Preserve proper names, dates, numbers, URLs, and concrete facts. Preserve paragraph, bullet, and list structure when present. If the source is long or dense, split the translation into readable paragraphs instead of returning one wall of text. Prefer clear idiomatic wording over literal phrasing. Return only the \(targetLanguage.promptName) translation, with no commentary.
+            Translate the user's text into natural \(targetLanguage.promptName) by preserving the intended meaning, not by translating word-for-word. Silently clean accidental line breaks, repeated spaces, OCR artifacts, and hyphenated line wraps. Preserve proper names, dates, numbers, URLs, concrete facts, and paragraph/bullet/list structure. If the source is long or dense, split the translation into readable paragraphs instead of returning one wall of text.
+
+            Context — the source text is from \(appCategory.promptHint)
+
+            Cleanup — \(cleanup.promptDescription)
+
+            Return only the \(targetLanguage.promptName) translation. No preamble, no commentary, no quotes around the output. Never write a wrapper like "Here is the translation:" — output the translated text directly.
             """
         case .draftMessage:
             """
             Rewrite the user's drafted outgoing message as a natural message in \(targetLanguage.promptName). Do not translate mechanically. Infer the user's actual intent, emotion, and social situation, then say it the way a native \(targetLanguage.promptName) speaker would send it in a chat or message.
 
-            Preserve the original meaning, tone, politeness level, formatting, line breaks, emojis, URLs, usernames, product names, and concrete details. Adapt idioms, word order, honorifics, and phrasing so the result feels culturally and conversationally natural. If the draft is blunt, awkward, or phrased like a direct translation, smooth it while keeping the same intent. If the draft is a fragment, return a natural sendable fragment without inventing extra context. If the draft is already in \(targetLanguage.promptName), lightly polish it only when needed.
+            When goals conflict, follow this priority: (1) meaning, (2) the user's tone and intended directness/formality, (3) cultural naturalness — idioms, honorifics, word order, (4) surface details to preserve verbatim — emojis, URLs, usernames, product names, numbers, line breaks, (5) literal wording (always lowest). If the draft is blunt, the rewrite stays blunt — do not pad a curt one-liner into a polite paragraph just because the target language usually expects polite framing. If the draft is awkward or phrased like a direct translation, smooth it while keeping the same intent. If the draft is a fragment, return a natural sendable fragment without inventing extra context. If the draft is already in \(targetLanguage.promptName), lightly polish it only when needed.
+
+            Context — the user is composing this message in \(appCategory.promptHint)
+
+            Writing style — \(style.promptDescription)
+
+            Cleanup — \(cleanup.promptDescription)
 
             Return only the final \(targetLanguage.promptName) message, with no commentary, labels, alternatives, quotes, or explanations.
             """
@@ -5078,9 +5617,130 @@ enum TranslationMode {
 
             If it is an open question: give a clear, direct answer. Keep it short unless the question demands depth.
 
+            Context — the user is replying inside \(appCategory.promptHint)
+
+            Cleanup — \(cleanup.promptDescription)
+
             Return only the reply or answer text. No commentary, no labels, no preface, no explanation of what you're doing, no quotes around the answer.
             """
         }
+    }
+}
+
+enum AppCategory: String, CaseIterable, Codable {
+    case personalMessages
+    case workMessages
+    case email
+    case other
+
+    var displayName: String {
+        switch self {
+        case .personalMessages: return "Personal messages"
+        case .workMessages: return "Work messages"
+        case .email: return "Email"
+        case .other: return "Other"
+        }
+    }
+
+    var promptHint: String {
+        switch self {
+        case .personalMessages:
+            return "a personal messaging app — chats with friends, family, partner. Informal medium where short, lowercased fragments are normal."
+        case .workMessages:
+            return "a workplace messaging app — Slack, Teams, LinkedIn. Colleagues and clients. Conversational but professional; complete thoughts but not stiff."
+        case .email:
+            return "an email client. Longer-form medium where greetings, full sentences, and sign-offs are normal."
+        case .other:
+            return "an unspecified app. No strong medium expectation — defer to the user's chosen style."
+        }
+    }
+}
+
+enum WritingStyle: String, CaseIterable, Codable {
+    case formal
+    case casual
+    case excited
+
+    var displayName: String {
+        switch self {
+        case .formal: return "Formal"
+        case .casual: return "Casual"
+        case .excited: return "Excited"
+        }
+    }
+
+    var promptDescription: String {
+        switch self {
+        case .formal:
+            return "full capitalization, complete punctuation, complete sentences. Polite, no exclamation marks unless the source had them."
+        case .casual:
+            return "natural casual capitalization (still capitalize names and sentence starts). Lighter punctuation — periods optional at the ends of short messages. Conversational rhythm."
+        case .excited:
+            return "energetic and enthusiastic. More exclamation marks where the source signal warrants them. Capitalization and punctuation otherwise normal."
+        }
+    }
+}
+
+enum CleanupLevel: String, CaseIterable, Codable {
+    case none
+    case light
+    case medium
+    case high
+
+    var displayName: String {
+        switch self {
+        case .none: return "None"
+        case .light: return "Light"
+        case .medium: return "Medium"
+        case .high: return "High"
+        }
+    }
+
+    var promptDescription: String {
+        switch self {
+        case .none:
+            return "do not polish wording — preserve the source phrasing as faithfully as the target language allows."
+        case .light:
+            return "fix obvious typos, grammar errors, OCR/line-break artifacts. Do not rewrite for style."
+        case .medium:
+            return "edit lightly for clarity and flow — fix typos and awkward phrasing, but do not rephrase aggressively."
+        case .high:
+            return "polish thoroughly for brevity and clarity. Tighten verbose sentences, drop filler words, keep meaning intact."
+        }
+    }
+}
+
+enum AppCategoryClassifier {
+    static let bundleIDMap: [String: AppCategory] = [
+        "com.apple.mail": .email,
+        "com.microsoft.Outlook": .email,
+        "com.readdle.smartemail-Mac": .email,
+        "com.superhuman.electron": .email,
+        "com.tinyspeck.slackmacgap": .workMessages,
+        "com.microsoft.teams2": .workMessages,
+        "com.microsoft.teams": .workMessages,
+        "com.linkedin.LinkedIn": .workMessages,
+        "com.apple.MobileSMS": .personalMessages,
+        "com.apple.iChat": .personalMessages,
+        "ru.keepcoder.Telegram": .personalMessages,
+        "org.telegram.desktop": .personalMessages,
+        "net.whatsapp.WhatsApp": .personalMessages,
+        "com.kakao.KakaoTalk": .personalMessages,
+        "com.hnc.Discord": .personalMessages,
+    ]
+
+    static func category(for bundleID: String?) -> AppCategory {
+        guard let id = bundleID else { return .other }
+        if let mapped = bundleIDMap[id] { return mapped }
+        let lower = id.lowercased()
+        if lower.contains("mail") || lower.contains("outlook") { return .email }
+        if lower.contains("slack") || lower.contains("teams") { return .workMessages }
+        return .other
+    }
+
+    static func detectFrontmost() -> (bundleID: String?, category: AppCategory) {
+        let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        return (bundleID, category(for: bundleID))
     }
 }
 
@@ -5092,6 +5752,9 @@ struct OllamaClient {
         _ text: String,
         to targetLanguage: TranslationLanguage,
         mode: TranslationMode = .selection,
+        appCategory: AppCategory,
+        style: WritingStyle,
+        cleanup: CleanupLevel,
         thinkingLevel: ThinkingLevel,
         onPartial: @escaping (String) -> Void
     ) async throws -> String {
@@ -5119,7 +5782,12 @@ struct OllamaClient {
             messages: [
                 ChatMessage(
                     role: "system",
-                    content: mode.systemPrompt(targetLanguage: targetLanguage)
+                    content: mode.systemPrompt(
+                        targetLanguage: targetLanguage,
+                        appCategory: appCategory,
+                        style: style,
+                        cleanup: cleanup
+                    )
                 ),
                 ChatMessage(role: "user", content: sourceText)
             ]
@@ -5247,6 +5915,7 @@ enum TranslationError: LocalizedError {
 
 extension YakuApp: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
+        usageStatsStore.refresh()
         updateMenuState()
     }
 }
