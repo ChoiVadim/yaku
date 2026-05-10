@@ -27,6 +27,8 @@ private enum MenuItemTag: Int {
     case cleanupLevel = 118
     case snippets = 119
     case replacementMode = 120
+    case keyboardShortcuts = 121
+    case translateOrReplySelection = 122
 }
 
 struct OllamaModelOption: Equatable {
@@ -35,8 +37,8 @@ struct OllamaModelOption: Equatable {
     let isCloud: Bool
 
     static let all: [OllamaModelOption] = [
-        .init(id: "gpt-oss:120b-cloud", displayName: "gpt-oss 120B (Cloud)", isCloud: true),
-        .init(id: "gpt-oss:20b", displayName: "gpt-oss 20B (Local, offline)", isCloud: false)
+        .init(id: "gpt-oss:120b-cloud", displayName: "gpt-oss 120B (cloud)", isCloud: true),
+        .init(id: "gpt-oss:20b", displayName: "gpt-oss 20B (local, offline)", isCloud: false)
     ]
 
     static let defaultModel = all[0]
@@ -60,7 +62,7 @@ enum ThinkingLevel: String, CaseIterable {
     }
 
     var settingsTitle: String {
-        "Thinking: \(menuTitle)"
+        "Thinking: \(rawValue)"
     }
 }
 
@@ -77,8 +79,8 @@ private enum FloatingButtonDefaultMode: String {
 
     var menuTitle: String {
         switch self {
-        case .translate: return "Default action: Translate"
-        case .smartReply: return "Default action: Reply"
+        case .translate: return "Default action: translate"
+        case .smartReply: return "Default action: reply"
         }
     }
 }
@@ -90,14 +92,18 @@ private enum SelectionDisplayMode: String, CaseIterable {
 
     var menuTitle: String {
         switch self {
-        case .floatingBar: return "Floating Bar"
-        case .pet: return "Pet Mode"
+        case .floatingBar: return "Floating bar"
+        case .pet: return "Pet mode"
         case .off: return "Off"
         }
     }
 
     var settingsTitle: String {
-        "Display: \(menuTitle)"
+        switch self {
+        case .floatingBar: return "Display: floating bar"
+        case .pet: return "Display: pet mode"
+        case .off: return "Display: off"
+        }
     }
 }
 
@@ -113,7 +119,10 @@ private enum ReplacementMode: String, CaseIterable {
     }
 
     var settingsTitle: String {
-        "Replace Action: \(menuTitle)"
+        switch self {
+        case .instantInsert: return "Replace action: insert without preview"
+        case .showPanel: return "Replace action: show preview panel"
+        }
     }
 }
 
@@ -123,30 +132,16 @@ private struct GlobalHotKeyDefinition {
     let id: UInt32
     let keyCode: UInt32
     let carbonModifiers: UInt32
-    let requiredModifierFlags: NSEvent.ModifierFlags
-    let forbiddenModifierFlags: NSEvent.ModifierFlags
+    let modifierFlags: NSEvent.ModifierFlags
     let displayString: String
 
-    static let screenshotArea = GlobalHotKeyDefinition(
-        id: 1,
-        keyCode: UInt32(kVK_ANSI_2),
-        carbonModifiers: UInt32(controlKey),
-        requiredModifierFlags: [.control],
-        forbiddenModifierFlags: [.command, .option, .shift, .function],
-        displayString: "⌃2"
-    )
-
-    static let translateSelection = GlobalHotKeyDefinition(
-        id: 2,
-        keyCode: UInt32(kVK_ANSI_1),
-        carbonModifiers: UInt32(controlKey),
-        requiredModifierFlags: [.control],
-        forbiddenModifierFlags: [.command, .option, .shift, .function],
-        displayString: "⌃1"
-    )
-
-    static let screenshotAreaDisplayString = screenshotArea.displayString
-    static let translateSelectionDisplayString = translateSelection.displayString
+    init(action: GlobalShortcutAction, shortcut: GlobalShortcut) {
+        id = action.id
+        keyCode = shortcut.keyCode
+        carbonModifiers = shortcut.carbonModifiers
+        modifierFlags = shortcut.modifiers
+        displayString = shortcut.displayString
+    }
 }
 
 private final class GlobalHotKey {
@@ -271,8 +266,7 @@ private final class GlobalHotKey {
         }
 
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        return definition.requiredModifierFlags.isSubset(of: modifiers)
-            && modifiers.intersection(definition.forbiddenModifierFlags).isEmpty
+        return modifiers.intersection(GlobalShortcut.supportedModifiers) == definition.modifierFlags
     }
 }
 
@@ -690,6 +684,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     private var screenshotPanelSide: TranslationPanelController.Side?
     private var screenshotDragTracker: ScreenshotDragTracker?
     private var globalHotKeys: [GlobalHotKey] = []
+    private var shortcutRecorderWindowController: ShortcutRecorderWindowController?
     private var lastReplacementSourcePID: pid_t?
     private var translationCache = TranslationCache()
     private let usageStatsStore = UsageStatsStore()
@@ -832,16 +827,41 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         _ = updaterController
     }
 
+    private func shortcut(for action: GlobalShortcutAction) -> GlobalShortcut {
+        GlobalShortcutStore.shortcut(for: action)
+    }
+
     private func setupGlobalHotKeys() {
-        let screenshotHotKey = GlobalHotKey(definition: .screenshotArea) { [weak self] in
+        globalHotKeys.forEach { $0.unregister() }
+
+        let screenshotHotKey = GlobalHotKey(
+            definition: GlobalHotKeyDefinition(
+                action: .screenshotArea,
+                shortcut: shortcut(for: .screenshotArea)
+            )
+        ) { [weak self] in
             self?.startScreenshotTranslation()
         }
-        let translateSelectionHotKey = GlobalHotKey(definition: .translateSelection) { [weak self] in
+        let translateSelectionHotKey = GlobalHotKey(
+            definition: GlobalHotKeyDefinition(
+                action: .translateSelection,
+                shortcut: shortcut(for: .translateSelection)
+            )
+        ) { [weak self] in
             self?.startSelectedTextTranslationForReplacement()
+        }
+        let translateOrReplyHotKey = GlobalHotKey(
+            definition: GlobalHotKeyDefinition(
+                action: .translateOrReply,
+                shortcut: shortcut(for: .translateOrReply)
+            )
+        ) { [weak self] in
+            self?.startSelectionTranslateOrReply()
         }
         globalHotKeys = [
             screenshotHotKey,
-            translateSelectionHotKey
+            translateSelectionHotKey,
+            translateOrReplyHotKey
         ]
         globalHotKeys.forEach { $0.register() }
     }
@@ -930,7 +950,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             isEnabled: false
         ))
         menu.addItem(makeMenuItem(
-            title: "Open Accessibility Settings...",
+            title: "Open accessibility settings...",
             tag: .accessibilitySettings,
             symbolName: "gearshape",
             action: #selector(openAccessibilitySettings),
@@ -952,7 +972,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             isEnabled: false
         ))
         menu.addItem(makeMenuItem(
-            title: "Open Setup...",
+            title: "Open setup...",
             tag: .bootstrapAction,
             symbolName: "wrench.and.screwdriver",
             action: #selector(openOnboardingWindow),
@@ -964,21 +984,37 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         menu.addItem(bootstrapSeparator)
 
         menu.addItem(makeMenuItem(
-            title: "Translate My Text...",
+            title: "Rewrite my text...",
             tag: .translateSelection,
             symbolName: "text.insert",
             action: #selector(translateSelectedTextFromMenu),
-            keyEquivalent: "1",
-            keyEquivalentModifierMask: .control
+            keyEquivalent: shortcut(for: .translateSelection).menuKeyEquivalent,
+            keyEquivalentModifierMask: shortcut(for: .translateSelection).keyEquivalentModifierMask
         ))
 
         menu.addItem(makeMenuItem(
-            title: "Translate Screen Area...",
+            title: "Translate screen area...",
             tag: .screenshotArea,
             symbolName: "viewfinder",
             action: #selector(translateScreenshotAreaFromMenu),
-            keyEquivalent: "2",
-            keyEquivalentModifierMask: .control
+            keyEquivalent: shortcut(for: .screenshotArea).menuKeyEquivalent,
+            keyEquivalentModifierMask: shortcut(for: .screenshotArea).keyEquivalentModifierMask
+        ))
+
+        menu.addItem(makeMenuItem(
+            title: "Translate selected text...",
+            tag: .translateOrReplySelection,
+            symbolName: "text.viewfinder",
+            action: #selector(translateOrReplySelectionFromMenu),
+            keyEquivalent: shortcut(for: .translateOrReply).menuKeyEquivalent,
+            keyEquivalentModifierMask: shortcut(for: .translateOrReply).keyEquivalentModifierMask
+        ))
+
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .keyboardShortcuts,
+            symbolName: "keyboard",
+            submenu: makeKeyboardShortcutsMenu()
         ))
 
         menu.addItem(NSMenuItem.separator())
@@ -1047,7 +1083,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(makeMenuItem(
-            title: "Snippets & Dictionary…",
+            title: "Snippets & dictionary…",
             tag: .snippets,
             symbolName: "text.append",
             action: #selector(openSnippetsWindow),
@@ -1056,7 +1092,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(makeMenuItem(
-            title: "Check for Updates...",
+            title: "Check for updates...",
             tag: .checkForUpdates,
             symbolName: "arrow.down.circle",
             action: #selector(checkForUpdates),
@@ -1322,6 +1358,32 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             item.representedObject = mode.rawValue
             menu.addItem(item)
         }
+        return menu
+    }
+
+    private func makeKeyboardShortcutsMenu() -> NSMenu {
+        let menu = NSMenu()
+        for action in GlobalShortcutAction.allCases {
+            let shortcut = shortcut(for: action)
+            let item = NSMenuItem(
+                title: "\(action.menuTitle): \(shortcut.displayString)",
+                action: #selector(recordKeyboardShortcut(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = action.rawValue
+            menu.addItem(item)
+        }
+
+        menu.addItem(.separator())
+
+        let resetItem = NSMenuItem(
+            title: "Reset to defaults",
+            action: #selector(resetKeyboardShortcuts),
+            keyEquivalent: ""
+        )
+        resetItem.target = self
+        menu.addItem(resetItem)
         return menu
     }
 
@@ -1890,25 +1952,44 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         let bootstrapReady = bootstrap.state.isReady
         menu.item(withTag: MenuItemTag.bootstrapNotice.rawValue)?.isHidden = bootstrapReady
         menu.item(withTag: MenuItemTag.bootstrapAction.rawValue)?.title = bootstrapReady
-            ? "Ollama Setup..."
-            : "Open Setup..."
+            ? "Ollama setup..."
+            : "Open setup..."
         menu.item(withTag: MenuItemTag.bootstrapSeparator.rawValue)?.isHidden = bootstrapReady
-        menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.title = "Translating to: \(targetLanguage.displayName)"
-        menu.item(withTag: MenuItemTag.draftTargetLanguage.rawValue)?.title = "Write messages in \(draftTargetLanguage.displayName)"
+        menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.title = "Translation language: \(targetLanguage.displayName)"
+        menu.item(withTag: MenuItemTag.draftTargetLanguage.rawValue)?.title = "Writing language: \(draftTargetLanguage.displayName)"
         menu.item(withTag: MenuItemTag.selectionDisplayMode.rawValue)?.title = selectionDisplayMode.settingsTitle
         menu.item(withTag: MenuItemTag.floatingDefaultMode.rawValue)?.title = floatingDefaultMode.menuTitle
         menu.item(withTag: MenuItemTag.thinkingLevel.rawValue)?.title = thinkingLevel.settingsTitle
         menu.item(withTag: MenuItemTag.selectedModel.rawValue)?.title = "Model: \(OllamaModelOption.option(id: selectedModelID).displayName)"
         menu.item(withTag: MenuItemTag.checkForUpdates.rawValue)?.isHidden = !isRunningFromAppBundle
         if let translateSelectionItem = menu.item(withTag: MenuItemTag.translateSelection.rawValue) {
-            translateSelectionItem.title = "Translate My Text to \(draftTargetLanguage.displayName)..."
+            translateSelectionItem.title = "Rewrite my text in \(draftTargetLanguage.displayName)..."
+            applyShortcut(for: .translateSelection, to: translateSelectionItem)
             translateSelectionItem.isEnabled = trusted
         }
         if let screenshotItem = menu.item(withTag: MenuItemTag.screenshotArea.rawValue) {
+            let idleTitle: String
+            switch floatingDefaultMode {
+            case .translate:
+                idleTitle = "Translate screen area..."
+            case .smartReply:
+                idleTitle = "Reply to screen area..."
+            }
             screenshotItem.title = isScreenshotTranslationRunning
-                ? "Selecting Screen Area..."
-                : "Translate Screen Area..."
+                ? "Selecting screen area..."
+                : idleTitle
+            applyShortcut(for: .screenshotArea, to: screenshotItem)
             screenshotItem.isEnabled = !isScreenshotTranslationRunning
+        }
+        if let selectionItem = menu.item(withTag: MenuItemTag.translateOrReplySelection.rawValue) {
+            switch floatingDefaultMode {
+            case .translate:
+                selectionItem.title = "Translate selected text..."
+            case .smartReply:
+                selectionItem.title = "Reply to selected text..."
+            }
+            applyShortcut(for: .translateOrReply, to: selectionItem)
+            selectionItem.isEnabled = trusted
         }
 
         if let languageMenu = menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.submenu {
@@ -1957,8 +2038,12 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             }
         }
 
-        menu.item(withTag: MenuItemTag.writingStyle.rawValue)?.title = "Writing Style"
-        menu.item(withTag: MenuItemTag.cleanupLevel.rawValue)?.title = "Auto Cleanup: \(cleanupLevel.displayName)"
+        menu.item(withTag: MenuItemTag.writingStyle.rawValue)?.title = "Writing style"
+        menu.item(withTag: MenuItemTag.cleanupLevel.rawValue)?.title = "Auto cleanup: \(cleanupLevel.displayName.lowercased())"
+        menu.item(withTag: MenuItemTag.keyboardShortcuts.rawValue)?.title = "Keyboard shortcuts"
+        if let shortcutsMenu = menu.item(withTag: MenuItemTag.keyboardShortcuts.rawValue)?.submenu {
+            updateKeyboardShortcutsMenu(shortcutsMenu)
+        }
 
         if let styleMenu = menu.item(withTag: MenuItemTag.writingStyle.rawValue)?.submenu {
             for categoryItem in styleMenu.items {
@@ -1991,6 +2076,26 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             for item in replacementMenu.items {
                 guard let raw = item.representedObject as? String else { continue }
                 item.state = raw == activeMode ? .on : .off
+            }
+        }
+    }
+
+    private func applyShortcut(for action: GlobalShortcutAction, to item: NSMenuItem) {
+        let shortcut = shortcut(for: action)
+        item.keyEquivalent = shortcut.menuKeyEquivalent
+        item.keyEquivalentModifierMask = shortcut.keyEquivalentModifierMask
+    }
+
+    private func updateKeyboardShortcutsMenu(_ menu: NSMenu) {
+        for item in menu.items {
+            if let raw = item.representedObject as? String,
+               let action = GlobalShortcutAction(rawValue: raw) {
+                let shortcut = shortcut(for: action)
+                item.title = "\(action.menuTitle): \(shortcut.displayString)"
+            } else if item.action == #selector(resetKeyboardShortcuts) {
+                item.isEnabled = GlobalShortcutAction.allCases.contains {
+                    shortcut(for: $0) != $0.defaultShortcut
+                }
             }
         }
     }
@@ -2028,6 +2133,68 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         startSelectedTextTranslationForReplacement()
     }
 
+    @objc private func translateOrReplySelectionFromMenu() {
+        startSelectionTranslateOrReply()
+    }
+
+    @MainActor
+    private func startSelectionTranslateOrReply() {
+        guard accessibilityIsTrusted() else {
+            requestAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        translateButtonController?.close()
+        translateButtonController = nil
+        petController?.clearReady()
+        cancelPrefetch()
+
+        let mode = floatingDefaultMode.translationMode
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+
+            self.selectionReader.readSelectedTextContext(allowClipboardFallback: true) { [weak self] selection in
+                guard let self else { return }
+
+                let shortcutDisplay = self.shortcut(for: .translateOrReply).displayString
+
+                guard let selection else {
+                    self.presentSelectionTranslationError("Select text first, then press \(shortcutDisplay).")
+                    return
+                }
+
+                let cleaned = TextNormalizer.cleanedSelection(selection.text)
+                guard !cleaned.isEmpty else {
+                    self.presentSelectionTranslationError("Select text first, then press \(shortcutDisplay).")
+                    return
+                }
+
+                let mouseLocation = NSEvent.mouseLocation
+                let panelSide = self.panelSideForSelectionEnding(at: mouseLocation)
+
+                switch mode {
+                case .smartReply:
+                    self.replyToSelection(
+                        cleaned,
+                        near: mouseLocation,
+                        selectionRect: selection.selectionRect,
+                        panelSide: panelSide
+                    )
+                case .selection, .draftMessage:
+                    self.translate(
+                        cleaned,
+                        near: mouseLocation,
+                        mode: .selection,
+                        usageKind: .selection,
+                        selectionRect: selection.selectionRect,
+                        panelSide: panelSide
+                    )
+                }
+            }
+        }
+    }
+
     @MainActor
     private func startSelectedTextTranslationForReplacement() {
         guard accessibilityIsTrusted() else {
@@ -2048,14 +2215,14 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
                 guard let selection else {
                     self.petController?.clearReady()
-                    self.presentSelectionTranslationError("Select text first, then press \(GlobalHotKeyDefinition.translateSelectionDisplayString).")
+                    self.presentSelectionTranslationError("Select text first, then press \(self.shortcut(for: .translateSelection).displayString).")
                     return
                 }
 
                 let cleanedDraft = TextNormalizer.cleanedDraftMessage(selection.text)
                 guard !cleanedDraft.isEmpty else {
                     self.petController?.clearReady()
-                    self.presentSelectionTranslationError("Select text first, then press \(GlobalHotKeyDefinition.translateSelectionDisplayString).")
+                    self.presentSelectionTranslationError("Select text first, then press \(self.shortcut(for: .translateSelection).displayString).")
                     return
                 }
 
@@ -2199,10 +2366,13 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     let mouseLocation = NSEvent.mouseLocation
                     let panelSide = self.panelSideForScreenshotEnding(at: mouseLocation)
                     self.resetScreenshotDragTracking()
+                    let mode = self.floatingDefaultMode.translationMode
                     self.translate(
                         sourceText,
                         near: mouseLocation,
-                        usageKind: .screenArea,
+                        mode: mode,
+                        useCache: mode != .smartReply,
+                        usageKind: mode == .smartReply ? .smartReply : .screenArea,
                         panelSide: panelSide,
                         keepPetReadyUntilPanelCloses: true
                     )
@@ -2229,9 +2399,9 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         if let screenshotError = error as? ScreenshotTranslationError,
            case .screenRecordingPermissionDenied = screenshotError {
             let response = YakuAlertController(
-                title: "Screen Recording required",
+                title: "Screen recording required",
                 message: screenshotError.localizedDescription,
-                primaryButtonTitle: "Open Settings",
+                primaryButtonTitle: "Open settings",
                 secondaryButtonTitle: "Cancel"
             ).showModal()
             if response == .alertFirstButtonReturn {
@@ -2371,6 +2541,48 @@ final class YakuApp: NSObject, NSApplicationDelegate {
               let mode = ReplacementMode(rawValue: raw)
         else { return }
         replacementMode = mode
+        updateMenuState()
+    }
+
+    @MainActor
+    @objc private func recordKeyboardShortcut(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let action = GlobalShortcutAction(rawValue: raw)
+        else { return }
+
+        shortcutRecorderWindowController?.close()
+        let controller = ShortcutRecorderWindowController(
+            action: action,
+            currentShortcut: shortcut(for: action),
+            onShortcut: { [weak self] shortcut in
+                self?.setKeyboardShortcut(shortcut, for: action) ?? false
+            },
+            onClose: { [weak self] in
+                self?.shortcutRecorderWindowController = nil
+            }
+        )
+        shortcutRecorderWindowController = controller
+        controller.present()
+    }
+
+    @MainActor
+    private func setKeyboardShortcut(_ shortcut: GlobalShortcut, for action: GlobalShortcutAction) -> Bool {
+        for otherAction in GlobalShortcutAction.allCases where otherAction != action {
+            if self.shortcut(for: otherAction) == shortcut {
+                return false
+            }
+        }
+
+        GlobalShortcutStore.set(shortcut, for: action)
+        setupGlobalHotKeys()
+        updateMenuState()
+        return true
+    }
+
+    @MainActor
+    @objc private func resetKeyboardShortcuts() {
+        GlobalShortcutStore.resetToDefaults()
+        setupGlobalHotKeys()
         updateMenuState()
     }
 
@@ -4247,7 +4459,7 @@ final class PetMascotView: NSView {
     private func tooltip(for state: State, mode: TranslationMode) -> String {
         switch state {
         case .idle, .run:
-            return "Yaku Pet"
+            return "Yaku pet"
         case .ready:
             switch mode {
             case .selection, .draftMessage:

@@ -193,7 +193,7 @@ final class SnippetsWindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Yaku Snippets & Dictionary"
+        window.title = "Yaku snippets & dictionary"
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
         window.isMovableByWindowBackground = true
@@ -231,7 +231,7 @@ final class SnippetsWindowController: NSWindowController, NSWindowDelegate {
         rootView.addSubview(glass)
         let contentView = glass.contentView
 
-        let title = NSTextField(labelWithString: "Snippets & Dictionary")
+        let title = NSTextField(labelWithString: "Snippets & dictionary")
         title.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
         title.translatesAutoresizingMaskIntoConstraints = false
 

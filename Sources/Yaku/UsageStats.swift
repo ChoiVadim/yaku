@@ -14,9 +14,9 @@ enum UsageStatsEventKind: String, Codable, CaseIterable, Equatable, Identifiable
 
     var title: String {
         switch self {
-        case .selection: return "Selected Text"
-        case .screenArea: return "Screen Text"
-        case .draftMessage: return "My Writing"
+        case .selection: return "Selected text"
+        case .screenArea: return "Screen text"
+        case .draftMessage: return "My writing"
         case .smartReply: return "Replies"
         case .replacement: return "Replacements"
         }
@@ -29,6 +29,16 @@ enum UsageStatsEventKind: String, Codable, CaseIterable, Equatable, Identifiable
         case .draftMessage: return "text.insert"
         case .smartReply: return "bubble.left.and.bubble.right"
         case .replacement: return "arrow.triangle.2.circlepath"
+        }
+    }
+
+    var legendGlyph: String {
+        switch self {
+        case .selection: return "E"
+        case .screenArea: return "I"
+        case .draftMessage: return "*"
+        case .smartReply: return "T"
+        case .replacement: return "R"
         }
     }
 
@@ -392,7 +402,7 @@ private struct UsageStatsMenuSummaryView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Yaku Usage")
+                    Text("Yaku usage")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                     Text("Local stats")
                         .font(.system(size: 10, weight: .semibold))
@@ -407,7 +417,7 @@ private struct UsageStatsMenuSummaryView: View {
             HStack(spacing: 0) {
                 MenuMetricValue(title: "Words", value: snapshot.totalSourceWords.formatted())
                 MenuMetricDivider()
-                MenuMetricValue(title: "Today Words", value: todayWords.formatted())
+                MenuMetricValue(title: "Today words", value: todayWords.formatted())
                 MenuMetricDivider()
                 MenuMetricValue(title: "Streak", value: "\(snapshot.currentStreak)d")
             }
@@ -456,11 +466,7 @@ private struct UsageStatsMenuSummaryView: View {
 
                 HStack(spacing: 7) {
                     ForEach(workflowItems) { item in
-                        Label(item.kind.title, systemImage: item.kind.symbolName)
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
+                        WorkflowLegendItem(kind: item.kind)
                     }
                     if snapshot.modeBreakdown.allSatisfy({ $0.count == 0 }) {
                         Text("Start translating to fill this chart")
@@ -484,6 +490,25 @@ private struct UsageStatsMenuSummaryView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .onAppear { store.refresh() }
+    }
+}
+
+private struct WorkflowLegendItem: View {
+    let kind: UsageStatsEventKind
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 3) {
+            Text(kind.legendGlyph)
+                .font(.system(size: 9, weight: .black, design: .rounded))
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 8, alignment: .center)
+
+            Text(kind.title)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
