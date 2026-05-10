@@ -360,26 +360,68 @@ final class UsageStatsStore: ObservableObject {
     }
 }
 
+let usageStatsExpandedKey = "usageStatsExpanded"
+
 @MainActor
 final class UsageStatsMenuItem: NSMenuItem {
-    init(store: UsageStatsStore) {
+    private let store: UsageStatsStore
+    private let onRequestReopen: () -> Void
+    private var hostingView: NSHostingView<UsageStatsMenuSummaryView>!
+
+    init(store: UsageStatsStore, onRequestReopen: @escaping () -> Void) {
+        self.store = store
+        self.onRequestReopen = onRequestReopen
         super.init(title: "", action: nil, keyEquivalent: "")
 
-        let hostingView = NSHostingView(
-            rootView: UsageStatsMenuSummaryView(store: store)
+        let host = NSHostingView(rootView: makeRootView(isExpanded: Self.persistedExpanded))
+        host.frame = NSRect(origin: .zero, size: host.fittingSize)
+        hostingView = host
+        view = host
+    }
+
+    func refitFrame() {
+        hostingView.rootView = makeRootView(isExpanded: Self.persistedExpanded)
+        hostingView.frame = NSRect(origin: .zero, size: hostingView.fittingSize)
+    }
+
+    private static var persistedExpanded: Bool {
+        UserDefaults.standard.bool(forKey: usageStatsExpandedKey)
+    }
+
+    private func makeRootView(isExpanded: Bool) -> UsageStatsMenuSummaryView {
+        UsageStatsMenuSummaryView(
+            store: store,
+            isExpanded: isExpanded,
+            onToggle: { [weak self] in
+                self?.handleToggle()
+            }
         )
-        let fittingSize = hostingView.fittingSize
-        hostingView.frame = NSRect(origin: .zero, size: fittingSize)
-        view = hostingView
+    }
+
+    private func handleToggle() {
+        let defaults = UserDefaults.standard
+        let newValue = !defaults.bool(forKey: usageStatsExpandedKey)
+        defaults.set(newValue, forKey: usageStatsExpandedKey)
+
+        // Synchronously rebuild the SwiftUI rootView and resize the host so the
+        // next menu open reads the correct frame. Reading fittingSize after
+        // setting a fresh value-typed rootView forces SwiftUI to lay out now.
+        hostingView.rootView = makeRootView(isExpanded: newValue)
+        hostingView.frame = NSRect(origin: .zero, size: hostingView.fittingSize)
+
+        onRequestReopen()
+        menu?.cancelTracking()
     }
 
     required init(coder: NSCoder) {
-        super.init(coder: coder)
+        fatalError("UsageStatsMenuItem is not loaded from a nib")
     }
 }
 
 private struct UsageStatsMenuSummaryView: View {
     @ObservedObject var store: UsageStatsStore
+    let isExpanded: Bool
+    let onToggle: () -> Void
     private let contentWidth: CGFloat = 310
 
     private var snapshot: UsageStatsSnapshot { store.snapshot }
@@ -394,7 +436,7 @@ private struct UsageStatsMenuSummaryView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center) {
+            HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Yaku usage")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
@@ -406,6 +448,7 @@ private struct UsageStatsMenuSummaryView: View {
                 Label("\(snapshot.totalUses.formatted()) uses", systemImage: "chart.bar.xaxis")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.secondary)
+                expandToggle
             }
 
             HStack(spacing: 0) {
@@ -416,58 +459,60 @@ private struct UsageStatsMenuSummaryView: View {
                 MenuMetricValue(title: "Streak", value: "\(snapshot.currentStreak)d")
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Activity map")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(snapshot.currentStreak)d current")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-
-                MenuActivityMap(snapshot: snapshot)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Workflow mix")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(snapshot.totalReplacements.formatted()) replaced")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-
-                GeometryReader { proxy in
-                    if snapshot.totalUses == 0 {
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .fill(Color.primary.opacity(0.08))
-                    } else {
-                        HStack(spacing: 0) {
-                            ForEach(workflowItems) { item in
-                                Rectangle()
-                                    .fill(item.kind.color.opacity(0.86))
-                                    .frame(width: proxy.size.width * item.fraction)
-                            }
-                        }
-                        .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
-                    }
-                }
-                .frame(height: 10)
-
-                HStack(spacing: 7) {
-                    ForEach(workflowItems) { item in
-                        WorkflowLegendItem(kind: item.kind)
-                    }
-                    if snapshot.modeBreakdown.allSatisfy({ $0.count == 0 }) {
-                        Text("Start translating to fill this chart")
-                            .font(.system(size: 9, weight: .semibold))
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Activity map")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(snapshot.currentStreak)d current")
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
-                    Spacer(minLength: 0)
+
+                    MenuActivityMap(snapshot: snapshot)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Workflow mix")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(snapshot.totalReplacements.formatted()) replaced")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    GeometryReader { proxy in
+                        if snapshot.totalUses == 0 {
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(Color.primary.opacity(0.08))
+                        } else {
+                            HStack(spacing: 0) {
+                                ForEach(workflowItems) { item in
+                                    Rectangle()
+                                        .fill(item.kind.color.opacity(0.86))
+                                        .frame(width: proxy.size.width * item.fraction)
+                                }
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                        }
+                    }
+                    .frame(height: 10)
+
+                    HStack(spacing: 7) {
+                        ForEach(workflowItems) { item in
+                            WorkflowLegendItem(kind: item.kind)
+                        }
+                        if snapshot.modeBreakdown.allSatisfy({ $0.count == 0 }) {
+                            Text("Start translating to fill this chart")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                    }
                 }
             }
         }
@@ -484,6 +529,22 @@ private struct UsageStatsMenuSummaryView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .onAppear { store.refresh() }
+    }
+
+    private var expandToggle: some View {
+        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(.secondary)
+            .frame(width: 22, height: 18)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.primary.opacity(0.07))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .onTapGesture {
+                onToggle()
+            }
+            .help(isExpanded ? "Show less" : "Show more")
     }
 }
 

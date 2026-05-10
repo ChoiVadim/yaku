@@ -694,6 +694,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     private var lastReplacementSourcePID: pid_t?
     private var translationCache = TranslationCache()
     private let usageStatsStore = UsageStatsStore()
+    private var shouldReopenStatusMenuAfterClose = false
     private let snippetsStore = SnippetsStore()
     private lazy var bootstrap: OllamaBootstrap = OllamaBootstrap(
         baseURL: ollamaBaseURL,
@@ -1016,7 +1017,9 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         permissionSeparator.tag = MenuItemTag.permissionSeparator.rawValue
         menu.addItem(permissionSeparator)
 
-        let usageSummaryItem = UsageStatsMenuItem(store: usageStatsStore)
+        let usageSummaryItem = UsageStatsMenuItem(store: usageStatsStore) { [weak self] in
+            self?.shouldReopenStatusMenuAfterClose = true
+        }
         usageSummaryItem.tag = MenuItemTag.usageStatsSummary.rawValue
         menu.addItem(usageSummaryItem)
 
@@ -2782,7 +2785,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             "thinkingLevel",
             "cleanupLevel",
             "replacementMode",
-            "usageStatsExpanded"
+            usageStatsExpandedKey
         ].forEach { defaults.removeObject(forKey: $0) }
 
         for category in AppCategory.allCases {
@@ -6821,5 +6824,16 @@ extension YakuApp: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         usageStatsStore.refresh()
         updateMenuState()
+        if let usageItem = menu.item(withTag: MenuItemTag.usageStatsSummary.rawValue) as? UsageStatsMenuItem {
+            usageItem.refitFrame()
+        }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard shouldReopenStatusMenuAfterClose else { return }
+        shouldReopenStatusMenuAfterClose = false
+        DispatchQueue.main.async { [weak self] in
+            self?.statusItem?.button?.performClick(nil)
+        }
     }
 }
