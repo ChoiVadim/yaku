@@ -128,19 +128,21 @@ final class OllamaBootstrap {
         update(\.ollamaSignedIn, .checking)
         update(\.modelReady, .checking)
 
-        let installed = ollamaAppURL() != nil
-        update(\.ollamaInstalled, installed
-            ? .ok
-            : .needsAction("Ollama isn't installed yet."))
+        let appPresent = ollamaAppURL() != nil
+        let serverAlive = await pingServer()
 
-        if !installed {
+        // A live server on localhost:11434 is sufficient evidence that Ollama
+        // is installed — covers Homebrew and other non-.app installs.
+        if appPresent || serverAlive {
+            update(\.ollamaInstalled, .ok)
+        } else {
+            update(\.ollamaInstalled, .needsAction("Ollama isn't installed yet."))
             update(\.serverRunning, .needsAction("Install Ollama first."))
             update(\.ollamaSignedIn, .needsAction("Install Ollama first."))
             update(\.modelReady, .needsAction("Install Ollama first."))
             return
         }
 
-        let serverAlive = await pingServer()
         if serverAlive {
             update(\.serverRunning, .ok)
         } else {
