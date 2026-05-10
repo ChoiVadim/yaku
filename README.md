@@ -22,6 +22,14 @@ Use `Control` + `1` to translate text you wrote into the separate writing langua
 Open Shortcuts > Edit keyboard shortcuts... from the menu bar item to customize shortcuts for the current macOS user.
 Open the menu bar item to see a compact local usage summary with totals, streaks, workflow mix, and an activity map.
 
+## Installing (end users)
+
+Download the DMG from the [latest release](https://github.com/ChoiVadim/yaku/releases/latest), open it, and drag `Yaku.app` to `/Applications`.
+
+If the DMG is ad-hoc signed (any release without Developer ID notarization), macOS Gatekeeper blocks the first launch with "Yaku can't be opened because Apple cannot check it for malicious software." Right-click `Yaku.app` and choose **Open** — confirm once and macOS trusts it from then on.
+
+On first launch Yaku asks for **Accessibility** and **Screen Recording** permissions. Both are required: Accessibility lets Yaku read selected text, and Screen Recording is needed for "Translate screen area...". After enabling Screen Recording in System Settings, quit and relaunch Yaku for the change to take effect.
+
 ## Build a `.app` and DMG
 
 ```sh
