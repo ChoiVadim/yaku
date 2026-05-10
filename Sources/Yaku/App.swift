@@ -484,6 +484,7 @@ private final class TranslationPrefetch {
     let thinkingLevel: ThinkingLevel
     let appCategory: AppCategory
     let cleanup: CleanupLevel
+    let snippets: [Snippet]
     private let ollamaClient: OllamaClient
     private var task: Task<Void, Never>?
     private var state: State = .pending
@@ -499,6 +500,7 @@ private final class TranslationPrefetch {
         thinkingLevel: ThinkingLevel,
         appCategory: AppCategory,
         cleanup: CleanupLevel,
+        snippets: [Snippet],
         ollamaClient: OllamaClient,
         onComplete: @escaping (String, TranslationLanguage, ThinkingLevel, String) -> Void
     ) {
@@ -507,6 +509,7 @@ private final class TranslationPrefetch {
         self.thinkingLevel = thinkingLevel
         self.appCategory = appCategory
         self.cleanup = cleanup
+        self.snippets = snippets
         self.ollamaClient = ollamaClient
         self.onComplete = onComplete
     }
@@ -578,7 +581,7 @@ private final class TranslationPrefetch {
                 appCategory: appCategory,
                 style: .casual,
                 cleanup: cleanup,
-                snippets: [],
+                snippets: snippets,
                 thinkingLevel: thinkingLevel
             ) { [weak self] partial in
                 Task { @MainActor in
@@ -1884,7 +1887,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
            translationPrefetch.targetLanguage == language,
            translationPrefetch.thinkingLevel == thinkingLevel,
            translationPrefetch.appCategory == appCategory,
-           translationPrefetch.cleanup == cleanup {
+           translationPrefetch.cleanup == cleanup,
+           translationPrefetch.snippets == snippets {
             translationPrefetch.subscribe { partialTranslation in
                 controller.showTranslation(partialTranslation, requestID: requestID)
             } onCompletion: { [weak self] finalTranslation in
@@ -1978,12 +1982,14 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         let currentThinkingLevel = thinkingLevel
         let (_, appCategory) = AppCategoryClassifier.detectFrontmost()
         let currentCleanup = cleanupLevel
+        let currentSnippets = snippetsStore.usableSnippets()
         let prefetch = TranslationPrefetch(
             text: text,
             targetLanguage: language,
             thinkingLevel: currentThinkingLevel,
             appCategory: appCategory,
             cleanup: currentCleanup,
+            snippets: currentSnippets,
             ollamaClient: ollamaClient
         ) { [weak self] sourceText, targetLanguage, thinkingLevel, translation in
             self?.translationCache.store(translation, for: sourceText, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel, cleanup: currentCleanup)
@@ -3584,9 +3590,15 @@ enum ScreenshotCapture {
                     let fileExists = FileManager.default.fileExists(atPath: outputURL.path)
 
                     if !fileExists {
-                        if stderrText.isEmpty {
+                        // If `screencapture` produced no file and the system
+                        // says the app isn't trusted for screen capture, the
+                        // failure is almost certainly a permission denial —
+                        // independent of how Apple phrased the stderr message.
+                        let permissionDenied = !CGPreflightScreenCaptureAccess()
+                            || stderrText.localizedCaseInsensitiveContains("could not create image")
+                        if stderrText.isEmpty && !permissionDenied {
                             continuation.resume(throwing: ScreenshotTranslationError.captureCancelled)
-                        } else if stderrText.localizedCaseInsensitiveContains("could not create image") {
+                        } else if permissionDenied {
                             continuation.resume(throwing: ScreenshotTranslationError.screenRecordingPermissionDenied)
                         } else {
                             continuation.resume(throwing: ScreenshotTranslationError.captureFailedDetail(stderrText))
