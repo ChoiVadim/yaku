@@ -2484,11 +2484,16 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 title: "Screen recording required",
                 message: screenshotError.localizedDescription,
                 primaryButtonTitle: "Open settings",
-                secondaryButtonTitle: "Cancel"
+                secondaryButtonTitle: "Quit Yaku"
             ).showModal()
-            if response == .alertFirstButtonReturn {
+            switch response {
+            case .alertFirstButtonReturn:
                 let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
                 NSWorkspace.shared.open(url)
+            case .alertSecondButtonReturn:
+                NSApp.terminate(nil)
+            default:
+                break
             }
             return
         }
@@ -3460,7 +3465,7 @@ enum ScreenshotTranslationError: LocalizedError {
         case .noTextRecognized:
             "No readable text was found in the selected area."
         case .screenRecordingPermissionDenied:
-            "Yaku needs Screen Recording permission to capture screenshots. Open System Settings → Privacy & Security → Screen Recording, enable Yaku, then quit and reopen the app."
+            "Yaku needs Screen Recording permission to capture screenshots. Open settings to enable it, then choose Quit Yaku and reopen Yaku for the change to take effect."
         }
     }
 
