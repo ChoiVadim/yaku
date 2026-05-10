@@ -697,6 +697,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     )
     private var onboardingWindowController: OnboardingWindowController?
     private var snippetsWindowController: SnippetsWindowController?
+    private var accessibilityTrustTimer: Timer?
     private lazy var updaterController: SPUStandardUpdaterController? = {
         guard isRunningFromAppBundle else { return nil }
         return SPUStandardUpdaterController(
@@ -929,6 +930,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         }
         petController?.close()
         globalHotKeys.forEach { $0.unregister() }
+        accessibilityTrustTimer?.invalidate()
+        accessibilityTrustTimer = nil
     }
 
     private func setupStatusItem() {
@@ -1949,10 +1952,29 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
         AXIsProcessTrustedWithOptions(options)
+        startAccessibilityTrustWatcher()
     }
 
     private func accessibilityIsTrusted() -> Bool {
         AXIsProcessTrusted()
+    }
+
+    private func startAccessibilityTrustWatcher() {
+        guard accessibilityTrustTimer == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self else {
+                    timer.invalidate()
+                    return
+                }
+                if self.accessibilityIsTrusted() {
+                    timer.invalidate()
+                    self.accessibilityTrustTimer = nil
+                    self.updateMenuState()
+                }
+            }
+        }
+        accessibilityTrustTimer = timer
     }
 
     private func requestScreenRecordingPermissionIfNeeded() {
