@@ -44,5 +44,16 @@
                 type="application/octet-stream"
                 sparkle:edSignature="QGfhhnoNE/aFEFhN9OsFhZxe+jWK3BKj4q/RZ+swYz87tjK0fL39SFFacYpP/W9Hpr/RWtXTlQ0pZxxuHE8XBg==" length="3022746" />
         </item>
+        <item>
+            <title>Version 0.5.0</title>
+            <pubDate>Sun, 10 May 2026 11:19:27 +0000</pubDate>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>0.5.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/ChoiVadim/yaku/releases/download/v0.5.0/Yaku-0.5.0.dmg"
+                type="application/octet-stream"
+                sparkle:edSignature="OqXXqnDocCATDcuFVpA0hnra24XMW/JCQctzkBVKgBZQTvdLTZtn0QGPqlUNtj5CBpHpMTftDkDf56B3Aw8xBg==" length="3134084" />
+        </item>
     </channel>
 </rss>
