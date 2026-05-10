@@ -37,6 +37,7 @@ struct BootstrapState: Equatable {
 final class OllamaBootstrap {
     let baseURL: URL
     let model: String
+    let requiresOllamaAccount: Bool
 
     private(set) var state = BootstrapState()
     var onChange: ((BootstrapState) -> Void)?
@@ -52,13 +53,10 @@ final class OllamaBootstrap {
     private var refreshTask: Task<Void, Never>?
     private var pullTask: Task<Void, Never>?
 
-    init(baseURL: URL, model: String) {
+    init(baseURL: URL, model: String, requiresOllamaAccount: Bool) {
         self.baseURL = baseURL
         self.model = model
-    }
-
-    var requiresOllamaAccount: Bool {
-        model.localizedCaseInsensitiveContains("cloud")
+        self.requiresOllamaAccount = requiresOllamaAccount
     }
 
     // MARK: - Public actions

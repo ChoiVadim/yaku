@@ -694,7 +694,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     private let snippetsStore = SnippetsStore()
     private lazy var bootstrap: OllamaBootstrap = OllamaBootstrap(
         baseURL: ollamaBaseURL,
-        model: selectedModelID
+        model: selectedModelID,
+        requiresOllamaAccount: OllamaModelOption.option(id: selectedModelID).isCloud
     )
     private var onboardingWindowController: OnboardingWindowController?
     private var snippetsWindowController: SnippetsWindowController?
@@ -896,7 +897,11 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         onboardingWindowController = nil
         staleOnboarding?.close()
 
-        bootstrap = OllamaBootstrap(baseURL: ollamaBaseURL, model: selectedModelID)
+        bootstrap = OllamaBootstrap(
+            baseURL: ollamaBaseURL,
+            model: selectedModelID,
+            requiresOllamaAccount: OllamaModelOption.option(id: selectedModelID).isCloud
+        )
         wireBootstrap()
 
         Task { @MainActor [weak self] in
@@ -922,26 +927,15 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func postTranslatorReadyNotification() {
-        let center = UNUserNotificationCenter.current()
-        center.getNotificationSettings { settings in
-            let deliver = {
-                let content = UNMutableNotificationContent()
-                content.title = "Yaku is ready"
-                content.body = "The translator finished downloading. Press your shortcut or select text to start."
-                content.sound = .default
-                let request = UNNotificationRequest(
-                    identifier: "yaku.translator.ready.\(Date().timeIntervalSince1970)",
-                    content: content,
-                    trigger: nil
-                )
-                center.add(request, withCompletionHandler: nil)
-            }
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
             switch settings.authorizationStatus {
             case .authorized, .provisional, .ephemeral:
-                deliver()
+                Self.deliverTranslatorReadyNotification()
             case .notDetermined:
-                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-                    if granted { deliver() }
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    if granted {
+                        Self.deliverTranslatorReadyNotification()
+                    }
                 }
             case .denied:
                 break
@@ -949,6 +943,19 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 break
             }
         }
+    }
+
+    nonisolated private static func deliverTranslatorReadyNotification() {
+        let content = UNMutableNotificationContent()
+        content.title = "Yaku is ready"
+        content.body = "The translator finished downloading. Press your shortcut or select text to start."
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "yaku.translator.ready.\(Date().timeIntervalSince1970)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
     }
 
     @MainActor
