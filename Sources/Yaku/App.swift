@@ -675,6 +675,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     }
 
     private var translateButtonController: FloatingTranslateButtonController?
+    private var floatingLoadingBar: FloatingTranslateButtonController?
     private var petController: PetController?
     private var translationPanelController: TranslationPanelController?
     private var translationPrefetch: TranslationPrefetch?
@@ -2202,8 +2203,6 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        translateButtonController?.close()
-        translateButtonController = nil
         cancelPrefetch()
         lastReplacementSourcePID = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
@@ -2214,6 +2213,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 guard let self else { return }
 
                 guard let selection else {
+                    self.translateButtonController?.close()
+                    self.translateButtonController = nil
                     self.petController?.clearReady()
                     self.presentSelectionTranslationError("Select text first, then press \(self.shortcut(for: .translateSelection).displayString).")
                     return
@@ -2221,6 +2222,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
                 let cleanedDraft = TextNormalizer.cleanedDraftMessage(selection.text)
                 guard !cleanedDraft.isEmpty else {
+                    self.translateButtonController?.close()
+                    self.translateButtonController = nil
                     self.petController?.clearReady()
                     self.presentSelectionTranslationError("Select text first, then press \(self.shortcut(for: .translateSelection).displayString).")
                     return
@@ -2230,8 +2233,10 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 let mouseLocation = NSEvent.mouseLocation
                 switch self.replacementMode {
                 case .instantInsert:
-                    self.runInstantTranslation(cleanedDraft, language: language)
+                    self.runInstantTranslation(cleanedDraft, language: language, near: mouseLocation)
                 case .showPanel:
+                    self.translateButtonController?.close()
+                    self.translateButtonController = nil
                     self.translate(
                         cleanedDraft,
                         near: mouseLocation,
@@ -2251,17 +2256,14 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    private func runInstantTranslation(_ text: String, language: TranslationLanguage) {
+    private func runInstantTranslation(_ text: String, language: TranslationLanguage, near screenPoint: NSPoint) {
         let currentThinkingLevel = thinkingLevel
         let (_, currentAppCategory) = AppCategoryClassifier.detectFrontmost()
         let currentStyle = writingStyle(for: currentAppCategory)
         let currentCleanup = cleanupLevel
         let currentSnippets = snippetsStore.usableSnippets()
 
-        if petController == nil {
-            petController = PetController(initialMode: .draftMessage)
-        }
-        petController?.showThinking()
+        let loadingBar = showInstantTranslationLoading(near: screenPoint)
 
         let client = ollamaClient
         Task { [weak self] in
@@ -2284,17 +2286,62 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                         kind: .draftMessage,
                         targetLanguage: language
                     )
-                    self.petController?.clearThinking()
+                    self.hideInstantTranslationLoading(loadingBar)
                     self.replaceCurrentSelection(with: translated)
                 }
             } catch {
                 await MainActor.run {
                     guard let self else { return }
-                    self.petController?.clearThinking()
+                    self.hideInstantTranslationLoading(loadingBar)
                     self.handleTranslationFailure(error)
                     self.presentSelectionTranslationError(error.localizedDescription)
                 }
             }
+        }
+    }
+
+    @MainActor
+    private func showInstantTranslationLoading(near screenPoint: NSPoint) -> FloatingTranslateButtonController? {
+        switch selectionDisplayMode {
+        case .pet:
+            if petController == nil {
+                petController = PetController(initialMode: .draftMessage)
+            }
+            petController?.showThinking()
+            return nil
+        case .floatingBar:
+            // Reuse the bar that's already on screen so it morphs in place
+            // instead of flickering — its panel stays at the same origin.
+            let bar: FloatingTranslateButtonController
+            if let existing = translateButtonController {
+                bar = existing
+                translateButtonController = nil
+            } else {
+                bar = FloatingTranslateButtonController(
+                    screenPoint: screenPoint,
+                    selectedText: "",
+                    initialMode: .selection,
+                    onTranslate: { _ in },
+                    onSmartReply: { _ in }
+                )
+                bar.show()
+            }
+            bar.setLoading()
+            floatingLoadingBar?.close()
+            floatingLoadingBar = bar
+            return bar
+        case .off:
+            return nil
+        }
+    }
+
+    @MainActor
+    private func hideInstantTranslationLoading(_ loadingBar: FloatingTranslateButtonController?) {
+        petController?.clearThinking()
+        guard let loadingBar else { return }
+        loadingBar.close()
+        if floatingLoadingBar === loadingBar {
+            floatingLoadingBar = nil
         }
     }
 
@@ -4544,6 +4591,13 @@ final class FloatingTranslateButtonController {
         panel.close()
     }
 
+    func setLoading() {
+        panel.ignoresMouseEvents = true
+        tabInterceptor?.disable()
+        tabInterceptor = nil
+        buttonView.setLoading(true)
+    }
+
     private func toggleMode() {
         currentMode = (currentMode == .smartReply) ? .selection : .smartReply
         buttonView.apply(mode: currentMode)
@@ -4564,7 +4618,9 @@ final class FloatingTranslateButtonView: NSView {
     var onClick: (() -> Void)?
 
     private let actionButton = NSButton()
+    private let progressIndicator = NSProgressIndicator()
     private var currentMode: TranslationMode
+    private var isLoading = false
 
     init(initialMode: TranslationMode) {
         self.currentMode = initialMode
@@ -4609,11 +4665,47 @@ final class FloatingTranslateButtonView: NSView {
         actionButton.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
         actionButton.imageScaling = .scaleNone
         glass.contentView.addSubview(actionButton)
+
+        let indicatorSize: CGFloat = 16
+        progressIndicator.style = .spinning
+        progressIndicator.controlSize = .small
+        progressIndicator.isIndeterminate = true
+        progressIndicator.appearance = NSAppearance(named: .darkAqua)
+        progressIndicator.frame = NSRect(
+            x: (bounds.width - indicatorSize) / 2,
+            y: (bounds.height - indicatorSize) / 2,
+            width: indicatorSize,
+            height: indicatorSize
+        )
+        progressIndicator.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+        progressIndicator.isHidden = true
+        glass.contentView.addSubview(progressIndicator)
     }
 
     func apply(mode: TranslationMode) {
         currentMode = mode
-        switch mode {
+        guard !isLoading else { return }
+        applyModeVisuals()
+    }
+
+    func setLoading(_ loading: Bool) {
+        guard isLoading != loading else { return }
+        isLoading = loading
+        if loading {
+            actionButton.isHidden = true
+            actionButton.toolTip = nil
+            progressIndicator.isHidden = false
+            progressIndicator.startAnimation(nil)
+        } else {
+            progressIndicator.stopAnimation(nil)
+            progressIndicator.isHidden = true
+            actionButton.isHidden = false
+            applyModeVisuals()
+        }
+    }
+
+    private func applyModeVisuals() {
+        switch currentMode {
         case .selection, .draftMessage:
             actionButton.image = nil
             actionButton.title = "あ"
