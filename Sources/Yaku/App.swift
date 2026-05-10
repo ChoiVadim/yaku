@@ -1921,6 +1921,12 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Don't burn API calls while the translator isn't ready — the request
+        // would only surface a 404/connection error inside the prefetch.
+        guard bootstrap.state.isReady else {
+            return
+        }
+
         let language = targetLanguage
         let currentThinkingLevel = thinkingLevel
         let (_, appCategory) = AppCategoryClassifier.detectFrontmost()
