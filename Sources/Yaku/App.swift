@@ -1884,14 +1884,16 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    private func handleTranslationFailure(_ error: Error) {
-        guard let translationError = error as? TranslationError else { return }
+    @discardableResult
+    private func handleTranslationFailure(_ error: Error) -> Bool {
+        guard let translationError = error as? TranslationError else { return false }
         switch translationError {
         case .serverUnavailable, .modelMissing, .signInRequired:
             bootstrap.refresh()
             presentOnboardingWindow()
+            return true
         case .ollama, .emptyResponse:
-            break
+            return false
         }
     }
 
@@ -2300,8 +2302,13 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 await MainActor.run {
                     guard let self else { return }
                     self.hideInstantTranslationLoading(loadingBar)
-                    self.handleTranslationFailure(error)
-                    self.presentSelectionTranslationError(error.localizedDescription)
+                    let routedToOnboarding = self.handleTranslationFailure(error)
+                    if !routedToOnboarding {
+                        self.presentSelectionTranslationError(
+                            error.localizedDescription,
+                            title: "Translation failed"
+                        )
+                    }
                 }
             }
         }
@@ -2473,10 +2480,10 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    private func presentSelectionTranslationError(_ message: String) {
+    private func presentSelectionTranslationError(_ message: String, title: String = "No text selected") {
         NSApp.activate(ignoringOtherApps: true)
         _ = YakuAlertController(
-            title: "No text selected",
+            title: title,
             message: message,
             primaryButtonTitle: "OK"
         ).showModal()
