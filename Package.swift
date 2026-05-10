@@ -19,6 +19,10 @@ let package = Package(
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle")
             ]
+        ),
+        .testTarget(
+            name: "YakuTests",
+            dependencies: ["Yaku"]
         )
     ],
     swiftLanguageModes: [.v5]
