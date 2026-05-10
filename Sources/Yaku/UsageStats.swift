@@ -113,24 +113,24 @@ struct UsageStatsSnapshot {
         let now = Date()
         let today = calendar.startOfDay(for: now)
         let useEvents = events.filter { UsageStatsEventKind.useKinds.contains($0.kind) }
-        let totalSourceWords = events.reduce(0) { $0 + max($1.sourceWordCount, $1.resultWordCount) }
+        let totalSourceWords = countedWords(in: useEvents)
         let totalResultWords = useEvents.reduce(0) { $0 + $1.resultWordCount }
         let totalReplacements = events.filter { $0.kind == .replacement }.count
 
-        let dayWords = Dictionary(grouping: events) { event in
+        let dayWords = Dictionary(grouping: useEvents) { event in
             calendar.startOfDay(for: event.date)
         }.mapValues { dayEvents in
-            dayEvents.reduce(0) { $0 + max($1.sourceWordCount, $1.resultWordCount) }
+            countedWords(in: dayEvents)
         }
         let activeDaySet = Set(dayWords.keys)
         let streaks = streakValues(activeDays: activeDaySet, today: today, calendar: calendar)
 
         let monthStart = calendar.dateInterval(of: .month, for: now)?.start ?? today
         let previousMonthStart = calendar.date(byAdding: .month, value: -1, to: monthStart) ?? monthStart
-        let currentMonthWords = events
+        let currentMonthWords = useEvents
             .filter { $0.date >= monthStart }
             .reduce(0) { $0 + max($1.sourceWordCount, $1.resultWordCount) }
-        let previousMonthWords = events
+        let previousMonthWords = useEvents
             .filter { $0.date >= previousMonthStart && $0.date < monthStart }
             .reduce(0) { $0 + max($1.sourceWordCount, $1.resultWordCount) }
         let monthChangePercent: Int? = previousMonthWords > 0
@@ -164,7 +164,7 @@ struct UsageStatsSnapshot {
             return lhs.count > rhs.count
         }
 
-        let heatmapWeeks = makeHeatmapWeeks(events: events, today: today, calendar: calendar)
+        let heatmapWeeks = makeHeatmapWeeks(events: useEvents, today: today, calendar: calendar)
         let flatBuckets = heatmapWeeks.flatMap { $0 }
         let busiestDay = flatBuckets.max { lhs, rhs in
             if lhs.wordCount == rhs.wordCount {
@@ -193,6 +193,10 @@ struct UsageStatsSnapshot {
             languageBreakdown: languageBreakdown,
             heatmapWeeks: heatmapWeeks
         )
+    }
+
+    private static func countedWords(in events: [UsageStatsEvent]) -> Int {
+        events.reduce(0) { $0 + max($1.sourceWordCount, $1.resultWordCount) }
     }
 
     private static func makeHeatmapWeeks(
