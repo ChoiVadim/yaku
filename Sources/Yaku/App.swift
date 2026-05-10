@@ -1812,6 +1812,11 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         controller: TranslationPanelController,
         requestID: UUID
     ) {
+        if let busyError = translationErrorIfBootstrapBusy() {
+            controller.showError(busyError.localizedDescription, requestID: requestID)
+            return
+        }
+
         if useCache, let cachedTranslation = translationCache.translation(for: text, targetLanguage: language, thinkingLevel: thinkingLevel, cleanup: cleanup) {
             usageStatsStore.recordUse(
                 sourceText: text,
@@ -1892,9 +1897,17 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             bootstrap.refresh()
             presentOnboardingWindow()
             return true
-        case .ollama, .emptyResponse:
+        case .ollama, .emptyResponse, .modelDownloading:
             return false
         }
+    }
+
+    @MainActor
+    private func translationErrorIfBootstrapBusy() -> TranslationError? {
+        if case .working(let detail) = bootstrap.state.modelReady {
+            return .modelDownloading(detail)
+        }
+        return nil
     }
 
     @MainActor
@@ -2266,6 +2279,14 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func runInstantTranslation(_ text: String, language: TranslationLanguage, near screenPoint: NSPoint) {
+        if let busyError = translationErrorIfBootstrapBusy() {
+            presentSelectionTranslationError(
+                busyError.localizedDescription,
+                title: "Translator is still downloading"
+            )
+            return
+        }
+
         let currentThinkingLevel = thinkingLevel
         let (_, currentAppCategory) = AppCategoryClassifier.detectFrontmost()
         let currentStyle = writingStyle(for: currentAppCategory)
@@ -6632,6 +6653,7 @@ enum TranslationError: LocalizedError {
     case serverUnavailable
     case modelMissing(String)
     case signInRequired
+    case modelDownloading(String)
 
     var errorDescription: String? {
         switch self {
@@ -6645,6 +6667,8 @@ enum TranslationError: LocalizedError {
             "The translator isn't downloaded yet. Open setup to download it."
         case .signInRequired:
             "Online mode needs sign-in. Open setup to finish."
+        case .modelDownloading(let detail):
+            "\(detail) Try again when the translator is ready."
         }
     }
 }
