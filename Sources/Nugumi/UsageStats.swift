@@ -266,7 +266,7 @@ struct UsageStatsSnapshot {
 
 @MainActor
 final class UsageStatsStore: ObservableObject {
-    private static let storageKey = "local.vadim.yaku.usageStats.events.v1"
+    private static let storageKey = "com.nugumi.app.usageStats.events.v1"
     private static let maxStoredEvents = 2_500
 
     private let defaults: UserDefaults
@@ -438,7 +438,7 @@ private struct UsageStatsMenuSummaryView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Yaku usage")
+                    Text("Nugumi usage")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                     Text("Local stats")
                         .font(.system(size: 10, weight: .semibold))

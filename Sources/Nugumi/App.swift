@@ -669,7 +669,7 @@ private final class TranslationCache {
 
 @main
 @MainActor
-final class YakuApp: NSObject, NSApplicationDelegate {
+final class NugumiApp: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var mouseMonitor: Any?
     private var lastLeftMouseDownLocation: NSPoint?
@@ -812,7 +812,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
     static func main() {
         let app = NSApplication.shared
-        let delegate = YakuApp()
+        let delegate = NugumiApp()
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
         app.run()
@@ -951,11 +951,11 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
     nonisolated private static func deliverTranslatorReadyNotification() {
         let content = UNMutableNotificationContent()
-        content.title = "Yaku is ready"
+        content.title = "Nugumi is ready"
         content.body = "The translator finished downloading. Press your shortcut or select text to start."
         content.sound = .default
         let request = UNNotificationRequest(
-            identifier: "yaku.translator.ready.\(Date().timeIntervalSince1970)",
+            identifier: "nugumi.translator.ready.\(Date().timeIntervalSince1970)",
             content: content,
             trigger: nil
         )
@@ -993,7 +993,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             button.image = makeStatusBarIcon(for: floatingDefaultMode)
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleNone
-            button.toolTip = "Yaku"
+            button.toolTip = "Nugumi"
         }
 
         let menu = NSMenu()
@@ -2564,11 +2564,11 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         if let screenshotError = error as? ScreenshotTranslationError,
            case .screenRecordingPermissionDenied = screenshotError {
-            let response = YakuAlertController(
+            let response = NugumiAlertController(
                 title: "Screen recording required",
                 message: screenshotError.localizedDescription,
                 primaryButtonTitle: "Open settings",
-                secondaryButtonTitle: "Quit Yaku"
+                secondaryButtonTitle: "Quit Nugumi"
             ).showModal()
             switch response {
             case .alertFirstButtonReturn:
@@ -2582,7 +2582,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        _ = YakuAlertController(
+        _ = NugumiAlertController(
             title: "Screenshot translation failed",
             message: error.localizedDescription,
             primaryButtonTitle: "OK"
@@ -2592,7 +2592,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     @MainActor
     private func presentSelectionTranslationError(_ message: String, title: String = "No text selected") {
         NSApp.activate(ignoringOtherApps: true)
-        _ = YakuAlertController(
+        _ = NugumiAlertController(
             title: title,
             message: message,
             primaryButtonTitle: "OK"
@@ -2759,7 +2759,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     @objc private func resetSettings() {
-        let response = YakuAlertController(
+        let response = NugumiAlertController(
             title: "Reset settings?",
             message: "This restores languages, main mode, display, output, AI mode, and keyboard shortcuts. Snippets, dictionary, and usage stats stay unchanged.",
             primaryButtonTitle: "Reset",
@@ -2820,20 +2820,20 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     }
 }
 
-extension YakuApp: SPUUpdaterDelegate {
+extension NugumiApp: SPUUpdaterDelegate {
     nonisolated func feedURLString(for updater: SPUUpdater) -> String? {
-        "https://raw.githubusercontent.com/ChoiVadim/yaku/main/appcast.xml"
+        "https://raw.githubusercontent.com/ChoiVadim/nugumi/main/appcast.xml"
     }
 }
 
 @MainActor
-private final class YakuModalPanel: NSPanel {
+private final class NugumiModalPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }
 
 @MainActor
-private final class YakuAlertController: NSWindowController, NSWindowDelegate {
+private final class NugumiAlertController: NSWindowController, NSWindowDelegate {
     private static let horizontalPadding: CGFloat = 16
     private static let verticalPadding: CGFloat = 16
     private static let shadowMargin: CGFloat = 30
@@ -2866,7 +2866,7 @@ private final class YakuAlertController: NSWindowController, NSWindowDelegate {
             width: layout.cardSize.width + Self.shadowMargin * 2,
             height: layout.cardSize.height + Self.shadowMargin * 2
         )
-        let panel = YakuModalPanel(
+        let panel = NugumiModalPanel(
             contentRect: NSRect(origin: .zero, size: windowSize),
             styleMask: [.borderless],
             backing: .buffered,
@@ -3601,7 +3601,7 @@ enum ScreenshotTranslationError: LocalizedError {
         case .noTextRecognized:
             "No readable text was found in the selected area."
         case .screenRecordingPermissionDenied:
-            "Yaku needs Screen Recording permission to capture screenshots. Open settings to enable it, then choose Quit Yaku and reopen Yaku for the change to take effect."
+            "Nugumi needs Screen Recording permission to capture screenshots. Open settings to enable it, then choose Quit Nugumi and reopen Nugumi for the change to take effect."
         }
     }
 
@@ -3626,7 +3626,7 @@ enum ScreenshotCapture {
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let outputURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("yaku-screenshot-\(UUID().uuidString)")
+                    .appendingPathComponent("nugumi-screenshot-\(UUID().uuidString)")
                     .appendingPathExtension("png")
 
                 let process = Process()
@@ -4343,7 +4343,7 @@ final class PetMascotView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        toolTip = "Yaku"
+        toolTip = "Nugumi"
     }
 
     required init?(coder: NSCoder) {
@@ -4740,7 +4740,7 @@ final class PetMascotView: NSView {
     private func tooltip(for state: State, mode: TranslationMode) -> String {
         switch state {
         case .idle, .run:
-            return "Yaku pet"
+            return "Nugumi pet"
         case .ready:
             switch mode {
             case .selection, .draftMessage:
@@ -6820,7 +6820,7 @@ enum TranslationError: LocalizedError {
     }
 }
 
-extension YakuApp: NSMenuDelegate {
+extension NugumiApp: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         usageStatsStore.refresh()
         updateMenuState()

@@ -3,26 +3,26 @@
 import PackageDescription
 
 let package = Package(
-    name: "Yaku",
+    name: "Nugumi",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "Yaku", targets: ["Yaku"])
+        .executable(name: "Nugumi", targets: ["Nugumi"])
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.7.0")
     ],
     targets: [
         .executableTarget(
-            name: "Yaku",
+            name: "Nugumi",
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle")
             ]
         ),
         .testTarget(
-            name: "YakuTests",
-            dependencies: ["Yaku"]
+            name: "NugumiTests",
+            dependencies: ["Nugumi"]
         )
     ],
     swiftLanguageModes: [.v5]

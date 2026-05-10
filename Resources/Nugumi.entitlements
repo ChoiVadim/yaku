@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <!--
-        Yaku is ad-hoc signed for personal/dev distribution. With hardened
+        Nugumi is ad-hoc signed for personal/dev distribution. With hardened
         runtime enabled (required by Sparkle 2), library validation rejects
         Sparkle.framework because ad-hoc signatures have no Team Identifier
         to match. Disabling library validation allows the framework to load

@@ -351,7 +351,7 @@ final class OnboardingWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Yaku Setup"
+        window.title = "Nugumi Setup"
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
         window.isMovableByWindowBackground = true
@@ -392,12 +392,12 @@ final class OnboardingWindowController: NSWindowController {
         rootView.addSubview(glass)
         let contentView = glass.contentView
 
-        let title = NSTextField(labelWithString: "Set up Yaku")
+        let title = NSTextField(labelWithString: "Set up Nugumi")
         title.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
         title.translatesAutoresizingMaskIntoConstraints = false
 
         let subtitle = NSTextField(wrappingLabelWithString:
-            "Yaku translates the text you select. It runs through Ollama — a free helper app that lives on your Mac. Finish the quick steps below; Yaku checks each one for you.")
+            "Nugumi translates the text you select. It runs through Ollama — a free helper app that lives on your Mac. Finish the quick steps below; Nugumi checks each one for you.")
         subtitle.font = NSFont.systemFont(ofSize: 12)
         subtitle.textColor = .secondaryLabelColor
         subtitle.translatesAutoresizingMaskIntoConstraints = false
@@ -448,7 +448,7 @@ final class OnboardingWindowController: NSWindowController {
         stepRows[.modelReady] = modelRow
 
         let footerNote = NSTextField(wrappingLabelWithString:
-            "Online mode is fast and uses your free Ollama account. Offline mode keeps everything on your Mac — it downloads several GB and runs slower, especially on older Macs. You can switch modes anytime from the Yaku menu.")
+            "Online mode is fast and uses your free Ollama account. Offline mode keeps everything on your Mac — it downloads several GB and runs slower, especially on older Macs. You can switch modes anytime from the Nugumi menu.")
         footerNote.font = NSFont.systemFont(ofSize: 11)
         footerNote.textColor = .tertiaryLabelColor
         footerNote.translatesAutoresizingMaskIntoConstraints = false

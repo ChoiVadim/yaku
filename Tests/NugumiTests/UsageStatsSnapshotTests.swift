@@ -1,5 +1,5 @@
 import XCTest
-@testable import Yaku
+@testable import Nugumi
 
 final class UsageStatsSnapshotTests: XCTestCase {
     func testReplacementEventsDoNotDoubleCountWordUsage() {

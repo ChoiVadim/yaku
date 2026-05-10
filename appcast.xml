@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
     <channel>
-        <title>Yaku Updates</title>
-        <link>https://github.com/ChoiVadim/yaku</link>
-        <description>Yaku application updates</description>
+        <title>Nugumi Updates</title>
+        <link>https://github.com/ChoiVadim/nugumi</link>
+        <description>Nugumi application updates</description>
         <language>en</language>
         <!--
             New <item> entries are appended by Scripts/release.sh.
@@ -17,7 +17,7 @@
             <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
-                url="https://github.com/ChoiVadim/yaku/releases/download/v0.2.0/Yaku-0.2.0.dmg"
+                url="https://github.com/ChoiVadim/nugumi/releases/download/v0.2.0/Yaku-0.2.0.dmg"
                 length="4004976"
                 type="application/octet-stream"
                 sparkle:edSignature="xCiszvsZZHIHjIM7iJk7LKHuOPi2r3Ru7fG0WzdnFrm1oP9Bx7moOCLRWO37a1oEHDMjUIlnHU7KHX+2hNt3DQ==" />
@@ -29,7 +29,7 @@
             <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
-                url="https://github.com/ChoiVadim/yaku/releases/download/v0.3.0/Yaku-0.3.0.dmg"
+                url="https://github.com/ChoiVadim/nugumi/releases/download/v0.3.0/Yaku-0.3.0.dmg"
                 type="application/octet-stream"
                 sparkle:edSignature="ewf8OlWJyNTj59C5lfSLFdJfnB2z7lU/O1JJz0vj9zipPZfjtO700q4EdufnFijrrhKCTHMNKsRI8D51QKNxAg==" length="4063257" />
         </item>
@@ -40,7 +40,7 @@
             <sparkle:shortVersionString>0.4.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
-                url="https://github.com/ChoiVadim/yaku/releases/download/v0.4.0/Yaku-0.4.0.dmg"
+                url="https://github.com/ChoiVadim/nugumi/releases/download/v0.4.0/Yaku-0.4.0.dmg"
                 type="application/octet-stream"
                 sparkle:edSignature="QGfhhnoNE/aFEFhN9OsFhZxe+jWK3BKj4q/RZ+swYz87tjK0fL39SFFacYpP/W9Hpr/RWtXTlQ0pZxxuHE8XBg==" length="3022746" />
         </item>
@@ -51,7 +51,7 @@
             <sparkle:shortVersionString>0.5.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
-                url="https://github.com/ChoiVadim/yaku/releases/download/v0.5.0/Yaku-0.5.0.dmg"
+                url="https://github.com/ChoiVadim/nugumi/releases/download/v0.5.0/Yaku-0.5.0.dmg"
                 type="application/octet-stream"
                 sparkle:edSignature="OqXXqnDocCATDcuFVpA0hnra24XMW/JCQctzkBVKgBZQTvdLTZtn0QGPqlUNtj5CBpHpMTftDkDf56B3Aw8xBg==" length="3134084" />
         </item>

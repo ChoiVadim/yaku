@@ -193,7 +193,7 @@ final class SnippetsWindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Yaku snippets & dictionary"
+        window.title = "Nugumi snippets & dictionary"
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
         window.isMovableByWindowBackground = true
@@ -251,13 +251,13 @@ final class SnippetsWindowController: NSWindowController, NSWindowDelegate {
 
         let snippetsHeader = makeSectionHeader(
             title: "Snippets",
-            subtitle: "Short phrases Yaku expands before rewriting.",
+            subtitle: "Short phrases Nugumi expands before rewriting.",
             buttonTitle: "+ Add snippet",
             action: #selector(addSnippetTapped)
         )
         let dictionaryHeader = makeSectionHeader(
             title: "Dictionary",
-            subtitle: "Words and names Yaku keeps exactly as written.",
+            subtitle: "Words and names Nugumi keeps exactly as written.",
             buttonTitle: "+ Add word",
             action: #selector(addWordTapped)
         )
