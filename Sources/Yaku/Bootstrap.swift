@@ -104,9 +104,11 @@ final class OllamaBootstrap {
     func startModelPull() {
         guard pullTask == nil else { return }
         if requiresOllamaAccount {
-            update(\.ollamaSignedIn, .working("Checking Ollama account…"))
+            update(\.ollamaSignedIn, .working("Checking sign-in…"))
         }
-        update(\.modelReady, .working("Pulling \(model)…"))
+        update(\.modelReady, .working(requiresOllamaAccount
+            ? "Setting up the translator…"
+            : "Downloading translator (this can take several minutes)…"))
         pullTask = Task { [weak self] in
             await self?.runPull()
             await MainActor.run { self?.pullTask = nil }
@@ -129,7 +131,7 @@ final class OllamaBootstrap {
         let installed = ollamaAppURL() != nil
         update(\.ollamaInstalled, installed
             ? .ok
-            : .needsAction("Ollama isn't installed."))
+            : .needsAction("Ollama isn't installed yet."))
 
         if !installed {
             update(\.serverRunning, .needsAction("Install Ollama first."))
@@ -142,7 +144,7 @@ final class OllamaBootstrap {
         if serverAlive {
             update(\.serverRunning, .ok)
         } else {
-            update(\.serverRunning, .needsAction("Ollama isn't running."))
+            update(\.serverRunning, .needsAction("Ollama isn't running. Open it to start."))
             update(\.ollamaSignedIn, .needsAction("Start Ollama first."))
             update(\.modelReady, .needsAction("Start Ollama first."))
             return
@@ -155,9 +157,11 @@ final class OllamaBootstrap {
                 update(\.modelReady, .ok)
             } else {
                 update(\.ollamaSignedIn, requiresOllamaAccount
-                    ? .needsAction("Open Ollama and sign in with your Ollama account.")
+                    ? .needsAction("Open Ollama and sign in (free).")
                     : .ok)
-                update(\.modelReady, .needsAction("Model \(model) isn't pulled yet."))
+                update(\.modelReady, .needsAction(requiresOllamaAccount
+                    ? "Translator isn't set up yet."
+                    : "Translator isn't downloaded yet (several GB)."))
             }
         } catch {
             update(\.modelReady, .failed(error.localizedDescription))
@@ -226,16 +230,16 @@ final class OllamaBootstrap {
 
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
             guard let http = response as? HTTPURLResponse else {
-                update(\.modelReady, .failed("Pull failed: invalid response"))
+                update(\.modelReady, .failed("Download failed: invalid response."))
                 return
             }
             if http.statusCode == 401 || http.statusCode == 403 {
-                update(\.ollamaSignedIn, .needsAction("Open Ollama and sign in with your Ollama account."))
-                update(\.modelReady, .needsAction("Sign in to Ollama to use cloud models."))
+                update(\.ollamaSignedIn, .needsAction("Open Ollama and sign in (free)."))
+                update(\.modelReady, .needsAction("Sign in is required for online mode."))
                 return
             }
             guard (200..<300).contains(http.statusCode) else {
-                update(\.modelReady, .failed("Pull failed: HTTP \(http.statusCode)"))
+                update(\.modelReady, .failed("Download failed (HTTP \(http.statusCode))."))
                 return
             }
 
@@ -248,8 +252,8 @@ final class OllamaBootstrap {
                    let message = streamError.error {
                     let classified = OllamaClient.classifyStreamError(message: message, model: model)
                     if case .signInRequired = classified {
-                        update(\.ollamaSignedIn, .needsAction("Open Ollama and sign in with your Ollama account."))
-                        update(\.modelReady, .needsAction("Sign in to Ollama to use cloud models."))
+                        update(\.ollamaSignedIn, .needsAction("Open Ollama and sign in (free)."))
+                        update(\.modelReady, .needsAction("Sign in is required for online mode."))
                     } else {
                         update(\.modelReady, .failed(message))
                     }
@@ -267,12 +271,12 @@ final class OllamaBootstrap {
                 if present {
                     update(\.ollamaSignedIn, .ok)
                 }
-                update(\.modelReady, present ? .ok : .failed("Pull finished but model isn't visible."))
+                update(\.modelReady, present ? .ok : .failed("Download finished but the translator isn't visible. Try Re-check."))
             } catch {
                 update(\.modelReady, .failed(error.localizedDescription))
             }
         } catch is CancellationError {
-            update(\.modelReady, .needsAction("Pull cancelled."))
+            update(\.modelReady, .needsAction("Download cancelled."))
         } catch {
             update(\.modelReady, .failed(error.localizedDescription))
         }
@@ -302,12 +306,30 @@ private struct PullProgress: Decodable {
     let completed: Int64?
 
     func humanReadableStatus() -> String {
-        let base = status ?? "Pulling…"
+        let base = friendlyStatus(status)
         guard let total, total > 0, let completed else {
             return base
         }
         let percent = Int(Double(completed) / Double(total) * 100)
         return "\(base) \(percent)%"
+    }
+
+    private func friendlyStatus(_ raw: String?) -> String {
+        guard let raw, !raw.isEmpty else { return "Downloading translator…" }
+        let lower = raw.lowercased()
+        if lower.contains("downloading") || lower.contains("pulling") {
+            return "Downloading translator…"
+        }
+        if lower.contains("verifying") {
+            return "Verifying download…"
+        }
+        if lower.contains("writing") || lower.contains("manifest") {
+            return "Finishing setup…"
+        }
+        if lower.contains("success") {
+            return "Ready."
+        }
+        return "Setting up the translator…"
     }
 }
 
@@ -375,14 +397,14 @@ final class OnboardingWindowController: NSWindowController {
         title.translatesAutoresizingMaskIntoConstraints = false
 
         let subtitle = NSTextField(wrappingLabelWithString:
-            "Yaku uses a local Ollama server to run \(bootstrap.model). Finish the steps below — Yaku will check progress automatically.")
+            "Yaku translates the text you select. It runs through Ollama — a free helper app that lives on your Mac. Finish the quick steps below; Yaku checks each one for you.")
         subtitle.font = NSFont.systemFont(ofSize: 12)
         subtitle.textColor = .secondaryLabelColor
         subtitle.translatesAutoresizingMaskIntoConstraints = false
 
         let installRow = StepRow(
             title: "Install Ollama",
-            primaryActionTitle: "Open Download Page"
+            primaryActionTitle: "Open download page"
         ) { [weak self] in
             self?.bootstrap.openInstallPage()
         }
@@ -399,7 +421,7 @@ final class OnboardingWindowController: NSWindowController {
         }
 
         let signInRow = StepRow(
-            title: "Sign in to Ollama",
+            title: "Sign in (online mode only)",
             primaryActionTitle: "Open Ollama"
         ) { [weak self] in
             self?.bootstrap.openOllamaForSignIn()
@@ -410,8 +432,8 @@ final class OnboardingWindowController: NSWindowController {
         signInRow.secondaryActionTitle = "Re-check"
 
         let modelRow = StepRow(
-            title: "Pull \(bootstrap.model)",
-            primaryActionTitle: "Pull Model"
+            title: "Set up the translator",
+            primaryActionTitle: "Set up"
         ) { [weak self] in
             self?.bootstrap.startModelPull()
         }
@@ -426,7 +448,7 @@ final class OnboardingWindowController: NSWindowController {
         stepRows[.modelReady] = modelRow
 
         let footerNote = NSTextField(wrappingLabelWithString:
-            "Cloud models like \(bootstrap.model) require an Ollama account. Sign in once, then pull the model.")
+            "Online mode is fast and uses your free Ollama account. Offline mode keeps everything on your Mac — it downloads several GB and runs slower, especially on older Macs. You can switch modes anytime from the Yaku menu.")
         footerNote.font = NSFont.systemFont(ofSize: 11)
         footerNote.textColor = .tertiaryLabelColor
         footerNote.translatesAutoresizingMaskIntoConstraints = false
@@ -483,7 +505,11 @@ final class OnboardingWindowController: NSWindowController {
     private func render(state: BootstrapState) {
         stepRows[.ollamaInstalled]?.apply(state.ollamaInstalled)
         stepRows[.serverRunning]?.apply(state.serverRunning)
-        stepRows[.ollamaSignedIn]?.apply(state.ollamaSignedIn)
+        if !bootstrap.requiresOllamaAccount, case .ok = state.ollamaSignedIn {
+            stepRows[.ollamaSignedIn]?.applyOk(message: "Not needed in offline mode.")
+        } else {
+            stepRows[.ollamaSignedIn]?.apply(state.ollamaSignedIn)
+        }
         stepRows[.modelReady]?.apply(state.modelReady)
     }
 }
@@ -589,6 +615,18 @@ private final class StepRow: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    func applyOk(message: String) {
+        progressIndicator.stopAnimation(nil)
+        progressIndicator.isHidden = true
+        statusIndicator.isHidden = false
+        statusIndicator.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Ready")
+        statusIndicator.contentTintColor = .systemGreen
+        statusLabel.stringValue = message
+        statusLabel.textColor = .secondaryLabelColor
+        primaryButton.isEnabled = false
+        secondaryButton.isHidden = true
+    }
+
     func apply(_ status: BootstrapStepStatus) {
         switch status {
         case .unknown, .checking:
@@ -600,15 +638,8 @@ private final class StepRow: NSView {
             primaryButton.isEnabled = false
             secondaryButton.isHidden = true
         case .ok:
-            progressIndicator.stopAnimation(nil)
-            progressIndicator.isHidden = true
-            statusIndicator.isHidden = false
-            statusIndicator.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Ready")
-            statusIndicator.contentTintColor = .systemGreen
-            statusLabel.stringValue = "Ready."
-            statusLabel.textColor = .secondaryLabelColor
-            primaryButton.isEnabled = false
-            secondaryButton.isHidden = true
+            applyOk(message: "Ready.")
+            return
         case .needsAction(let message):
             progressIndicator.stopAnimation(nil)
             progressIndicator.isHidden = true

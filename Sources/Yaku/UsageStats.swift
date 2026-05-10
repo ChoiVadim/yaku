@@ -32,16 +32,6 @@ enum UsageStatsEventKind: String, Codable, CaseIterable, Equatable, Identifiable
         }
     }
 
-    var legendGlyph: String {
-        switch self {
-        case .selection: return "E"
-        case .screenArea: return "I"
-        case .draftMessage: return "*"
-        case .smartReply: return "T"
-        case .replacement: return "R"
-        }
-    }
-
     var color: Color {
         switch self {
         case .selection: return Color(red: 0.76, green: 0.76, blue: 0.76)
@@ -52,7 +42,7 @@ enum UsageStatsEventKind: String, Codable, CaseIterable, Equatable, Identifiable
         }
     }
 
-    static var translationKinds: [UsageStatsEventKind] {
+    static var useKinds: [UsageStatsEventKind] {
         [.selection, .screenArea, .draftMessage, .smartReply]
     }
 }
@@ -97,7 +87,7 @@ struct UsageStatsDayBucket: Identifiable {
 
 struct UsageStatsSnapshot {
     let events: [UsageStatsEvent]
-    let totalTranslations: Int
+    let totalUses: Int
     let totalSourceWords: Int
     let totalResultWords: Int
     let totalReplacements: Int
@@ -122,9 +112,9 @@ struct UsageStatsSnapshot {
         calendar.timeZone = .current
         let now = Date()
         let today = calendar.startOfDay(for: now)
-        let translationEvents = events.filter { UsageStatsEventKind.translationKinds.contains($0.kind) }
+        let useEvents = events.filter { UsageStatsEventKind.useKinds.contains($0.kind) }
         let totalSourceWords = events.reduce(0) { $0 + max($1.sourceWordCount, $1.resultWordCount) }
-        let totalResultWords = translationEvents.reduce(0) { $0 + $1.resultWordCount }
+        let totalResultWords = useEvents.reduce(0) { $0 + $1.resultWordCount }
         let totalReplacements = events.filter { $0.kind == .replacement }.count
 
         let dayWords = Dictionary(grouping: events) { event in
@@ -147,18 +137,18 @@ struct UsageStatsSnapshot {
             ? Int(round((Double(currentMonthWords - previousMonthWords) / Double(previousMonthWords)) * 100))
             : nil
 
-        let modeBreakdown = UsageStatsEventKind.translationKinds.map { kind in
-            let modeEvents = translationEvents.filter { $0.kind == kind }
+        let modeBreakdown = UsageStatsEventKind.useKinds.map { kind in
+            let modeEvents = useEvents.filter { $0.kind == kind }
             let words = modeEvents.reduce(0) { $0 + $1.sourceWordCount }
-            let fraction = translationEvents.isEmpty ? 0 : Double(modeEvents.count) / Double(translationEvents.count)
+            let fraction = useEvents.isEmpty ? 0 : Double(modeEvents.count) / Double(useEvents.count)
             return UsageStatsModeBreakdown(kind: kind, count: modeEvents.count, wordCount: words, fraction: fraction)
         }
 
-        let languageEvents = Dictionary(grouping: translationEvents) { $0.targetLanguageID ?? "" }
+        let languageEvents = Dictionary(grouping: useEvents) { $0.targetLanguageID ?? "" }
         let languageBreakdown = languageEvents.map { languageID, languageEvents in
             let language = TranslationLanguage.language(id: languageID)
             let words = languageEvents.reduce(0) { $0 + $1.sourceWordCount }
-            let fraction = translationEvents.isEmpty ? 0 : Double(languageEvents.count) / Double(translationEvents.count)
+            let fraction = useEvents.isEmpty ? 0 : Double(languageEvents.count) / Double(useEvents.count)
             return UsageStatsLanguageBreakdown(
                 languageID: languageID,
                 displayName: language.displayName,
@@ -187,7 +177,7 @@ struct UsageStatsSnapshot {
 
         return UsageStatsSnapshot(
             events: events,
-            totalTranslations: translationEvents.count,
+            totalUses: useEvents.count,
             totalSourceWords: totalSourceWords,
             totalResultWords: totalResultWords,
             totalReplacements: totalReplacements,
@@ -284,13 +274,13 @@ final class UsageStatsStore: ObservableObject {
         snapshot = UsageStatsSnapshot.make(events: events)
     }
 
-    func recordTranslation(
+    func recordUse(
         sourceText: String,
         resultText: String,
         kind: UsageStatsEventKind,
         targetLanguage: TranslationLanguage
     ) {
-        guard UsageStatsEventKind.translationKinds.contains(kind) else {
+        guard UsageStatsEventKind.useKinds.contains(kind) else {
             return
         }
         let event = UsageStatsEvent(
@@ -409,7 +399,7 @@ private struct UsageStatsMenuSummaryView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Label("\(snapshot.totalTranslations.formatted()) translations", systemImage: "chart.bar.xaxis")
+                Label("\(snapshot.totalUses.formatted()) uses", systemImage: "chart.bar.xaxis")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.secondary)
             }
@@ -448,7 +438,7 @@ private struct UsageStatsMenuSummaryView: View {
                 }
 
                 GeometryReader { proxy in
-                    if snapshot.totalTranslations == 0 {
+                    if snapshot.totalUses == 0 {
                         RoundedRectangle(cornerRadius: 3, style: .continuous)
                             .fill(Color.primary.opacity(0.08))
                     } else {
@@ -497,11 +487,11 @@ private struct WorkflowLegendItem: View {
     let kind: UsageStatsEventKind
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 3) {
-            Text(kind.legendGlyph)
-                .font(.system(size: 9, weight: .black, design: .rounded))
+        HStack(alignment: .firstTextBaseline, spacing: 3.5) {
+            Image(systemName: kind.symbolName)
+                .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .frame(minWidth: 8, alignment: .center)
+                .frame(width: 11, alignment: .center)
 
             Text(kind.title)
                 .font(.system(size: 9, weight: .semibold))

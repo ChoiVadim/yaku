@@ -252,13 +252,13 @@ final class SnippetsWindowController: NSWindowController, NSWindowDelegate {
         let snippetsHeader = makeSectionHeader(
             title: "Snippets",
             subtitle: "Short phrases Yaku expands before rewriting.",
-            buttonTitle: "+ Add Snippet",
+            buttonTitle: "+ Add snippet",
             action: #selector(addSnippetTapped)
         )
         let dictionaryHeader = makeSectionHeader(
             title: "Dictionary",
             subtitle: "Words and names Yaku keeps exactly as written.",
-            buttonTitle: "+ Add Word",
+            buttonTitle: "+ Add word",
             action: #selector(addWordTapped)
         )
         stack.addArrangedSubview(snippetsHeader)
@@ -341,27 +341,28 @@ final class SnippetsWindowController: NSWindowController, NSWindowDelegate {
         subtitleLabel.textColor = .secondaryLabelColor
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        let textStack = NSStackView(views: [titleLabel, subtitleLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+
         let button = NSButton(title: buttonTitle, target: self, action: action)
         button.bezelStyle = .rounded
         button.translatesAutoresizingMaskIntoConstraints = false
 
-        container.addSubview(titleLabel)
-        container.addSubview(subtitleLabel)
+        container.addSubview(textStack)
         container.addSubview(button)
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: container.topAnchor),
-            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -12),
+            textStack.topAnchor.constraint(equalTo: container.topAnchor),
+            textStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            textStack.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -12),
+            textStack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
             button.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            button.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            button.heightAnchor.constraint(equalToConstant: 28),
-
-            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
-            subtitleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            subtitleLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            subtitleLabel.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            button.centerYAnchor.constraint(equalTo: textStack.centerYAnchor),
+            button.heightAnchor.constraint(equalToConstant: 28)
         ])
 
         return container

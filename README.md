@@ -19,7 +19,7 @@ If an app does not expose selection through Accessibility, Yaku falls back to a 
 
 Use `Control` + `2` to translate text you read from a selected screen area.
 Use `Control` + `1` to translate text you wrote into the separate writing language, then replace it after review.
-Open Behavior > Keyboard Shortcuts from the menu bar item to customize either shortcut for the current macOS user.
+Open Shortcuts > Edit keyboard shortcuts... from the menu bar item to customize shortcuts for the current macOS user.
 Open the menu bar item to see a compact local usage summary with totals, streaks, workflow mix, and an activity map.
 
 ## Build a `.app` and DMG

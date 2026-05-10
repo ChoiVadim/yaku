@@ -29,6 +29,7 @@ private enum MenuItemTag: Int {
     case replacementMode = 120
     case keyboardShortcuts = 121
     case translateOrReplySelection = 122
+    case resetSettings = 123
 }
 
 struct OllamaModelOption: Equatable {
@@ -37,8 +38,8 @@ struct OllamaModelOption: Equatable {
     let isCloud: Bool
 
     static let all: [OllamaModelOption] = [
-        .init(id: "gpt-oss:120b-cloud", displayName: "gpt-oss 120B (cloud)", isCloud: true),
-        .init(id: "gpt-oss:20b", displayName: "gpt-oss 20B (local, offline)", isCloud: false)
+        .init(id: "gpt-oss:120b-cloud", displayName: "Online (fast, needs sign-in)", isCloud: true),
+        .init(id: "gpt-oss:20b", displayName: "Offline (slower, works without internet)", isCloud: false)
     ]
 
     static let defaultModel = all[0]
@@ -79,8 +80,8 @@ private enum FloatingButtonDefaultMode: String {
 
     var menuTitle: String {
         switch self {
-        case .translate: return "Default action: translate"
-        case .smartReply: return "Default action: reply"
+        case .translate: return "Main mode: translate"
+        case .smartReply: return "Main mode: reply"
         }
     }
 }
@@ -967,7 +968,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         menu.addItem(usageSummaryItem)
 
         menu.addItem(makeMenuItem(
-            title: "Ollama setup needed",
+            title: "Translator setup needed",
             tag: .bootstrapNotice,
             symbolName: "bolt.badge.clock",
             isEnabled: false
@@ -984,6 +985,27 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         bootstrapSeparator.tag = MenuItemTag.bootstrapSeparator.rawValue
         menu.addItem(bootstrapSeparator)
 
+        menu.addItem(makeSectionHeader("Main settings"))
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .floatingDefaultMode,
+            symbolName: "bolt.circle",
+            submenu: makeFloatingDefaultModeMenu()
+        ))
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .selectionDisplayMode,
+            symbolName: "pawprint.fill",
+            submenu: makeSelectionDisplayModeMenu()
+        ))
+        menu.addItem(makeMenuItem(
+            title: "",
+            tag: .replacementMode,
+            symbolName: "return",
+            submenu: makeReplacementModeMenu()
+        ))
+
+        menu.addItem(makeSectionHeader("Shortcuts"))
         menu.addItem(makeMenuItem(
             title: "Rewrite my text...",
             tag: .translateSelection,
@@ -1047,25 +1069,12 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             symbolName: "sparkles",
             submenu: makeCleanupLevelMenu()
         ))
-
-        menu.addItem(makeSectionHeader("Behavior"))
         menu.addItem(makeMenuItem(
-            title: "",
-            tag: .selectionDisplayMode,
-            symbolName: "pawprint.fill",
-            submenu: makeSelectionDisplayModeMenu()
-        ))
-        menu.addItem(makeMenuItem(
-            title: "",
-            tag: .floatingDefaultMode,
-            symbolName: "rectangle.and.hand.point.up.left",
-            submenu: makeFloatingDefaultModeMenu()
-        ))
-        menu.addItem(makeMenuItem(
-            title: "",
-            tag: .replacementMode,
-            symbolName: "return",
-            submenu: makeReplacementModeMenu()
+            title: "Snippets & dictionary…",
+            tag: .snippets,
+            symbolName: "text.append",
+            action: #selector(openSnippetsWindow),
+            keyEquivalent: ""
         ))
 
         menu.addItem(makeSectionHeader("AI engine"))
@@ -1084,14 +1093,12 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(makeMenuItem(
-            title: "Snippets & dictionary…",
-            tag: .snippets,
-            symbolName: "text.append",
-            action: #selector(openSnippetsWindow),
+            title: "Reset settings...",
+            tag: .resetSettings,
+            symbolName: "arrow.counterclockwise",
+            action: #selector(resetSettings),
             keyEquivalent: ""
         ))
-
-        menu.addItem(NSMenuItem.separator())
         menu.addItem(makeMenuItem(
             title: "Check for updates...",
             tag: .checkForUpdates,
@@ -1261,7 +1268,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     private func makeFloatingDefaultModeMenu() -> NSMenu {
         let menu = NSMenu()
         let translateItem = NSMenuItem(
-            title: "Translate selection",
+            title: "Translate",
             action: #selector(selectFloatingDefaultMode(_:)),
             keyEquivalent: ""
         )
@@ -1270,7 +1277,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         menu.addItem(translateItem)
 
         let replyItem = NSMenuItem(
-            title: "Reply or answer (Tab to switch)",
+            title: "Reply",
             action: #selector(selectFloatingDefaultMode(_:)),
             keyEquivalent: ""
         )
@@ -1806,7 +1813,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         requestID: UUID
     ) {
         if useCache, let cachedTranslation = translationCache.translation(for: text, targetLanguage: language, thinkingLevel: thinkingLevel, cleanup: cleanup) {
-            usageStatsStore.recordTranslation(
+            usageStatsStore.recordUse(
                 sourceText: text,
                 resultText: cachedTranslation,
                 kind: usageKind,
@@ -1826,7 +1833,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             translationPrefetch.subscribe { partialTranslation in
                 controller.showTranslation(partialTranslation, requestID: requestID)
             } onCompletion: { [weak self] finalTranslation in
-                self?.usageStatsStore.recordTranslation(
+                self?.usageStatsStore.recordUse(
                     sourceText: text,
                     resultText: finalTranslation,
                     kind: usageKind,
@@ -1859,7 +1866,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                     if useCache {
                         self.translationCache.store(translated, for: text, targetLanguage: language, thinkingLevel: thinkingLevel, cleanup: cleanup)
                     }
-                    self.usageStatsStore.recordTranslation(
+                    self.usageStatsStore.recordUse(
                         sourceText: text,
                         resultText: translated,
                         kind: usageKind,
@@ -1953,7 +1960,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         let bootstrapReady = bootstrap.state.isReady
         menu.item(withTag: MenuItemTag.bootstrapNotice.rawValue)?.isHidden = bootstrapReady
         menu.item(withTag: MenuItemTag.bootstrapAction.rawValue)?.title = bootstrapReady
-            ? "Ollama setup..."
+            ? "Setup..."
             : "Open setup..."
         menu.item(withTag: MenuItemTag.bootstrapSeparator.rawValue)?.isHidden = bootstrapReady
         menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.title = "Translation language: \(targetLanguage.displayName)"
@@ -1961,7 +1968,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
         menu.item(withTag: MenuItemTag.selectionDisplayMode.rawValue)?.title = selectionDisplayMode.settingsTitle
         menu.item(withTag: MenuItemTag.floatingDefaultMode.rawValue)?.title = floatingDefaultMode.menuTitle
         menu.item(withTag: MenuItemTag.thinkingLevel.rawValue)?.title = thinkingLevel.settingsTitle
-        menu.item(withTag: MenuItemTag.selectedModel.rawValue)?.title = "Model: \(OllamaModelOption.option(id: selectedModelID).displayName)"
+        menu.item(withTag: MenuItemTag.selectedModel.rawValue)?.title = "Mode: \(OllamaModelOption.option(id: selectedModelID).displayName)"
         menu.item(withTag: MenuItemTag.checkForUpdates.rawValue)?.isHidden = !isRunningFromAppBundle
         if let translateSelectionItem = menu.item(withTag: MenuItemTag.translateSelection.rawValue) {
             translateSelectionItem.title = "Rewrite my text in \(draftTargetLanguage.displayName)..."
@@ -2041,7 +2048,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
         menu.item(withTag: MenuItemTag.writingStyle.rawValue)?.title = "Writing style"
         menu.item(withTag: MenuItemTag.cleanupLevel.rawValue)?.title = "Auto cleanup: \(cleanupLevel.displayName.lowercased())"
-        menu.item(withTag: MenuItemTag.keyboardShortcuts.rawValue)?.title = "Keyboard shortcuts"
+        menu.item(withTag: MenuItemTag.keyboardShortcuts.rawValue)?.title = "Edit keyboard shortcuts..."
         if let shortcutsMenu = menu.item(withTag: MenuItemTag.keyboardShortcuts.rawValue)?.submenu {
             updateKeyboardShortcutsMenu(shortcutsMenu)
         }
@@ -2280,7 +2287,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
                 ) { _ in }
                 await MainActor.run {
                     guard let self else { return }
-                    self.usageStatsStore.recordTranslation(
+                    self.usageStatsStore.recordUse(
                         sourceText: text,
                         resultText: translated,
                         kind: .draftMessage,
@@ -2630,6 +2637,58 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     @objc private func resetKeyboardShortcuts() {
         GlobalShortcutStore.resetToDefaults()
         setupGlobalHotKeys()
+        updateMenuState()
+    }
+
+    @MainActor
+    @objc private func resetSettings() {
+        let response = YakuAlertController(
+            title: "Reset settings?",
+            message: "This restores languages, main mode, display, output, AI mode, and keyboard shortcuts. Snippets, dictionary, and usage stats stay unchanged.",
+            primaryButtonTitle: "Reset",
+            secondaryButtonTitle: "Cancel"
+        ).showModal()
+        guard response == .alertFirstButtonReturn else {
+            return
+        }
+
+        resetSettingsToDefaults()
+    }
+
+    @MainActor
+    private func resetSettingsToDefaults() {
+        let previousModelID = selectedModelID
+        let defaults = UserDefaults.standard
+        [
+            "targetLanguageID",
+            "draftTargetLanguageID",
+            "floatingButtonDefaultMode",
+            "selectionDisplayMode",
+            "selectedOllamaModel",
+            "thinkingLevel",
+            "cleanupLevel",
+            "replacementMode"
+        ].forEach { defaults.removeObject(forKey: $0) }
+
+        for category in AppCategory.allCases {
+            defaults.removeObject(forKey: "writingStyle.\(category.rawValue)")
+        }
+
+        GlobalShortcutStore.resetToDefaults(defaults: defaults)
+        shortcutRecorderWindowController?.close()
+        cancelPrefetch()
+        translationCache = TranslationCache()
+        translationPanelController?.close()
+        translationPanelController = nil
+        petController?.setActionMode(floatingDefaultMode.translationMode)
+        refreshStatusBarIcon()
+        applySelectionDisplayMode()
+        setupGlobalHotKeys()
+
+        if selectedModelID != previousModelID {
+            rebuildBootstrapForCurrentModel()
+        }
+
         updateMenuState()
     }
 
@@ -6570,15 +6629,15 @@ enum TranslationError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .ollama(let message):
-            "Ollama request failed: \(message)"
+            "Translation request failed: \(message)"
         case .emptyResponse:
-            "Ollama returned an empty translation."
+            "Got an empty translation. Try again."
         case .serverUnavailable:
-            "Ollama isn't running. Open Yaku setup to install or start it."
-        case .modelMissing(let name):
-            "Model \(name) isn't available. Open Yaku setup to pull it."
+            "The translator isn't running. Open setup to fix it."
+        case .modelMissing:
+            "The translator isn't downloaded yet. Open setup to download it."
         case .signInRequired:
-            "Ollama needs sign-in for the cloud model. Open Yaku setup to finish."
+            "Online mode needs sign-in. Open setup to finish."
         }
     }
 }
