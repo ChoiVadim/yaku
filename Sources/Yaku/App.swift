@@ -2781,7 +2781,8 @@ final class YakuApp: NSObject, NSApplicationDelegate {
             "selectedOllamaModel",
             "thinkingLevel",
             "cleanupLevel",
-            "replacementMode"
+            "replacementMode",
+            "usageStatsExpanded"
         ].forEach { defaults.removeObject(forKey: $0) }
 
         for category in AppCategory.allCases {
@@ -3396,6 +3397,7 @@ final class SelectionReader {
 enum ClipboardSelectionReader {
     private static let pollingInterval: TimeInterval = 0.02
     private static let pollingTimeout: TimeInterval = 0.5
+    private static let lateRestoreGrace: TimeInterval = 0.5
 
     static func readSelectedText(completion: @escaping (String?) -> Void) {
         let pasteboard = NSPasteboard.general
@@ -3430,6 +3432,12 @@ enum ClipboardSelectionReader {
         }
 
         if Date() >= deadline {
+            monitorLatePasteboardChange(
+                pasteboard: pasteboard,
+                originalChangeCount: originalChangeCount,
+                deadline: Date().addingTimeInterval(lateRestoreGrace),
+                snapshot: snapshot
+            )
             completion(nil)
             return
         }
@@ -3447,6 +3455,31 @@ enum ClipboardSelectionReader {
 
     private static func postCommandC() {
         KeyboardShortcutPoster.postCommandShortcut(keyCode: CGKeyCode(kVK_ANSI_C))
+    }
+
+    private static func monitorLatePasteboardChange(
+        pasteboard: NSPasteboard,
+        originalChangeCount: Int,
+        deadline: Date,
+        snapshot: PasteboardSnapshot
+    ) {
+        if pasteboard.changeCount != originalChangeCount {
+            snapshot.restore(to: pasteboard)
+            return
+        }
+
+        guard Date() < deadline else {
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + pollingInterval) {
+            monitorLatePasteboardChange(
+                pasteboard: pasteboard,
+                originalChangeCount: originalChangeCount,
+                deadline: deadline,
+                snapshot: snapshot
+            )
+        }
     }
 }
 
