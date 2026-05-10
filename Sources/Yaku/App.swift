@@ -3,6 +3,7 @@ import ApplicationServices
 import Carbon.HIToolbox
 import Foundation
 import Sparkle
+import UserNotifications
 import Vision
 
 private enum MenuItemTag: Int {
@@ -698,6 +699,7 @@ final class YakuApp: NSObject, NSApplicationDelegate {
     private var onboardingWindowController: OnboardingWindowController?
     private var snippetsWindowController: SnippetsWindowController?
     private var accessibilityTrustTimer: Timer?
+    private var lastObservedModelReadyState: BootstrapStepStatus = .unknown
     private lazy var updaterController: SPUStandardUpdaterController? = {
         guard isRunningFromAppBundle else { return nil }
         return SPUStandardUpdaterController(
@@ -908,7 +910,45 @@ final class YakuApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func handleBootstrapStateChange(_ state: BootstrapState) {
+        let previousModelReady = lastObservedModelReadyState
+        lastObservedModelReadyState = state.modelReady
+        if case .working = previousModelReady,
+           case .ok = state.modelReady,
+           onboardingWindowController == nil {
+            postTranslatorReadyNotification()
+        }
         updateMenuState()
+    }
+
+    @MainActor
+    private func postTranslatorReadyNotification() {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            let deliver = {
+                let content = UNMutableNotificationContent()
+                content.title = "Yaku is ready"
+                content.body = "The translator finished downloading. Press your shortcut or select text to start."
+                content.sound = .default
+                let request = UNNotificationRequest(
+                    identifier: "yaku.translator.ready.\(Date().timeIntervalSince1970)",
+                    content: content,
+                    trigger: nil
+                )
+                center.add(request, withCompletionHandler: nil)
+            }
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                deliver()
+            case .notDetermined:
+                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    if granted { deliver() }
+                }
+            case .denied:
+                break
+            @unknown default:
+                break
+            }
+        }
     }
 
     @MainActor
