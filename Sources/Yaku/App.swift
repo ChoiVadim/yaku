@@ -3383,13 +3383,32 @@ final class SelectionReader {
         return SelectionReader.convertAXRectToCocoa(rect)
     }
 
-    // AX uses top-left origin of the menu-bar screen; NSScreen uses bottom-left.
-    // NSScreen.screens.first is the screen at NSScreen-origin (0,0). Don't use NSScreen.main —
-    // it's the screen with the active window, which can be a different display.
+    // AX uses top-left global coordinates; NSScreen uses bottom-left.
+    // Build an AX-space frame for each display so selection panels stay near
+    // the selected text on horizontal and vertical multi-monitor layouts.
     private static func convertAXRectToCocoa(_ axRect: CGRect) -> NSRect? {
-        guard let primary = NSScreen.screens.first else { return nil }
-        let flippedY = primary.frame.maxY - axRect.maxY
+        guard let primary = NSScreen.screens.first(where: { $0.frame.origin == .zero })
+                ?? NSScreen.screens.first
+        else {
+            return nil
+        }
+
+        let axMidPoint = CGPoint(x: axRect.midX, y: axRect.midY)
+        let containingScreen = NSScreen.screens.first { screen in
+            axFrame(for: screen, primaryScreen: primary).contains(axMidPoint)
+        } ?? primary
+        let containingAXFrame = axFrame(for: containingScreen, primaryScreen: primary)
+        let flippedY = containingScreen.frame.maxY - (axRect.maxY - containingAXFrame.minY)
         return NSRect(x: axRect.origin.x, y: flippedY, width: axRect.width, height: axRect.height)
+    }
+
+    private static func axFrame(for screen: NSScreen, primaryScreen: NSScreen) -> CGRect {
+        CGRect(
+            x: screen.frame.minX,
+            y: primaryScreen.frame.maxY - screen.frame.maxY,
+            width: screen.frame.width,
+            height: screen.frame.height
+        )
     }
 
 }
