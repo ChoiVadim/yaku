@@ -105,6 +105,21 @@ Just send the GitHub Release URL: `https://github.com/ChoiVadim/nugumi/releases/
 - The floating button uses a single `NSButton` whose `title` and `image` swap based on `TranslationMode`. Don't reintroduce overlapping `NSTextField` / `NSImageView` views — they break centering.
 - For permissions (Accessibility, Screen Recording), prefer requesting at startup in `applicationDidFinishLaunching`. Don't add silent failure paths.
 
+## App icon
+
+`Resources/AppIcon.icns` is generated from `Scripts/generate-icon.swift`. Regenerate after editing the renderer:
+
+```sh
+swift Scripts/generate-icon.swift Resources/AppIcon.icns
+```
+
+The README header logo at `docs/screenshots/logo.png` is extracted from the `.icns` (256×256@2x slice). After regenerating the icon, re-extract:
+
+```sh
+iconutil --convert iconset Resources/AppIcon.icns -o /tmp/AppIcon.iconset
+cp /tmp/AppIcon.iconset/icon_256x256@2x.png docs/screenshots/logo.png
+```
+
 ## Local development
 
 ```sh

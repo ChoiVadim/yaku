@@ -1,119 +1,93 @@
+<div align="center">
+
+<img src="docs/screenshots/logo.png" width="160" height="160" alt="Nugumi logo">
+
 # Nugumi
 
-Minimal macOS menu bar translator powered by a local Ollama server.
+**Highlight any text on your Mac. See it translated. Right where you are.**
 
-## Build
+<br>
 
-```sh
-swift build
-```
+<a href="https://github.com/ChoiVadim/nugumi/releases/latest">
+  <img src="https://img.shields.io/badge/Download-Nugumi.dmg-7C3AED?style=for-the-badge&logo=apple&logoColor=white" alt="Download Nugumi" height="44">
+</a>
 
-## Run for development
+<br><br>
 
-```sh
-swift run Nugumi
-```
+<img src="https://img.shields.io/badge/macOS-14%2B-555?style=flat-square" alt="macOS 14+">
+<img src="https://img.shields.io/github/v/release/ChoiVadim/nugumi?style=flat-square&color=7C3AED" alt="Latest release">
+<img src="https://img.shields.io/github/downloads/ChoiVadim/nugumi/total?style=flat-square&color=4ade80" alt="Total downloads">
 
-The first run prompts for Accessibility permission. The app reads selected text from the focused accessibility element after mouse selection and shows a small translation button.
-If an app does not expose selection through Accessibility, Nugumi falls back to a temporary copy-and-restore clipboard read after drag or double-click selection outside editable text fields. `Control` + `1` can also use that fallback for explicit replace translation.
+</div>
 
-Use `Control` + `2` to translate text you read from a selected screen area.
-Use `Control` + `1` to translate text you wrote into the separate writing language, then replace it after review.
-Open Shortcuts > Edit keyboard shortcuts... from the menu bar item to customize shortcuts for the current macOS user.
-Open the menu bar item to see a compact local usage summary with totals, streaks, workflow mix, and an activity map.
+<br>
 
-## Installing (end users)
+![Nugumi translating a Korean message in Telegram](docs/screenshots/translate.png)
 
-Download the DMG from the [latest release](https://github.com/ChoiVadim/nugumi/releases/latest), open it, and drag `Nugumi.app` to `/Applications`.
+## What is Nugumi?
 
-If the DMG is ad-hoc signed (any release without Developer ID notarization), macOS Gatekeeper blocks the first launch with "Nugumi can't be opened because Apple cannot check it for malicious software." Right-click `Nugumi.app` and choose **Open** — confirm once and macOS trusts it from then on.
+Nugumi is a friendly translator that lives in your Mac's menu bar. Select any text in any app — a chat message, a webpage, a PDF, a Notion doc — and Nugumi shows you the translation right next to your cursor. No copy-paste. No tab switching. No sending your text to the cloud.
 
-On first launch Nugumi asks for **Accessibility** and **Screen Recording** permissions. Both are required: Accessibility lets Nugumi read selected text, and Screen Recording is needed for "Translate screen area...". After enabling Screen Recording in System Settings, quit and relaunch Nugumi for the change to take effect.
+It also drafts smart replies for messages you receive, and reads text out of any area of your screen.
 
-## Build a `.app` and DMG
+Translation runs on [Ollama](https://ollama.com) — a free helper that runs AI models locally on your Mac. **Nothing you read or write ever leaves your computer.**
 
-```sh
-bash Scripts/build-app-bundle.sh
-```
+## How it works
 
-The app bundle is produced at `dist/Nugumi.app` and packaged into `dist/Nugumi.dmg` (universal arm64 + x86_64, ad-hoc signed).
+1. **Highlight** any text in any app.
+2. A tiny Nugumi button appears next to your selection.
+3. **Click it** — or press <kbd>⌃</kbd> <kbd>1</kbd> — and the translation pops up in place.
 
-Pass `UNIVERSAL=0` to build host-arch only:
+That's it.
 
-```sh
-UNIVERSAL=0 bash Scripts/build-app-bundle.sh
-```
+## Features
 
-## App icon
+### Translate what you select
 
-`Resources/AppIcon.icns` is generated from `Scripts/generate-icon.swift`. Regenerate after editing the renderer:
+<img src="docs/screenshots/translate.png" alt="Translate any selected text" width="100%">
 
-```sh
-swift Scripts/generate-icon.swift Resources/AppIcon.icns
-```
+Highlight a foreign-language message and read it in your language a moment later. Works in Telegram, Slack, Safari, Notes, VS Code, Discord, Mail — anywhere macOS lets you select text.
 
-## Accessibility troubleshooting
+### Reply in your voice
 
-If macOS shows Nugumi enabled in Accessibility but the menu still says it needs permission, quit Nugumi, remove or toggle the Nugumi entry in System Settings > Accessibility, then open the app again. The app bundle is ad-hoc signed during `Scripts/build-app-bundle.sh` with a stable designated requirement, so macOS attaches the permission to `com.nugumi.app`.
+<img src="docs/screenshots/reply.png" alt="Smart reply suggestions" width="100%">
 
-## In-app updates (Sparkle)
+Got a message in a language you don't speak? Select it and Nugumi suggests a natural reply written _in your_ language. Edit it, then paste.
 
-Nugumi ships an in-app updater. The running app polls `appcast.xml` daily and can download + install new versions in one click via "Check for Updates..." in the menu.
+### A tiny companion, not a popup factory
 
-### One-time setup (maintainer only)
+<img src="docs/screenshots/pet.png" alt="Floating pet companion" width="100%">
 
-1. Download the latest Sparkle release archive: <https://github.com/sparkle-project/Sparkle/releases>
-2. Generate an EdDSA key pair (private key goes into your macOS Keychain):
-   ```sh
-   /path/to/Sparkle/bin/generate_keys
-   ```
-3. Copy the printed public key into `Resources/Info.plist`, replacing the placeholder value of `SUPublicEDKey`.
-4. Make `sign_update` discoverable. Either:
-   - put `bin/` on PATH, or
-   - export `SPARKLE_BIN=/path/to/Sparkle/bin` before running `Scripts/release.sh`.
+Nugumi shows up as a small mascot next to your selection — present when you need it, invisible when you don't. Pick the style you like from the menu.
 
-### Cutting a release
+## Install
 
-```sh
-# Optional: signs with Developer ID and notarizes via Apple notary.
-# Without these env vars the build is ad-hoc signed (works but shows
-# "unidentified developer" on first launch).
-export DEVELOPER_ID='Developer ID Application: Your Name (XXXXXXXXXX)'
-export NOTARIZE_PROFILE='nugumi-notarize'   # see below
+1. Click the **Download** button above (or grab `Nugumi-X.Y.Z.dmg` from the [latest release](https://github.com/ChoiVadim/nugumi/releases/latest)).
+2. Open the DMG and drag **Nugumi.app** to your **Applications** folder.
+3. Launch Nugumi from Applications or Spotlight.
 
-bash Scripts/release.sh 0.6.0
-```
+On first launch, Nugumi opens a small welcome window asking for two permissions:
 
-To enable Developer ID + notarization, do the one-time setup once:
+| Permission           | What it's for                                 |
+| -------------------- | --------------------------------------------- |
+| **Accessibility**    | Reading the text you select in other apps.    |
+| **Screen Recording** | Translating text in screen areas you capture. |
 
-1. Enroll in the Apple Developer Program ($99/yr).
-2. Create a **Developer ID Application** certificate in Keychain Access. Copy the full identity name (e.g. `Developer ID Application: Vadim Choi (XXXXXXXXXX)`).
-3. Generate an app-specific password at <https://account.apple.com>.
-4. Store the notary credentials in keychain so notarytool can read them non-interactively:
-   ```sh
-   xcrun notarytool store-credentials nugumi-notarize \
-       --apple-id "you@example.com" \
-       --team-id "XXXXXXXXXX" \
-       --password "abcd-efgh-ijkl-mnop"
-   ```
+Click **Open settings** next to each row, flip the toggle for Nugumi, and the welcome window closes automatically when both are granted. Nugumi only ever sees what you actively select or capture — nothing else.
 
-Without `DEVELOPER_ID`/`NOTARIZE_PROFILE`, `release.sh` still produces a working `.dmg`, just ad-hoc signed.
+## Updates
 
-The script:
+Nugumi updates itself. When a new version ships, click **Check for Updates...** in the menu bar to install it in one tap. The updater is signed end-to-end (Apple notarization + EdDSA), so you can trust every patch you get.
 
-- Bumps `CFBundleShortVersionString` and `CFBundleVersion` in `Info.plist`.
-- Builds `dist/Nugumi.app` and `dist/Nugumi.dmg` via `build-app-bundle.sh`.
-- Signs the DMG with EdDSA via `sign_update`.
-- Appends a new `<item>` to `appcast.xml`.
-- Renames the DMG to `Nugumi-<version>.dmg`.
+## Requirements
 
-Then commit, tag, and create the GitHub Release that hosts the DMG:
+- macOS 14 (Sonoma) or later — Apple Silicon and Intel both supported.
+- [Ollama](https://ollama.com) installed. Nugumi walks you through it on first launch.
 
-```sh
-git add Resources/Info.plist appcast.xml
-git commit -m "Release v0.6.0"
-git tag v0.6.0 && git push origin main --tags
-gh release create v0.6.0 dist/Nugumi-0.6.0.dmg --title "v0.6.0" --notes "..."
-```
+<br>
 
-The `appcast.xml` URL embedded in the bundle (`https://raw.githubusercontent.com/ChoiVadim/nugumi/main/appcast.xml`) updates as soon as the commit lands on `main`. Existing Nugumi installs will pick up the new version on the next daily check or when the user clicks "Check for Updates...".
+<div align="center">
+
+Made with 🩷 in Seoul.
+
+</div>
