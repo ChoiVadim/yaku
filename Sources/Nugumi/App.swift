@@ -288,7 +288,7 @@ struct TranslationLanguage: Equatable {
         .init(id: "de", displayName: "German", promptName: "German")
     ]
 
-    static let defaultLanguage = all[0]
+    static let defaultLanguage = all.first { $0.id == "en" } ?? all[0]
     static let defaultDraftLanguage = all.first { $0.id == "ko" } ?? defaultLanguage
 
     static func language(id: String) -> TranslationLanguage {
