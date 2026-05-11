@@ -3619,8 +3619,11 @@ enum ScreenshotTranslationError: LocalizedError {
 
 enum ScreenshotCapture {
     static func captureInteractiveArea() async throws -> URL {
-        if !CGPreflightScreenCaptureAccess() {
-            _ = CGRequestScreenCaptureAccess()
+        // Permission is requested once at launch (requestScreenRecordingPermissionIfNeeded),
+        // which is what registers Nugumi in System Settings. Calling CGRequestScreenCaptureAccess
+        // here would stack Apple's system prompt on top of our NugumiAlertController.
+        guard CGPreflightScreenCaptureAccess() else {
+            throw ScreenshotTranslationError.screenRecordingPermissionDenied
         }
 
         return try await withCheckedThrowingContinuation { continuation in
