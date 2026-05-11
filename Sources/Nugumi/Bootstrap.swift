@@ -523,6 +523,190 @@ extension OnboardingWindowController: NSWindowDelegate {
 }
 
 @MainActor
+final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
+    private let onClose: () -> Void
+    private var accessibilityRow: StepRow!
+    private var screenRecordingRow: StepRow!
+    private var pollTimer: Timer?
+
+    private static let accessibilityCopy = "Translate the text you select in any app."
+    private static let screenRecordingCopy = "Translate text in screen areas you capture."
+
+    init(onClose: @escaping () -> Void) {
+        self.onClose = onClose
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 340),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Welcome to Nugumi"
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.center()
+
+        super.init(window: window)
+        window.delegate = self
+        buildUI()
+        refreshState()
+        startPolling()
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func presentAndActivate() {
+        showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func buildUI() {
+        guard let rootView = window?.contentView else { return }
+        rootView.wantsLayer = true
+        rootView.layer?.backgroundColor = NSColor.clear.cgColor
+
+        let glass = GlassHostView(
+            frame: rootView.bounds,
+            cornerRadius: 18,
+            tintColor: nil,
+            style: .regular
+        )
+        glass.translatesAutoresizingMaskIntoConstraints = false
+        rootView.addSubview(glass)
+        let contentView = glass.contentView
+
+        let title = NSTextField(labelWithString: "Welcome to Nugumi")
+        title.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        let subtitle = NSTextField(wrappingLabelWithString:
+            "Two quick permissions to start translating selected text and screen areas. Nugumi only sees what you actively highlight or capture — nothing else, nothing in the background.")
+        subtitle.font = NSFont.systemFont(ofSize: 12)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.translatesAutoresizingMaskIntoConstraints = false
+
+        let accessibilityRow = StepRow(
+            title: "Accessibility",
+            primaryActionTitle: "Open settings"
+        ) { [weak self] in
+            self?.openAccessibilitySettings()
+        }
+        self.accessibilityRow = accessibilityRow
+
+        let screenRecordingRow = StepRow(
+            title: "Screen recording",
+            primaryActionTitle: "Open settings"
+        ) { [weak self] in
+            self?.openScreenRecordingSettings()
+        }
+        self.screenRecordingRow = screenRecordingRow
+
+        let footerNote = NSTextField(wrappingLabelWithString:
+            "Skip for now — you can grant these later from the Nugumi menu.")
+        footerNote.font = NSFont.systemFont(ofSize: 11)
+        footerNote.textColor = .tertiaryLabelColor
+        footerNote.translatesAutoresizingMaskIntoConstraints = false
+
+        contentView.addSubview(title)
+        contentView.addSubview(subtitle)
+        contentView.addSubview(accessibilityRow)
+        contentView.addSubview(screenRecordingRow)
+        contentView.addSubview(footerNote)
+
+        let leading: CGFloat = 24
+        let trailing: CGFloat = -24
+        let rowSpacing: CGFloat = 20
+
+        NSLayoutConstraint.activate([
+            glass.topAnchor.constraint(equalTo: rootView.topAnchor),
+            glass.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            glass.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            glass.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
+
+            title.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 62),
+            title.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
+            title.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
+
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
+            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            subtitle.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+
+            accessibilityRow.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 22),
+            accessibilityRow.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
+            accessibilityRow.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
+
+            screenRecordingRow.topAnchor.constraint(equalTo: accessibilityRow.bottomAnchor, constant: rowSpacing),
+            screenRecordingRow.leadingAnchor.constraint(equalTo: accessibilityRow.leadingAnchor),
+            screenRecordingRow.trailingAnchor.constraint(equalTo: accessibilityRow.trailingAnchor),
+
+            footerNote.topAnchor.constraint(greaterThanOrEqualTo: screenRecordingRow.bottomAnchor, constant: 18),
+            footerNote.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
+            footerNote.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
+            footerNote.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20)
+        ])
+    }
+
+    private func startPolling() {
+        pollTimer?.invalidate()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshState()
+            }
+        }
+    }
+
+    private func refreshState() {
+        let axTrusted = AXIsProcessTrusted()
+        let scrTrusted = CGPreflightScreenCaptureAccess()
+
+        if axTrusted {
+            accessibilityRow.applyOk(message: "Granted.")
+        } else {
+            accessibilityRow.apply(.needsAction(Self.accessibilityCopy))
+        }
+
+        if scrTrusted {
+            screenRecordingRow.applyOk(message: "Granted — relaunch Nugumi to activate.")
+        } else {
+            screenRecordingRow.apply(.needsAction(Self.screenRecordingCopy))
+        }
+
+        if axTrusted && scrTrusted {
+            close()
+        }
+    }
+
+    private func openAccessibilitySettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
+    }
+
+    private func openScreenRecordingSettings() {
+        // First click registers Nugumi in TCC so it appears in the Screen
+        // Recording list. Apple's stock dialog flashes briefly here, but it's
+        // user-initiated (they clicked "Open settings"), not an unsolicited
+        // prompt at app launch.
+        if !CGPreflightScreenCaptureAccess() {
+            _ = CGRequestScreenCaptureAccess()
+        }
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+        NSWorkspace.shared.open(url)
+    }
+
+    nonisolated func windowWillClose(_ notification: Notification) {
+        Task { @MainActor in
+            self.pollTimer?.invalidate()
+            self.pollTimer = nil
+            self.onClose()
+        }
+    }
+}
+
+@MainActor
 private final class StepRow: NSView {
     private let titleLabel = NSTextField(labelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")

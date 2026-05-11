@@ -704,6 +704,8 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private var onboardingWindowController: OnboardingWindowController?
     private var snippetsWindowController: SnippetsWindowController?
     private var accessibilityTrustTimer: Timer?
+    private var screenRecordingTrustTimer: Timer?
+    private var permissionsWindowController: PermissionsWindowController?
     private var lastObservedModelReadyState: BootstrapStepStatus = .unknown
     private lazy var updaterController: SPUStandardUpdaterController? = {
         guard isRunningFromAppBundle else { return nil }
@@ -826,6 +828,10 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         setupStatusItem()
         requestAccessibilityPermissionIfNeeded()
         requestScreenRecordingPermissionIfNeeded()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            self?.presentPermissionsWindowIfNeeded()
+        }
         startMouseMonitor()
         applySelectionDisplayMode()
         setupGlobalHotKeys()
@@ -2008,12 +2014,15 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     }
 
     private func requestAccessibilityPermissionIfNeeded() {
-        guard !accessibilityIsTrusted() else {
+        // prompt:false silently registers Nugumi in System Settings → Privacy &
+        // Security → Accessibility (so the TCC entry exists and the user can find
+        // the toggle), without surfacing macOS's stock "would like to control this
+        // computer using accessibility features" dialog. The friendlier prompt
+        // lives in PermissionsWindowController.
+        let probe = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: false] as CFDictionary
+        guard !AXIsProcessTrustedWithOptions(probe) else {
             return
         }
-
-        let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
-        AXIsProcessTrustedWithOptions(options)
         startAccessibilityTrustWatcher()
     }
 
@@ -2040,10 +2049,45 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     }
 
     private func requestScreenRecordingPermissionIfNeeded() {
+        // No CGRequestScreenCaptureAccess() at launch — that triggers Apple's
+        // stock "would like to record this screen" dialog, which we replace
+        // with our own row in PermissionsWindowController. The actual TCC
+        // registration happens lazily when the user clicks "Open settings" in
+        // that window, or on the first screenshot attempt.
         guard !CGPreflightScreenCaptureAccess() else {
             return
         }
-        _ = CGRequestScreenCaptureAccess()
+        startScreenRecordingTrustWatcher()
+    }
+
+    private func startScreenRecordingTrustWatcher() {
+        guard screenRecordingTrustTimer == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self else {
+                    timer.invalidate()
+                    return
+                }
+                if CGPreflightScreenCaptureAccess() {
+                    timer.invalidate()
+                    self.screenRecordingTrustTimer = nil
+                }
+            }
+        }
+        screenRecordingTrustTimer = timer
+    }
+
+    private func presentPermissionsWindowIfNeeded() {
+        let axTrusted = AXIsProcessTrusted()
+        let scrTrusted = CGPreflightScreenCaptureAccess()
+        guard !(axTrusted && scrTrusted) else { return }
+        if permissionsWindowController != nil { return }
+
+        let controller = PermissionsWindowController { [weak self] in
+            self?.permissionsWindowController = nil
+        }
+        permissionsWindowController = controller
+        controller.presentAndActivate()
     }
 
     private func updateMenuState() {
@@ -2248,6 +2292,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private func startSelectionTranslateOrReply() {
         guard accessibilityIsTrusted() else {
             requestAccessibilityPermissionIfNeeded()
+            presentPermissionsWindowIfNeeded()
             return
         }
 
@@ -2306,6 +2351,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private func startSelectedTextTranslationForReplacement() {
         guard accessibilityIsTrusted() else {
             requestAccessibilityPermissionIfNeeded()
+            presentPermissionsWindowIfNeeded()
             return
         }
 
