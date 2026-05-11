@@ -38,6 +38,7 @@ fi
 
 cd "$ROOT"
 mkdir -p "$LOCAL_HOME" "$LOCAL_MODULE_CACHE"
+REAL_HOME="$HOME"
 export HOME="$LOCAL_HOME"
 export CLANG_MODULE_CACHE_PATH="$LOCAL_MODULE_CACHE"
 
@@ -76,6 +77,12 @@ if [ ! -f "$BINARY_PATH" ]; then
     echo "Build output not found at $BINARY_PATH" >&2
     exit 1
 fi
+
+# Restore real HOME so codesign / notarytool can find the user's keychain.
+# Swift build needed the sandboxed HOME above, but signing tools look up
+# `~/Library/Keychains/login.keychain-db` and would otherwise miss the
+# Developer ID identity entirely.
+export HOME="$REAL_HOME"
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"

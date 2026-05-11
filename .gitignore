@@ -3,3 +3,4 @@
 dist/
 *.xcuserdata/
 DerivedData/
+.envrc.local
