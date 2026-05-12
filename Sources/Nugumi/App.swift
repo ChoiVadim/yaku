@@ -2210,15 +2210,15 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             ? "Setup..."
             : "Open setup..."
         menu.item(withTag: MenuItemTag.bootstrapSeparator.rawValue)?.isHidden = bootstrapReady
-        menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.title = "Translation language: \(targetLanguage.displayName)"
-        menu.item(withTag: MenuItemTag.draftTargetLanguage.rawValue)?.title = "Writing language: \(draftTargetLanguage.displayName)"
+        menu.item(withTag: MenuItemTag.targetLanguage.rawValue)?.title = "Translate selected text to: \(targetLanguage.displayName)"
+        menu.item(withTag: MenuItemTag.draftTargetLanguage.rawValue)?.title = "Write / rewrite my text in: \(draftTargetLanguage.displayName)"
         menu.item(withTag: MenuItemTag.selectionDisplayMode.rawValue)?.title = selectionDisplayMode.settingsTitle
         menu.item(withTag: MenuItemTag.floatingDefaultMode.rawValue)?.title = floatingDefaultMode.menuTitle
         menu.item(withTag: MenuItemTag.thinkingLevel.rawValue)?.title = thinkingLevel.settingsTitle
         menu.item(withTag: MenuItemTag.selectedModel.rawValue)?.title = "Mode: \(OllamaModelOption.option(id: selectedModelID).displayName)"
         menu.item(withTag: MenuItemTag.checkForUpdates.rawValue)?.isHidden = !isRunningFromAppBundle
         if let translateSelectionItem = menu.item(withTag: MenuItemTag.translateSelection.rawValue) {
-            translateSelectionItem.title = "Rewrite my text in \(draftTargetLanguage.displayName)..."
+            translateSelectionItem.title = "Rewrite selected text..."
             applyShortcut(for: .translateSelection, to: translateSelectionItem)
             translateSelectionItem.isEnabled = trusted
         }
@@ -2226,7 +2226,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             let idleTitle: String
             switch floatingDefaultMode {
             case .translate:
-                idleTitle = "Translate screen area..."
+                idleTitle = "Translate screen area to \(targetLanguage.displayName)..."
             case .smartReply:
                 idleTitle = "Reply to screen area..."
             }
@@ -2239,7 +2239,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         if let selectionItem = menu.item(withTag: MenuItemTag.translateOrReplySelection.rawValue) {
             switch floatingDefaultMode {
             case .translate:
-                selectionItem.title = "Translate selected text..."
+                selectionItem.title = "Translate selected text to \(targetLanguage.displayName)..."
             case .smartReply:
                 selectionItem.title = "Reply to selected text..."
             }
@@ -6109,6 +6109,7 @@ final class TranslationContentView: NSView {
     private static let dividerHeight: CGFloat = 1
     private static let buttonSize: CGFloat = 18
     private static let resultFontSize: CGFloat = 18
+    private static let resultParagraphSpacingFactor: CGFloat = 0.35
     private static let textInsetY: CGFloat = 3
     private static let scrollableTextBottomPadding: CGFloat = 18
 
@@ -6182,7 +6183,8 @@ final class TranslationContentView: NSView {
             font: NSFont.systemFont(ofSize: resultFontSize, weight: .semibold),
             width: contentWidth,
             minimum: minimumResultBoxHeight,
-            maximum: maximumResultBoxHeight
+            maximum: maximumResultBoxHeight,
+            paragraphSpacing: resultFontSize * resultParagraphSpacingFactor
         )
 
         let fixedHeight = panelPaddingTop
@@ -6230,8 +6232,15 @@ final class TranslationContentView: NSView {
         layoutForCurrentSize()
     }
 
-    private static func boxHeight(for text: String, font: NSFont, width: CGFloat, minimum: CGFloat, maximum: CGFloat) -> CGFloat {
-        let height = textHeight(for: text, font: font, width: width) + textInsetY * 2 + 4
+    private static func boxHeight(
+        for text: String,
+        font: NSFont,
+        width: CGFloat,
+        minimum: CGFloat,
+        maximum: CGFloat,
+        paragraphSpacing: CGFloat = 0
+    ) -> CGFloat {
+        let height = textHeight(for: text, font: font, width: width, paragraphSpacing: paragraphSpacing) + textInsetY * 2 + 4
         return min(max(height, minimum), maximum)
     }
 
@@ -6299,10 +6308,16 @@ final class TranslationContentView: NSView {
         scrollView.hasVerticalScroller = showsOverflowScroller && !fitsInScrollFrame
     }
 
-    private static func textHeight(for text: String, font: NSFont, width: CGFloat) -> CGFloat {
+    private static func textHeight(
+        for text: String,
+        font: NSFont,
+        width: CGFloat,
+        paragraphSpacing: CGFloat = 0
+    ) -> CGFloat {
         let cleanText = text.isEmpty ? " " : text
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
+        paragraph.paragraphSpacing = paragraphSpacing
         let storage = NSTextStorage(string: cleanText, attributes: [
             .font: font,
             .paragraphStyle: paragraph
@@ -6330,7 +6345,7 @@ final class TranslationContentView: NSView {
         let fullRange = NSRange(location: 0, length: rendered.length)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
-        paragraph.paragraphSpacing = font.pointSize * 0.35
+        paragraph.paragraphSpacing = font.pointSize * resultParagraphSpacingFactor
         rendered.addAttributes([
             .font: font,
             .foregroundColor: color,
@@ -6662,7 +6677,8 @@ final class TranslationContentView: NSView {
         let resultRawTextHeight = Self.textHeight(
             for: resultDisplayText,
             font: NSFont.systemFont(ofSize: Self.resultFontSize, weight: .semibold),
-            width: resultScrollFrame.width
+            width: resultScrollFrame.width,
+            paragraphSpacing: Self.resultFontSize * Self.resultParagraphSpacingFactor
         )
         Self.layoutScrollableTextView(
             resultTextView,

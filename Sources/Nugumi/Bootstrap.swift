@@ -470,7 +470,7 @@ final class OnboardingWindowController: NSWindowController {
         subtitle.translatesAutoresizingMaskIntoConstraints = false
 
         let ollamaSectionHeader = Self.makeSectionHeader("1. Get Ollama ready (one time)")
-        let translatorSectionHeader = Self.makeSectionHeader("2. Pick how Nugumi translates")
+        let translatorSectionHeader = Self.makeSectionHeader("2. Pick a translator (Online alone is enough)")
 
         let installRow = StepRow(
             title: "Install Ollama",
@@ -521,7 +521,7 @@ final class OnboardingWindowController: NSWindowController {
         }
 
         let footerNote = NSTextField(wrappingLabelWithString:
-            "You can switch between Online and Offline anytime from the Nugumi menu. Both stay set up once you've gone through this once.")
+            "Online is enough to start. You can add Offline or switch between the two anytime from the Nugumi menu.")
         footerNote.font = NSFont.systemFont(ofSize: 11)
         footerNote.textColor = .tertiaryLabelColor
         footerNote.translatesAutoresizingMaskIntoConstraints = false
@@ -609,7 +609,7 @@ final class OnboardingWindowController: NSWindowController {
     }
 
     private static func translatorRowTitle(for model: OllamaModelOption) -> String {
-        model.isCloud ? "Online translator" : "Offline translator"
+        model.isCloud ? "Online translator" : "Offline translator (optional)"
     }
 
     private func render(state: BootstrapState) {
