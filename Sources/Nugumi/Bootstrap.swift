@@ -1,13 +1,6 @@
 import AppKit
 import Foundation
 
-enum BootstrapStepID: String, CaseIterable {
-    case ollamaInstalled
-    case serverRunning
-    case ollamaSignedIn
-    case modelReady
-}
-
 enum BootstrapStepStatus: Equatable {
     case unknown
     case checking
@@ -26,18 +19,27 @@ struct BootstrapState: Equatable {
     var ollamaInstalled: BootstrapStepStatus = .unknown
     var serverRunning: BootstrapStepStatus = .unknown
     var ollamaSignedIn: BootstrapStepStatus = .unknown
-    var modelReady: BootstrapStepStatus = .unknown
+    var modelReady: [String: BootstrapStepStatus] = [:]
 
-    var isReady: Bool {
-        ollamaInstalled.isTerminalOK && serverRunning.isTerminalOK && ollamaSignedIn.isTerminalOK && modelReady.isTerminalOK
+    func modelReady(for modelID: String) -> BootstrapStepStatus {
+        modelReady[modelID] ?? .unknown
+    }
+
+    func isReady(for modelID: String, requiresAccount: Bool) -> Bool {
+        guard ollamaInstalled.isTerminalOK, serverRunning.isTerminalOK else { return false }
+        if requiresAccount, !ollamaSignedIn.isTerminalOK { return false }
+        return modelReady(for: modelID).isTerminalOK
     }
 }
 
 @MainActor
 final class OllamaBootstrap {
     let baseURL: URL
-    let model: String
-    let requiresOllamaAccount: Bool
+    let models: [OllamaModelOption]
+
+    var requiresOllamaAccount: Bool {
+        models.contains(where: { $0.isCloud })
+    }
 
     private(set) var state = BootstrapState()
     var onChange: ((BootstrapState) -> Void)?
@@ -51,12 +53,16 @@ final class OllamaBootstrap {
     ]
 
     private var refreshTask: Task<Void, Never>?
-    private var pullTask: Task<Void, Never>?
+    private var pullTasks: [String: Task<Void, Never>] = [:]
 
-    init(baseURL: URL, model: String, requiresOllamaAccount: Bool) {
+    init(baseURL: URL, models: [OllamaModelOption]) {
         self.baseURL = baseURL
-        self.model = model
-        self.requiresOllamaAccount = requiresOllamaAccount
+        self.models = models
+    }
+
+    func isReady(for modelID: String) -> Bool {
+        let requiresAccount = models.first(where: { $0.id == modelID })?.isCloud ?? false
+        return state.isReady(for: modelID, requiresAccount: requiresAccount)
     }
 
     // MARK: - Public actions
@@ -99,23 +105,31 @@ final class OllamaBootstrap {
         launchOllamaApp()
     }
 
-    func startModelPull() {
-        guard pullTask == nil else { return }
-        if requiresOllamaAccount {
+    func startModelPull(for modelID: String) {
+        guard pullTasks[modelID] == nil else { return }
+        guard let model = models.first(where: { $0.id == modelID }) else { return }
+        if model.isCloud {
             update(\.ollamaSignedIn, .working("Checking sign-in…"))
         }
-        update(\.modelReady, .working(requiresOllamaAccount
+        setModelReady(modelID, .working(model.isCloud
             ? "Setting up the translator…"
             : "Downloading translator (this can take several minutes)…"))
-        pullTask = Task { [weak self] in
-            await self?.runPull()
-            await MainActor.run { self?.pullTask = nil }
+        pullTasks[modelID] = Task { [weak self] in
+            await self?.runPull(for: model)
+            await MainActor.run { self?.pullTasks[modelID] = nil }
         }
     }
 
-    func cancelPull() {
-        pullTask?.cancel()
-        pullTask = nil
+    func cancelPull(for modelID: String) {
+        pullTasks[modelID]?.cancel()
+        pullTasks[modelID] = nil
+    }
+
+    func cancelAllPulls() {
+        for (_, task) in pullTasks {
+            task.cancel()
+        }
+        pullTasks.removeAll()
     }
 
     // MARK: - Detection
@@ -124,7 +138,12 @@ final class OllamaBootstrap {
         update(\.ollamaInstalled, .checking)
         update(\.serverRunning, .checking)
         update(\.ollamaSignedIn, .checking)
-        update(\.modelReady, .checking)
+        for model in models {
+            // Don't clobber an in-flight pull's progress text.
+            if pullTasks[model.id] == nil {
+                setModelReady(model.id, .checking)
+            }
+        }
 
         let appPresent = ollamaAppURL() != nil
         let serverAlive = await pingServer()
@@ -137,7 +156,11 @@ final class OllamaBootstrap {
             update(\.ollamaInstalled, .needsAction("Ollama isn't installed yet."))
             update(\.serverRunning, .needsAction("Install Ollama first."))
             update(\.ollamaSignedIn, .needsAction("Install Ollama first."))
-            update(\.modelReady, .needsAction("Install Ollama first."))
+            for model in models {
+                if pullTasks[model.id] == nil {
+                    setModelReady(model.id, .needsAction("Install Ollama first."))
+                }
+            }
             return
         }
 
@@ -146,25 +169,41 @@ final class OllamaBootstrap {
         } else {
             update(\.serverRunning, .needsAction("Ollama isn't running. Open it to start."))
             update(\.ollamaSignedIn, .needsAction("Start Ollama first."))
-            update(\.modelReady, .needsAction("Start Ollama first."))
+            for model in models {
+                if pullTasks[model.id] == nil {
+                    setModelReady(model.id, .needsAction("Start Ollama first."))
+                }
+            }
             return
         }
 
+        let presentIDs: Set<String>
         do {
-            let hasModel = try await modelIsPresent()
-            if hasModel {
-                update(\.ollamaSignedIn, .ok)
-                update(\.modelReady, .ok)
-            } else {
-                update(\.ollamaSignedIn, requiresOllamaAccount
-                    ? .needsAction("Open Ollama and sign in (free).")
-                    : .ok)
-                update(\.modelReady, .needsAction(requiresOllamaAccount
-                    ? "Translator isn't set up yet."
-                    : "Translator isn't downloaded yet (several GB)."))
-            }
+            presentIDs = try await modelsPresent()
         } catch {
-            update(\.modelReady, .failed(error.localizedDescription))
+            for model in models where pullTasks[model.id] == nil {
+                setModelReady(model.id, .failed(error.localizedDescription))
+            }
+            return
+        }
+
+        let anyCloudPresent = models.contains { $0.isCloud && presentIDs.contains($0.id) }
+        if anyCloudPresent {
+            update(\.ollamaSignedIn, .ok)
+        } else {
+            update(\.ollamaSignedIn, requiresOllamaAccount
+                ? .needsAction("Open Ollama and sign in (free).")
+                : .ok)
+        }
+
+        for model in models where pullTasks[model.id] == nil {
+            if presentIDs.contains(model.id) {
+                setModelReady(model.id, .ok)
+            } else {
+                setModelReady(model.id, .needsAction(model.isCloud
+                    ? "Free and instant. Needs internet to translate."
+                    : "Free and private. Several GB download, then works without internet."))
+            }
         }
     }
 
@@ -183,7 +222,7 @@ final class OllamaBootstrap {
         }
     }
 
-    private func modelIsPresent() async throws -> Bool {
+    private func modelsPresent() async throws -> Set<String> {
         let url = baseURL.appending(path: "api/tags")
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
@@ -193,9 +232,14 @@ final class OllamaBootstrap {
         }
 
         let payload = try JSONDecoder().decode(TagsResponse.self, from: data)
-        return payload.models.contains { entry in
-            entry.name == model || entry.model == model
+        var found: Set<String> = []
+        for entry in payload.models {
+            let candidates = [entry.name, entry.model].compactMap { $0 }
+            for model in models where candidates.contains(model.id) {
+                found.insert(model.id)
+            }
         }
+        return found
     }
 
     private func ollamaAppURL() -> URL? {
@@ -218,7 +262,8 @@ final class OllamaBootstrap {
 
     // MARK: - Pull streaming
 
-    private func runPull() async {
+    private func runPull(for model: OllamaModelOption) async {
+        let modelID = model.id
         let url = baseURL.appending(path: "api/pull")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -226,20 +271,20 @@ final class OllamaBootstrap {
         request.timeoutInterval = 60 * 60
 
         do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["model": model, "stream": true])
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["model": modelID, "stream": true])
 
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
             guard let http = response as? HTTPURLResponse else {
-                update(\.modelReady, .failed("Download failed: invalid response."))
+                setModelReady(modelID, .failed("Download failed: invalid response."))
                 return
             }
             if http.statusCode == 401 || http.statusCode == 403 {
                 update(\.ollamaSignedIn, .needsAction("Open Ollama and sign in (free)."))
-                update(\.modelReady, .needsAction("Sign in is required for online mode."))
+                setModelReady(modelID, .needsAction("Sign in to Ollama first, then tap Set up."))
                 return
             }
             guard (200..<300).contains(http.statusCode) else {
-                update(\.modelReady, .failed("Download failed (HTTP \(http.statusCode))."))
+                setModelReady(modelID, .failed("Download failed (HTTP \(http.statusCode))."))
                 return
             }
 
@@ -250,35 +295,38 @@ final class OllamaBootstrap {
 
                 if let streamError = try? decoder.decode(StreamError.self, from: data),
                    let message = streamError.error {
-                    let classified = OllamaClient.classifyStreamError(message: message, model: model)
+                    let classified = OllamaClient.classifyStreamError(message: message, model: modelID)
                     if case .signInRequired = classified {
                         update(\.ollamaSignedIn, .needsAction("Open Ollama and sign in (free)."))
-                        update(\.modelReady, .needsAction("Sign in is required for online mode."))
+                        setModelReady(modelID, .needsAction("Sign in to Ollama first, then tap Set up."))
                     } else {
-                        update(\.modelReady, .failed(message))
+                        setModelReady(modelID, .failed(message))
                     }
                     return
                 }
 
                 if let progress = try? decoder.decode(PullProgress.self, from: data) {
                     let label = progress.humanReadableStatus()
-                    update(\.modelReady, .working(label))
+                    setModelReady(modelID, .working(label))
                 }
             }
-            // Re-check tags to confirm
+            // Re-check tags to confirm.
             do {
-                let present = try await modelIsPresent()
-                if present {
+                let presentIDs = try await modelsPresent()
+                let present = presentIDs.contains(modelID)
+                if present, model.isCloud {
                     update(\.ollamaSignedIn, .ok)
                 }
-                update(\.modelReady, present ? .ok : .failed("Download finished but the translator isn't visible. Try Re-check."))
+                setModelReady(modelID, present
+                    ? .ok
+                    : .failed("Download finished but the translator isn't visible. Try Re-check."))
             } catch {
-                update(\.modelReady, .failed(error.localizedDescription))
+                setModelReady(modelID, .failed(error.localizedDescription))
             }
         } catch is CancellationError {
-            update(\.modelReady, .needsAction("Download cancelled."))
+            setModelReady(modelID, .needsAction("Download cancelled."))
         } catch {
-            update(\.modelReady, .failed(error.localizedDescription))
+            setModelReady(modelID, .failed(error.localizedDescription))
         }
     }
 
@@ -287,6 +335,12 @@ final class OllamaBootstrap {
     private func update<V>(_ keyPath: WritableKeyPath<BootstrapState, V>, _ value: V) where V: Equatable {
         if state[keyPath: keyPath] == value { return }
         state[keyPath: keyPath] = value
+        onChange?(state)
+    }
+
+    private func setModelReady(_ modelID: String, _ value: BootstrapStepStatus) {
+        if state.modelReady[modelID] == value { return }
+        state.modelReady[modelID] = value
         onChange?(state)
     }
 }
@@ -339,14 +393,23 @@ private struct PullProgress: Decodable {
 final class OnboardingWindowController: NSWindowController {
     private let bootstrap: OllamaBootstrap
     private let onClose: () -> Void
-    private var stepRows: [BootstrapStepID: StepRow] = [:]
+    private var installRow: StepRow?
+    private var serverRow: StepRow?
+    private var signInRow: StepRow?
+    private var modelRows: [String: StepRow] = [:]
 
     init(bootstrap: OllamaBootstrap, onClose: @escaping () -> Void) {
         self.bootstrap = bootstrap
         self.onClose = onClose
 
+        let modelCount = bootstrap.models.count
+        // title + subtitle + 2 section headers + 3 ollama rows + footer
+        let baseHeight: CGFloat = 420
+        let perModelRow: CGFloat = 58
+        let height = baseHeight + perModelRow * CGFloat(modelCount)
+
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 410),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: height),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -354,7 +417,8 @@ final class OnboardingWindowController: NSWindowController {
         window.title = "Nugumi Setup"
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
-        window.isMovableByWindowBackground = true
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isMovableByWindowBackground = false
         window.isReleasedWhenClosed = false
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -372,8 +436,11 @@ final class OnboardingWindowController: NSWindowController {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     func presentAndRefresh() {
-        showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+        showWindow(nil)
+        window?.center()
+        window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
         bootstrap.refresh()
     }
 
@@ -397,10 +464,13 @@ final class OnboardingWindowController: NSWindowController {
         title.translatesAutoresizingMaskIntoConstraints = false
 
         let subtitle = NSTextField(wrappingLabelWithString:
-            "Nugumi translates the text you select. It runs through Ollama — a free helper app that lives on your Mac. Finish the quick steps below; Nugumi checks each one for you.")
+            "Nugumi translates whatever you select. To do that, it talks to Ollama — a small free app you'll install once. Two short sections below: get Ollama ready, then pick how Nugumi translates.")
         subtitle.font = NSFont.systemFont(ofSize: 12)
         subtitle.textColor = .secondaryLabelColor
         subtitle.translatesAutoresizingMaskIntoConstraints = false
+
+        let ollamaSectionHeader = Self.makeSectionHeader("1. Get Ollama ready (one time)")
+        let translatorSectionHeader = Self.makeSectionHeader("2. Pick how Nugumi translates")
 
         let installRow = StepRow(
             title: "Install Ollama",
@@ -412,6 +482,7 @@ final class OnboardingWindowController: NSWindowController {
             self?.bootstrap.refresh()
         }
         installRow.secondaryActionTitle = "Re-check"
+        self.installRow = installRow
 
         let serverRow = StepRow(
             title: "Start Ollama",
@@ -419,9 +490,10 @@ final class OnboardingWindowController: NSWindowController {
         ) { [weak self] in
             self?.bootstrap.launchOllamaApp()
         }
+        self.serverRow = serverRow
 
         let signInRow = StepRow(
-            title: "Sign in (online mode only)",
+            title: "Sign in to Ollama (free)",
             primaryActionTitle: "Open Ollama"
         ) { [weak self] in
             self?.bootstrap.openOllamaForSignIn()
@@ -430,42 +502,48 @@ final class OnboardingWindowController: NSWindowController {
             self?.bootstrap.refresh()
         }
         signInRow.secondaryActionTitle = "Re-check"
+        self.signInRow = signInRow
 
-        let modelRow = StepRow(
-            title: "Set up the translator",
-            primaryActionTitle: "Set up"
-        ) { [weak self] in
-            self?.bootstrap.startModelPull()
+        var perModelRows: [StepRow] = []
+        for model in bootstrap.models {
+            let row = StepRow(
+                title: Self.translatorRowTitle(for: model),
+                primaryActionTitle: "Set up"
+            ) { [weak self] in
+                self?.bootstrap.startModelPull(for: model.id)
+            }
+            row.secondaryActionTitle = "Sign in"
+            row.secondaryAction = { [weak self] in
+                self?.bootstrap.openOllamaForSignIn()
+            }
+            modelRows[model.id] = row
+            perModelRows.append(row)
         }
-        modelRow.secondaryActionTitle = "Sign in"
-        modelRow.secondaryAction = { [weak self] in
-            self?.bootstrap.openOllamaForSignIn()
-        }
-
-        stepRows[.ollamaInstalled] = installRow
-        stepRows[.serverRunning] = serverRow
-        stepRows[.ollamaSignedIn] = signInRow
-        stepRows[.modelReady] = modelRow
 
         let footerNote = NSTextField(wrappingLabelWithString:
-            "Online mode is fast and uses your free Ollama account. Offline mode keeps everything on your Mac — it downloads several GB and runs slower, especially on older Macs. You can switch modes anytime from the Nugumi menu.")
+            "You can switch between Online and Offline anytime from the Nugumi menu. Both stay set up once you've gone through this once.")
         footerNote.font = NSFont.systemFont(ofSize: 11)
         footerNote.textColor = .tertiaryLabelColor
         footerNote.translatesAutoresizingMaskIntoConstraints = false
 
         contentView.addSubview(title)
         contentView.addSubview(subtitle)
+        contentView.addSubview(ollamaSectionHeader)
         contentView.addSubview(installRow)
         contentView.addSubview(serverRow)
         contentView.addSubview(signInRow)
-        contentView.addSubview(modelRow)
+        contentView.addSubview(translatorSectionHeader)
+        for row in perModelRows {
+            contentView.addSubview(row)
+        }
         contentView.addSubview(footerNote)
 
         let leading: CGFloat = 24
         let trailing: CGFloat = -24
-        let rowSpacing: CGFloat = 16
+        let rowSpacing: CGFloat = 14
+        let sectionGap: CGFloat = 22
 
-        NSLayoutConstraint.activate([
+        var constraints: [NSLayoutConstraint] = [
             glass.topAnchor.constraint(equalTo: rootView.topAnchor),
             glass.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
             glass.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
@@ -479,7 +557,11 @@ final class OnboardingWindowController: NSWindowController {
             subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             subtitle.trailingAnchor.constraint(equalTo: title.trailingAnchor),
 
-            installRow.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 18),
+            ollamaSectionHeader.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: sectionGap),
+            ollamaSectionHeader.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
+            ollamaSectionHeader.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
+
+            installRow.topAnchor.constraint(equalTo: ollamaSectionHeader.bottomAnchor, constant: 10),
             installRow.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
             installRow.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
 
@@ -491,26 +573,65 @@ final class OnboardingWindowController: NSWindowController {
             signInRow.leadingAnchor.constraint(equalTo: installRow.leadingAnchor),
             signInRow.trailingAnchor.constraint(equalTo: installRow.trailingAnchor),
 
-            modelRow.topAnchor.constraint(equalTo: signInRow.bottomAnchor, constant: rowSpacing),
-            modelRow.leadingAnchor.constraint(equalTo: installRow.leadingAnchor),
-            modelRow.trailingAnchor.constraint(equalTo: installRow.trailingAnchor),
+            translatorSectionHeader.topAnchor.constraint(equalTo: signInRow.bottomAnchor, constant: sectionGap),
+            translatorSectionHeader.leadingAnchor.constraint(equalTo: installRow.leadingAnchor),
+            translatorSectionHeader.trailingAnchor.constraint(equalTo: installRow.trailingAnchor)
+        ]
 
-            footerNote.topAnchor.constraint(greaterThanOrEqualTo: modelRow.bottomAnchor, constant: 18),
+        var previousBottomAnchor = translatorSectionHeader.bottomAnchor
+        var firstTranslatorRow = true
+        for row in perModelRows {
+            constraints.append(contentsOf: [
+                row.topAnchor.constraint(equalTo: previousBottomAnchor, constant: firstTranslatorRow ? 10 : rowSpacing),
+                row.leadingAnchor.constraint(equalTo: installRow.leadingAnchor),
+                row.trailingAnchor.constraint(equalTo: installRow.trailingAnchor)
+            ])
+            previousBottomAnchor = row.bottomAnchor
+            firstTranslatorRow = false
+        }
+
+        constraints.append(contentsOf: [
+            footerNote.topAnchor.constraint(greaterThanOrEqualTo: previousBottomAnchor, constant: 16),
             footerNote.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
             footerNote.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
             footerNote.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20)
         ])
+
+        NSLayoutConstraint.activate(constraints)
+    }
+
+    private static func makeSectionHeader(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .tertiaryLabelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }
+
+    private static func translatorRowTitle(for model: OllamaModelOption) -> String {
+        model.isCloud ? "Online translator" : "Offline translator"
     }
 
     private func render(state: BootstrapState) {
-        stepRows[.ollamaInstalled]?.apply(state.ollamaInstalled)
-        stepRows[.serverRunning]?.apply(state.serverRunning)
+        installRow?.apply(state.ollamaInstalled)
+        serverRow?.apply(state.serverRunning)
         if !bootstrap.requiresOllamaAccount, case .ok = state.ollamaSignedIn {
-            stepRows[.ollamaSignedIn]?.applyOk(message: "Not needed in offline mode.")
+            signInRow?.applyOk(message: "Not needed if you only use Offline.")
+        } else if case .ok = state.ollamaSignedIn {
+            signInRow?.applyOk(message: "Signed in to your free Ollama account.")
         } else {
-            stepRows[.ollamaSignedIn]?.apply(state.ollamaSignedIn)
+            signInRow?.apply(state.ollamaSignedIn)
         }
-        stepRows[.modelReady]?.apply(state.modelReady)
+        for model in bootstrap.models {
+            let status = state.modelReady(for: model.id)
+            if case .ok = status {
+                modelRows[model.id]?.applyOk(message: model.isCloud
+                    ? "Quick translations through Ollama Cloud."
+                    : "Lives on your Mac. Private, works without internet.")
+            } else {
+                modelRows[model.id]?.apply(status)
+            }
+        }
     }
 }
 
@@ -544,7 +665,9 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         window.title = "Welcome to Nugumi"
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
-        window.isMovableByWindowBackground = true
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isMovableByWindowBackground = false
         window.isReleasedWhenClosed = false
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -560,8 +683,11 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     func presentAndActivate() {
-        showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+        showWindow(nil)
+        window?.center()
+        window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
     }
 
     private func buildUI() {
@@ -682,19 +808,32 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
 
     private func openAccessibilitySettings() {
         let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        closeBeforeOpeningSystemPermissionUI()
         NSWorkspace.shared.open(url)
     }
 
     private func openScreenRecordingSettings() {
         // First click registers Nugumi in TCC so it appears in the Screen
-        // Recording list. Apple's stock dialog flashes briefly here, but it's
-        // user-initiated (they clicked "Open settings"), not an unsolicited
-        // prompt at app launch.
-        if !CGPreflightScreenCaptureAccess() {
-            _ = CGRequestScreenCaptureAccess()
+        // Recording list. Apple's stock dialog is unavoidable, but Nugumi's
+        // own permissions window must be gone before that modal appears.
+        let needsSystemPrompt = !CGPreflightScreenCaptureAccess()
+        closeBeforeOpeningSystemPermissionUI()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            if needsSystemPrompt {
+                _ = CGRequestScreenCaptureAccess()
+            } else {
+                let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+                NSWorkspace.shared.open(url)
+            }
         }
-        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
-        NSWorkspace.shared.open(url)
+    }
+
+    private func closeBeforeOpeningSystemPermissionUI() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+        window?.orderOut(nil)
+        close()
     }
 
     nonisolated func windowWillClose(_ notification: Notification) {

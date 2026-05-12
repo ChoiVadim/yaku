@@ -35,12 +35,13 @@ private enum MenuItemTag: Int {
 
 struct OllamaModelOption: Equatable {
     let id: String
+    let shortName: String
     let displayName: String
     let isCloud: Bool
 
     static let all: [OllamaModelOption] = [
-        .init(id: "gpt-oss:120b-cloud", displayName: "Online (fast, needs sign-in)", isCloud: true),
-        .init(id: "gpt-oss:20b", displayName: "Offline (slower, works without internet)", isCloud: false)
+        .init(id: "gpt-oss:120b-cloud", shortName: "Online", displayName: "Online (fast, needs sign-in)", isCloud: true),
+        .init(id: "gpt-oss:20b", shortName: "Offline", displayName: "Offline (slower, works without internet)", isCloud: false)
     ]
 
     static let defaultModel = all[0]
@@ -71,6 +72,14 @@ enum ThinkingLevel: String, CaseIterable {
 private enum FloatingButtonDefaultMode: String {
     case translate
     case smartReply
+
+    static func storedMode(rawValue: String?) -> FloatingButtonDefaultMode {
+        guard let rawValue else { return .translate }
+        if rawValue == "selection" {
+            return .translate
+        }
+        return FloatingButtonDefaultMode(rawValue: rawValue) ?? .translate
+    }
 
     var translationMode: TranslationMode {
         switch self {
@@ -475,7 +484,7 @@ private final class TranslationPrefetch {
         case pending
         case running
         case completed(String)
-        case failed(String)
+        case failed(Error)
         case cancelled
     }
 
@@ -491,7 +500,7 @@ private final class TranslationPrefetch {
     private var partialTranslation = ""
     private var subscribers: [(String) -> Void] = []
     private var completionSubscribers: [(String) -> Void] = []
-    private var failureSubscribers: [(String) -> Void] = []
+    private var failureSubscribers: [(Error) -> Void] = []
     private let onComplete: (String, TranslationLanguage, ThinkingLevel, String) -> Void
 
     init(
@@ -531,7 +540,7 @@ private final class TranslationPrefetch {
     func subscribe(
         onPartial: @escaping (String) -> Void,
         onCompletion: @escaping (String) -> Void,
-        onFailure: @escaping (String) -> Void
+        onFailure: @escaping (Error) -> Void
     ) {
         if !partialTranslation.isEmpty {
             onPartial(partialTranslation)
@@ -541,8 +550,8 @@ private final class TranslationPrefetch {
         case .completed(let translation):
             onPartial(translation)
             onCompletion(translation)
-        case .failed(let message):
-            onFailure(message)
+        case .failed(let error):
+            onFailure(error)
         default:
             subscribers.append(onPartial)
             completionSubscribers.append(onCompletion)
@@ -598,9 +607,8 @@ private final class TranslationPrefetch {
         } catch is CancellationError {
             markCancelled()
         } catch {
-            let message = error.localizedDescription
-            state = .failed(message)
-            failureSubscribers.forEach { $0(message) }
+            state = .failed(error)
+            failureSubscribers.forEach { $0(error) }
             subscribers.removeAll()
             completionSubscribers.removeAll()
             failureSubscribers.removeAll()
@@ -698,15 +706,14 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private let snippetsStore = SnippetsStore()
     private lazy var bootstrap: OllamaBootstrap = OllamaBootstrap(
         baseURL: ollamaBaseURL,
-        model: selectedModelID,
-        requiresOllamaAccount: OllamaModelOption.option(id: selectedModelID).isCloud
+        models: OllamaModelOption.all
     )
     private var onboardingWindowController: OnboardingWindowController?
     private var snippetsWindowController: SnippetsWindowController?
     private var accessibilityTrustTimer: Timer?
     private var screenRecordingTrustTimer: Timer?
     private var permissionsWindowController: PermissionsWindowController?
-    private var lastObservedModelReadyState: BootstrapStepStatus = .unknown
+    private var lastObservedModelReadyState: [String: BootstrapStepStatus] = [:]
     private lazy var updaterController: SPUStandardUpdaterController? = {
         guard isRunningFromAppBundle else { return nil }
         return SPUStandardUpdaterController(
@@ -740,8 +747,9 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     }
     private var floatingDefaultMode: FloatingButtonDefaultMode {
         get {
-            let raw = UserDefaults.standard.string(forKey: "floatingButtonDefaultMode") ?? FloatingButtonDefaultMode.translate.rawValue
-            return FloatingButtonDefaultMode(rawValue: raw) ?? .translate
+            FloatingButtonDefaultMode.storedMode(
+                rawValue: UserDefaults.standard.string(forKey: "floatingButtonDefaultMode")
+            )
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: "floatingButtonDefaultMode")
@@ -805,7 +813,8 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private static func defaultStyle(for category: AppCategory) -> WritingStyle {
         switch category {
         case .personalMessages, .other: return .casual
-        case .workMessages, .email: return .formal
+        case .workMessages: return .polite
+        case .email: return .formal
         }
     }
 
@@ -887,7 +896,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 800_000_000)
             guard let self else { return }
-            if !self.bootstrap.state.isReady {
+            if !self.bootstrap.isReady(for: self.selectedModelID) {
                 self.presentOnboardingWindow()
             }
         }
@@ -901,23 +910,12 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    private func rebuildBootstrapForCurrentModel() {
-        bootstrap.cancelPull()
-        let staleOnboarding = onboardingWindowController
-        onboardingWindowController = nil
-        staleOnboarding?.close()
-
-        bootstrap = OllamaBootstrap(
-            baseURL: ollamaBaseURL,
-            model: selectedModelID,
-            requiresOllamaAccount: OllamaModelOption.option(id: selectedModelID).isCloud
-        )
-        wireBootstrap()
-
+    private func onSelectedModelChanged() {
+        bootstrap.refresh()
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 800_000_000)
             guard let self else { return }
-            if !self.bootstrap.state.isReady {
+            if !self.bootstrap.isReady(for: self.selectedModelID) {
                 self.presentOnboardingWindow()
             }
         }
@@ -925,10 +923,12 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func handleBootstrapStateChange(_ state: BootstrapState) {
-        let previousModelReady = lastObservedModelReadyState
-        lastObservedModelReadyState = state.modelReady
-        if case .working = previousModelReady,
-           case .ok = state.modelReady,
+        let currentID = selectedModelID
+        let previous = lastObservedModelReadyState[currentID] ?? .unknown
+        let current = state.modelReady(for: currentID)
+        lastObservedModelReadyState[currentID] = current
+        if case .working = previous,
+           case .ok = current,
            onboardingWindowController == nil {
             postTranslatorReadyNotification()
         }
@@ -1069,6 +1069,15 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
         menu.addItem(makeSectionHeader("Shortcuts"))
         menu.addItem(makeMenuItem(
+            title: "Translate selected text...",
+            tag: .translateOrReplySelection,
+            symbolName: "text.viewfinder",
+            action: #selector(translateOrReplySelectionFromMenu),
+            keyEquivalent: shortcut(for: .translateOrReply).menuKeyEquivalent,
+            keyEquivalentModifierMask: shortcut(for: .translateOrReply).keyEquivalentModifierMask
+        ))
+
+        menu.addItem(makeMenuItem(
             title: "Rewrite my text...",
             tag: .translateSelection,
             symbolName: "text.insert",
@@ -1084,15 +1093,6 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             action: #selector(translateScreenshotAreaFromMenu),
             keyEquivalent: shortcut(for: .screenshotArea).menuKeyEquivalent,
             keyEquivalentModifierMask: shortcut(for: .screenshotArea).keyEquivalentModifierMask
-        ))
-
-        menu.addItem(makeMenuItem(
-            title: "Translate selected text...",
-            tag: .translateOrReplySelection,
-            symbolName: "text.viewfinder",
-            action: #selector(translateOrReplySelectionFromMenu),
-            keyEquivalent: shortcut(for: .translateOrReply).menuKeyEquivalent,
-            keyEquivalentModifierMask: shortcut(for: .translateOrReply).keyEquivalentModifierMask
         ))
 
         menu.addItem(makeMenuItem(
@@ -1652,25 +1652,39 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        let language = targetLanguage
-        let currentThinkingLevel = thinkingLevel
-        let currentCleanup = cleanupLevel
-        if translationCache.translation(for: selectedText, targetLanguage: language, thinkingLevel: currentThinkingLevel, cleanup: currentCleanup) == nil {
-            startPrefetchIfEligible(for: selectedText)
+        let primaryMode = floatingDefaultMode.translationMode
+        if primaryMode == .selection {
+            let language = targetLanguage
+            let currentThinkingLevel = thinkingLevel
+            let currentCleanup = cleanupLevel
+            if translationCache.translation(for: selectedText, targetLanguage: language, thinkingLevel: currentThinkingLevel, cleanup: currentCleanup) == nil {
+                startPrefetchIfEligible(for: selectedText)
+            } else {
+                cancelPrefetch()
+            }
         } else {
             cancelPrefetch()
         }
 
         if selectionDisplayMode == .pet {
             if petController == nil {
-                petController = PetController(initialMode: floatingDefaultMode.translationMode)
+                petController = PetController(initialMode: primaryMode)
             }
             petController?.show()
             petController?.showReady(
                 selectedText: selectedText,
-                initialMode: floatingDefaultMode.translationMode,
+                initialMode: primaryMode,
                 onTranslate: { [weak self] text in
                     self?.translate(
+                        text,
+                        near: screenPoint,
+                        selectionRect: selectionRect,
+                        panelSide: panelSide,
+                        keepPetReadyUntilPanelCloses: true
+                    )
+                },
+                onRewrite: { [weak self] text in
+                    self?.rewriteSelectedDraftText(
                         text,
                         near: screenPoint,
                         selectionRect: selectionRect,
@@ -1694,11 +1708,19 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         let controller = FloatingTranslateButtonController(
             screenPoint: screenPoint,
             selectedText: selectedText,
-            initialMode: floatingDefaultMode.translationMode,
+            initialMode: primaryMode,
             onTranslate: { [weak self] text in
                 self?.translateButtonController?.close()
                 self?.translateButtonController = nil
                 self?.translate(
+                    text,
+                    near: screenPoint,
+                    selectionRect: selectionRect,
+                    panelSide: panelSide
+                )
+            },
+            onRewrite: { [weak self] text in
+                self?.rewriteSelectedDraftText(
                     text,
                     near: screenPoint,
                     selectionRect: selectionRect,
@@ -1719,6 +1741,49 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
         translateButtonController = controller
         controller.show()
+    }
+
+    @MainActor
+    private func rewriteSelectedDraftText(
+        _ text: String,
+        near screenPoint: NSPoint,
+        selectionRect: NSRect? = nil,
+        panelSide: TranslationPanelController.Side = .right,
+        keepPetReadyUntilPanelCloses: Bool = false
+    ) {
+        cancelPrefetch()
+        lastReplacementSourcePID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+
+        let cleanedDraft = TextNormalizer.cleanedDraftMessage(text)
+        guard !cleanedDraft.isEmpty else {
+            translateButtonController?.close()
+            translateButtonController = nil
+            petController?.clearReady()
+            presentSelectionTranslationError("Select text first, then run Rewrite my text.")
+            return
+        }
+
+        let language = draftTargetLanguage
+        switch replacementMode {
+        case .instantInsert:
+            runInstantTranslation(cleanedDraft, language: language, near: screenPoint)
+        case .showPanel:
+            translateButtonController?.close()
+            translateButtonController = nil
+            translate(
+                cleanedDraft,
+                near: screenPoint,
+                targetLanguage: language,
+                mode: .draftMessage,
+                useCache: false,
+                usageKind: .draftMessage,
+                selectionRect: selectionRect,
+                panelSide: panelSide,
+                keepPetReadyUntilPanelCloses: keepPetReadyUntilPanelCloses
+            ) { [weak self] translation in
+                self?.replaceCurrentSelection(with: translation)
+            }
+        }
     }
 
     @MainActor
@@ -1755,6 +1820,11 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         keepPetReadyUntilPanelCloses: Bool = false,
         onReplace: ((String) -> Void)? = nil
     ) {
+        if let setupError = translationErrorIfBootstrapNeedsSetup() {
+            handleTranslationFailure(setupError)
+            return
+        }
+
         let language = explicitTargetLanguage ?? targetLanguage
         let currentThinkingLevel = thinkingLevel
         let (_, currentAppCategory) = AppCategoryClassifier.detectFrontmost()
@@ -1875,7 +1945,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         requestID: UUID
     ) {
         if let busyError = translationErrorIfBootstrapBusy() {
-            controller.showError(busyError.localizedDescription, requestID: requestID)
+            controller.showError(Self.translationPanelErrorMessage(for: busyError), requestID: requestID)
             return
         }
 
@@ -1907,8 +1977,12 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                     kind: usageKind,
                     targetLanguage: language
                 )
-            } onFailure: { message in
-                controller.showError(message, requestID: requestID)
+            } onFailure: { [weak self, weak controller] error in
+                guard let self, let controller else { return }
+                if self.handleTranslationFailure(error, controller: controller) {
+                    return
+                }
+                controller.showError(Self.translationPanelErrorMessage(for: error), requestID: requestID)
             }
             translationPrefetch.ensureStartedNow()
             return
@@ -1944,8 +2018,10 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 }
             } catch {
                 await MainActor.run {
-                    controller.showError(error.localizedDescription, requestID: requestID)
-                    self.handleTranslationFailure(error)
+                    if self.handleTranslationFailure(error, controller: controller) {
+                        return
+                    }
+                    controller.showError(Self.translationPanelErrorMessage(for: error), requestID: requestID)
                 }
             }
         }
@@ -1953,10 +2029,11 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     @discardableResult
-    private func handleTranslationFailure(_ error: Error) -> Bool {
+    private func handleTranslationFailure(_ error: Error, controller: TranslationPanelController? = nil) -> Bool {
         guard let translationError = error as? TranslationError else { return false }
         switch translationError {
         case .serverUnavailable, .modelMissing, .signInRequired:
+            controller?.close()
             bootstrap.refresh()
             presentOnboardingWindow()
             return true
@@ -1965,10 +2042,49 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    private static func translationPanelErrorMessage(for error: Error) -> String {
+        guard let translationError = error as? TranslationError else {
+            return "Could not translate this.\n\(error.localizedDescription)"
+        }
+
+        switch translationError {
+        case .ollama(let message):
+            return "Could not translate this.\n\(message)"
+        case .emptyResponse:
+            return "No translation came back. Try again."
+        case .modelDownloading(let detail):
+            return "Translator is still downloading.\n\(detail)"
+        case .serverUnavailable:
+            return "Ollama is not running."
+        case .modelMissing:
+            return "Translator is not downloaded yet."
+        case .signInRequired:
+            return "Sign in to Ollama to use the online translator."
+        }
+    }
+
     @MainActor
     private func translationErrorIfBootstrapBusy() -> TranslationError? {
-        if case .working(let detail) = bootstrap.state.modelReady {
+        if case .working(let detail) = bootstrap.state.modelReady(for: selectedModelID) {
             return .modelDownloading(detail)
+        }
+        return nil
+    }
+
+    @MainActor
+    private func translationErrorIfBootstrapNeedsSetup() -> TranslationError? {
+        if case .needsAction = bootstrap.state.ollamaInstalled {
+            return .serverUnavailable
+        }
+        if case .needsAction = bootstrap.state.serverRunning {
+            return .serverUnavailable
+        }
+        if case .needsAction = bootstrap.state.ollamaSignedIn,
+           OllamaModelOption.option(id: selectedModelID).isCloud {
+            return .signInRequired
+        }
+        if case .needsAction = bootstrap.state.modelReady(for: selectedModelID) {
+            return .modelMissing(selectedModelID)
         }
         return nil
     }
@@ -1983,7 +2099,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
         // Don't burn API calls while the translator isn't ready — the request
         // would only surface a 404/connection error inside the prefetch.
-        guard bootstrap.state.isReady else {
+        guard bootstrap.isReady(for: selectedModelID) else {
             return
         }
 
@@ -2100,7 +2216,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         menu.item(withTag: MenuItemTag.accessibilitySettings.rawValue)?.isHidden = trusted
         menu.item(withTag: MenuItemTag.permissionSeparator.rawValue)?.isHidden = trusted
 
-        let bootstrapReady = bootstrap.state.isReady
+        let bootstrapReady = bootstrap.isReady(for: selectedModelID)
         menu.item(withTag: MenuItemTag.bootstrapNotice.rawValue)?.isHidden = bootstrapReady
         menu.item(withTag: MenuItemTag.bootstrapAction.rawValue)?.title = bootstrapReady
             ? "Setup..."
@@ -2301,7 +2417,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         petController?.clearReady()
         cancelPrefetch()
 
-        let mode = floatingDefaultMode.translationMode
+        let mode = floatingDefaultMode
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             guard let self else { return }
@@ -2316,24 +2432,28 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                     return
                 }
 
-                let cleaned = TextNormalizer.cleanedSelection(selection.text)
-                guard !cleaned.isEmpty else {
-                    self.presentSelectionTranslationError("Select text first, then press \(shortcutDisplay).")
-                    return
-                }
-
                 let mouseLocation = NSEvent.mouseLocation
                 let panelSide = self.panelSideForSelectionEnding(at: mouseLocation)
 
                 switch mode {
                 case .smartReply:
+                    let cleaned = TextNormalizer.cleanedSelection(selection.text)
+                    guard !cleaned.isEmpty else {
+                        self.presentSelectionTranslationError("Select text first, then press \(shortcutDisplay).")
+                        return
+                    }
                     self.replyToSelection(
                         cleaned,
                         near: mouseLocation,
                         selectionRect: selection.selectionRect,
                         panelSide: panelSide
                     )
-                case .selection, .draftMessage:
+                case .translate:
+                    let cleaned = TextNormalizer.cleanedSelection(selection.text)
+                    guard !cleaned.isEmpty else {
+                        self.presentSelectionTranslationError("Select text first, then press \(shortcutDisplay).")
+                        return
+                    }
                     self.translate(
                         cleaned,
                         near: mouseLocation,
@@ -2356,7 +2476,6 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         }
 
         cancelPrefetch()
-        lastReplacementSourcePID = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             guard let self else { return }
@@ -2381,34 +2500,25 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                     return
                 }
 
-                let language = self.draftTargetLanguage
                 let mouseLocation = NSEvent.mouseLocation
-                switch self.replacementMode {
-                case .instantInsert:
-                    self.runInstantTranslation(cleanedDraft, language: language, near: mouseLocation)
-                case .showPanel:
-                    self.translateButtonController?.close()
-                    self.translateButtonController = nil
-                    self.translate(
-                        cleanedDraft,
-                        near: mouseLocation,
-                        targetLanguage: language,
-                        mode: .draftMessage,
-                        useCache: false,
-                        usageKind: .draftMessage,
-                        selectionRect: selection.selectionRect,
-                        panelSide: self.panelSideForSelectionEnding(at: mouseLocation),
-                        keepPetReadyUntilPanelCloses: true
-                    ) { [weak self] translation in
-                        self?.replaceCurrentSelection(with: translation)
-                    }
-                }
+                self.rewriteSelectedDraftText(
+                    cleanedDraft,
+                    near: mouseLocation,
+                    selectionRect: selection.selectionRect,
+                    panelSide: self.panelSideForSelectionEnding(at: mouseLocation),
+                    keepPetReadyUntilPanelCloses: true
+                )
             }
         }
     }
 
     @MainActor
     private func runInstantTranslation(_ text: String, language: TranslationLanguage, near screenPoint: NSPoint) {
+        if let setupError = translationErrorIfBootstrapNeedsSetup() {
+            handleTranslationFailure(setupError)
+            return
+        }
+
         if let busyError = translationErrorIfBootstrapBusy() {
             presentSelectionTranslationError(
                 busyError.localizedDescription,
@@ -2487,6 +2597,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                     selectedText: "",
                     initialMode: .selection,
                     onTranslate: { _ in },
+                    onRewrite: { _ in },
                     onSmartReply: { _ in }
                 )
                 bar.show()
@@ -2579,12 +2690,21 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                     let panelSide = self.panelSideForScreenshotEnding(at: mouseLocation)
                     self.resetScreenshotDragTracking()
                     let mode = self.floatingDefaultMode.translationMode
+                    let language = self.targetLanguage
+                    let usageKind: UsageStatsEventKind
+                    switch mode {
+                    case .smartReply:
+                        usageKind = .smartReply
+                    case .selection, .draftMessage:
+                        usageKind = .screenArea
+                    }
                     self.translate(
                         sourceText,
                         near: mouseLocation,
+                        targetLanguage: language,
                         mode: mode,
-                        useCache: mode != .smartReply,
-                        usageKind: mode == .smartReply ? .smartReply : .screenArea,
+                        useCache: mode == .selection,
+                        usageKind: usageKind,
                         panelSide: panelSide,
                         keepPetReadyUntilPanelCloses: true
                     )
@@ -2723,7 +2843,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         selectedModelID = option.id
         cancelPrefetch()
         translationCache = TranslationCache()
-        rebuildBootstrapForCurrentModel()
+        onSelectedModelChanged()
         updateMenuState()
     }
 
@@ -2850,7 +2970,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         setupGlobalHotKeys()
 
         if selectedModelID != previousModelID {
-            rebuildBootstrapForCurrentModel()
+            onSelectedModelChanged()
         }
 
         updateMenuState()
@@ -3769,8 +3889,8 @@ enum ImageTextRecognizer {
                         return RecognizedLine(text: text, boundingBox: observation.boundingBox)
                     }
 
+                    let rowTolerance: CGFloat = 0.025
                     let orderedLines = lines.sorted { lhs, rhs in
-                        let rowTolerance: CGFloat = 0.025
                         let lhsMidY = lhs.boundingBox.midY
                         let rhsMidY = rhs.boundingBox.midY
 
@@ -3781,10 +3901,11 @@ enum ImageTextRecognizer {
                         return lhsMidY > rhsMidY
                     }
 
-                    let recognizedText = orderedLines
-                        .map(\.text)
-                        .joined(separator: "\n")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let recognizedText = Self.joinedTextPreservingParagraphs(
+                        from: orderedLines,
+                        rowTolerance: rowTolerance
+                    )
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
 
                     guard !recognizedText.isEmpty else {
                         continuation.resume(throwing: ScreenshotTranslationError.noTextRecognized)
@@ -3797,6 +3918,41 @@ enum ImageTextRecognizer {
                 }
             }
         }
+    }
+
+    /// Joins OCR lines using their geometry. Same-row lines join with a space.
+    /// Stacked lines use `\n` for ordinary line wraps and `\n\n` when the
+    /// vertical gap between them is meaningfully larger than the median line
+    /// height — that gap corresponds to a deliberate paragraph break in the
+    /// source. Without this signal the downstream LLM cannot distinguish a
+    /// word-wrap from a paragraph boundary and collapses everything into one
+    /// block.
+    private static func joinedTextPreservingParagraphs(
+        from lines: [RecognizedLine],
+        rowTolerance: CGFloat
+    ) -> String {
+        guard let first = lines.first else { return "" }
+        guard lines.count > 1 else { return first.text }
+
+        let heights = lines.map(\.boundingBox.height).sorted()
+        let medianHeight = heights[heights.count / 2]
+        let paragraphGapThreshold = max(medianHeight * 0.65, 0.005)
+
+        var result = first.text
+        for index in 1..<lines.count {
+            let previous = lines[index - 1]
+            let current = lines[index]
+            let sameRow = abs(previous.boundingBox.midY - current.boundingBox.midY) <= rowTolerance
+            if sameRow {
+                result += " " + current.text
+                continue
+            }
+
+            let gap = previous.boundingBox.minY - current.boundingBox.maxY
+            let separator = gap > paragraphGapThreshold ? "\n\n" : "\n"
+            result += separator + current.text
+        }
+        return result
     }
 }
 
@@ -4062,6 +4218,7 @@ final class PetController {
     private var tabInterceptor: TabKeyInterceptor?
     private var selectedText: String?
     private var onTranslate: ((String) -> Void)?
+    private var onRewrite: ((String) -> Void)?
     private var onSmartReply: ((String) -> Void)?
     private var currentMode: TranslationMode
     private var isReadyLockedUntilPanelCloses = false
@@ -4134,6 +4291,9 @@ final class PetController {
         petView.onClick = { [weak self] in
             self?.invokeCurrentMode()
         }
+        petView.onRightClick = { [weak self] in
+            self?.invokeRewriteMode()
+        }
 
         refreshAppIcon()
         subscribeToFrontmostAppChanges()
@@ -4194,10 +4354,12 @@ final class PetController {
         selectedText: String,
         initialMode: TranslationMode,
         onTranslate: @escaping (String) -> Void,
+        onRewrite: @escaping (String) -> Void,
         onSmartReply: @escaping (String) -> Void
     ) {
         self.selectedText = selectedText
         self.onTranslate = onTranslate
+        self.onRewrite = onRewrite
         self.onSmartReply = onSmartReply
         currentMode = initialMode
         isReadyLockedUntilPanelCloses = false
@@ -4214,6 +4376,7 @@ final class PetController {
         }
         selectedText = nil
         onTranslate = nil
+        onRewrite = nil
         onSmartReply = nil
         isReadyLockedUntilPanelCloses = true
         panel.ignoresMouseEvents = true
@@ -4226,6 +4389,7 @@ final class PetController {
     func clearReady() {
         selectedText = nil
         onTranslate = nil
+        onRewrite = nil
         onSmartReply = nil
         isReadyLockedUntilPanelCloses = false
         panel.ignoresMouseEvents = true
@@ -4239,6 +4403,7 @@ final class PetController {
         isThinking = true
         selectedText = nil
         onTranslate = nil
+        onRewrite = nil
         onSmartReply = nil
         isReadyLockedUntilPanelCloses = false
         panel.ignoresMouseEvents = true
@@ -4333,11 +4498,22 @@ final class PetController {
         guard let selectedText, !isReadyLockedUntilPanelCloses else { return }
 
         switch currentMode {
-        case .selection, .draftMessage:
+        case .selection:
             onTranslate?(selectedText)
+        case .draftMessage:
+            onRewrite?(selectedText)
         case .smartReply:
             onSmartReply?(selectedText)
         }
+    }
+
+    private func invokeRewriteMode() {
+        guard let selectedText,
+              !isReadyLockedUntilPanelCloses,
+              currentMode == .selection
+        else { return }
+
+        onRewrite?(selectedText)
     }
 
     private static func originNearCursor(for cursor: NSPoint, size: NSSize, offset: NSPoint) -> NSPoint {
@@ -4384,6 +4560,7 @@ final class PetMascotView: NSView {
     }
 
     var onClick: (() -> Void)?
+    var onRightClick: (() -> Void)?
 
     private var state: State = .idle
     private var mode: TranslationMode = .selection
@@ -4406,6 +4583,11 @@ final class PetMascotView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard state == .ready else { return }
         onClick?()
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        guard state == .ready else { return }
+        onRightClick?()
     }
 
     func apply(state: State, mode: TranslationMode) {
@@ -4623,8 +4805,10 @@ final class PetMascotView: NSView {
 
     private func drawPixelActionBadge() {
         switch mode {
-        case .selection, .draftMessage:
+        case .selection:
             drawTranslateBadge()
+        case .draftMessage:
+            drawRewriteBadge()
         case .smartReply:
             drawReplyBadge()
         }
@@ -4668,6 +4852,31 @@ final class PetMascotView: NSView {
 
         drawBadgeText("A", color: .white, fontSize: 8.5, in: NSRect(x: inner.minX - 0.5, y: inner.minY + 0.5, width: leftRect.width, height: inner.height))
         drawBadgeText("文", color: NSColor(srgbRed: 0.19, green: 0.34, blue: 0.39, alpha: 1.0), fontSize: 8, in: NSRect(x: rightRect.minX - 0.5, y: rightRect.minY + 0.5, width: rightRect.width + 1, height: rightRect.height))
+    }
+
+    private func drawRewriteBadge() {
+        let frame = NSRect(origin: badgeOrigin(width: 18, height: 15), size: NSSize(width: 18, height: 15))
+
+        let context = NSGraphicsContext.current
+        let previousAntialiasing = context?.shouldAntialias
+        context?.shouldAntialias = true
+        defer {
+            if let previousAntialiasing {
+                context?.shouldAntialias = previousAntialiasing
+            }
+        }
+
+        NSColor(calibratedWhite: 0.0, alpha: 0.25).setFill()
+        NSBezierPath(roundedRect: NSRect(x: frame.minX + 2, y: frame.minY - 1, width: 14, height: 3), xRadius: 1.5, yRadius: 1.5).fill()
+
+        let outline = NSBezierPath(roundedRect: frame, xRadius: 3, yRadius: 3)
+        NSColor(srgbRed: 0.42, green: 0.46, blue: 0.47, alpha: 1.0).setFill()
+        outline.fill()
+
+        let inner = frame.insetBy(dx: 1.7, dy: 1.7)
+        NSColor(srgbRed: 0.98, green: 0.98, blue: 0.96, alpha: 1.0).setFill()
+        NSBezierPath(roundedRect: inner, xRadius: 2, yRadius: 2).fill()
+        drawBadgeText("✎", color: NSColor(srgbRed: 0.14, green: 0.18, blue: 0.20, alpha: 1.0), fontSize: 10.5, in: NSRect(x: inner.minX, y: inner.minY + 0.5, width: inner.width, height: inner.height))
     }
 
     private func drawReplyBadge() {
@@ -4792,10 +5001,12 @@ final class PetMascotView: NSView {
             return "Nugumi pet"
         case .ready:
             switch mode {
-            case .selection, .draftMessage:
-                return "Translate selection - Tab to switch to Reply"
+            case .selection:
+                return "Translate selection - right-click to Rewrite, Tab to switch to Reply"
+            case .draftMessage:
+                return "Rewrite my text - Tab to switch to Reply"
             case .smartReply:
-                return "Generate reply - Tab to switch to Translate"
+                return "Generate reply - Tab to switch back"
             }
         case .thinking:
             return "Thinking…"
@@ -4808,6 +5019,7 @@ final class FloatingTranslateButtonController {
     private let panel: NSPanel
     private let selectedText: String
     private let onTranslate: (String) -> Void
+    private let onRewrite: (String) -> Void
     private let onSmartReply: (String) -> Void
     private let buttonView: FloatingTranslateButtonView
     private var currentMode: TranslationMode
@@ -4818,10 +5030,12 @@ final class FloatingTranslateButtonController {
         selectedText: String,
         initialMode: TranslationMode,
         onTranslate: @escaping (String) -> Void,
+        onRewrite: @escaping (String) -> Void,
         onSmartReply: @escaping (String) -> Void
     ) {
         self.selectedText = selectedText
         self.onTranslate = onTranslate
+        self.onRewrite = onRewrite
         self.onSmartReply = onSmartReply
         self.currentMode = initialMode
 
@@ -4857,6 +5071,9 @@ final class FloatingTranslateButtonController {
             guard let self else { return }
             self.invokeCurrentMode()
         }
+        buttonView.onRightClick = { [weak self] in
+            self?.invokeRewriteMode()
+        }
     }
 
     func show() {
@@ -4888,19 +5105,39 @@ final class FloatingTranslateButtonController {
 
     private func invokeCurrentMode() {
         switch currentMode {
-        case .selection, .draftMessage:
+        case .selection:
             onTranslate(selectedText)
+        case .draftMessage:
+            onRewrite(selectedText)
         case .smartReply:
             onSmartReply(selectedText)
         }
+    }
+
+    private func invokeRewriteMode() {
+        guard currentMode == .selection else { return }
+        onRewrite(selectedText)
+    }
+}
+
+private final class RightClickableButton: NSButton {
+    var onRightClick: (() -> Void)?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        onRightClick?()
     }
 }
 
 @MainActor
 final class FloatingTranslateButtonView: NSView {
     var onClick: (() -> Void)?
+    var onRightClick: (() -> Void)?
 
-    private let actionButton = NSButton()
+    private let actionButton = RightClickableButton()
     private let progressIndicator = NSProgressIndicator()
     private var currentMode: TranslationMode
     private var isLoading = false
@@ -4941,6 +5178,9 @@ final class FloatingTranslateButtonView: NSView {
 
         actionButton.target = self
         actionButton.action = #selector(buttonTapped)
+        actionButton.onRightClick = { [weak self] in
+            self?.onRightClick?()
+        }
         actionButton.frame = bounds
         actionButton.autoresizingMask = [.width, .height]
         actionButton.isBordered = false
@@ -4989,11 +5229,24 @@ final class FloatingTranslateButtonView: NSView {
 
     private func applyModeVisuals() {
         switch currentMode {
-        case .selection, .draftMessage:
+        case .selection:
             actionButton.image = nil
             actionButton.title = "あ"
             actionButton.imagePosition = .noImage
-            actionButton.toolTip = "Translate selection — Tab to switch to Reply"
+            actionButton.toolTip = "Translate selection — right-click to Rewrite, Tab to switch to Reply"
+        case .draftMessage:
+            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+            if let image = NSImage(systemSymbolName: "text.insert", accessibilityDescription: "Rewrite my text")
+                ?? NSImage(systemSymbolName: "pencil.line", accessibilityDescription: "Rewrite my text") {
+                actionButton.image = image.withSymbolConfiguration(config)
+                actionButton.title = ""
+                actionButton.imagePosition = .imageOnly
+            } else {
+                actionButton.image = nil
+                actionButton.title = "✎"
+                actionButton.imagePosition = .noImage
+            }
+            actionButton.toolTip = "Rewrite my text — Tab to switch to Reply"
         case .smartReply:
             let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
             actionButton.image = NSImage(
@@ -5002,7 +5255,7 @@ final class FloatingTranslateButtonView: NSView {
             )?.withSymbolConfiguration(config)
             actionButton.title = ""
             actionButton.imagePosition = .imageOnly
-            actionButton.toolTip = "Generate reply — Tab to switch to Translate"
+            actionButton.toolTip = "Generate reply — Tab to switch back"
         }
     }
 
@@ -5129,7 +5382,7 @@ final class TranslationPanelController {
             return
         }
 
-        contentView.setResult("Error: \(message)")
+        contentView.setError(message)
         resizeToFitContent(animated: true)
     }
 
@@ -5706,6 +5959,20 @@ final class SourcePreviewView: NSView {
 }
 
 final class TranslationContentView: NSView {
+    private enum ResultTone {
+        case normal
+        case error
+
+        var color: NSColor {
+            switch self {
+            case .normal:
+                return NSColor(calibratedRed: 0.12, green: 0.58, blue: 1.0, alpha: 1.0)
+            case .error:
+                return NSColor(calibratedRed: 1.0, green: 0.48, blue: 0.30, alpha: 0.96)
+            }
+        }
+    }
+
     static let bodyWidth: CGFloat = 400
     static let preferredWidth: CGFloat = bodyWidth
     private static let minHeight: CGFloat = 168
@@ -5739,6 +6006,7 @@ final class TranslationContentView: NSView {
     private let resultLabel: String?
     private var resultText = "Translating..."
     private var resultDisplayText = "Translating..."
+    private var resultTone: ResultTone = .normal
     private let resultTextView = NSTextView()
     private let sourceTitleLabel = NSTextField(labelWithString: "")
     private let sourcePreviewView = SourcePreviewView(frame: .zero)
@@ -5948,7 +6216,7 @@ final class TranslationContentView: NSView {
         let fullRange = NSRange(location: 0, length: rendered.length)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
-        paragraph.paragraphSpacing = 0
+        paragraph.paragraphSpacing = font.pointSize * 0.35
         rendered.addAttributes([
             .font: font,
             .foregroundColor: color,
@@ -6085,7 +6353,7 @@ final class TranslationContentView: NSView {
             resultTextView,
             text: resultText,
             font: NSFont.systemFont(ofSize: Self.resultFontSize, weight: .semibold),
-            color: NSColor(calibratedRed: 0.12, green: 0.58, blue: 1.0, alpha: 1.0)
+            color: ResultTone.normal.color
         )
         resultScrollView.documentView = resultTextView
         content.addSubview(resultScrollView)
@@ -6295,23 +6563,33 @@ final class TranslationContentView: NSView {
     }
 
     func setResult(_ text: String) {
+        setResult(text, tone: .normal)
+    }
+
+    func setError(_ text: String) {
+        setResult(text, tone: .error)
+    }
+
+    private func setResult(_ text: String, tone: ResultTone) {
         if !isInternalLoadingUpdate {
             stopLoadingAnimation()
         }
         let cleanedText = TextNormalizer.cleanedTranslation(text)
 
-        if cleanedText == resultText {
+        if cleanedText == resultText, tone == resultTone {
             return
         }
 
-        if !cleanedText.hasPrefix(resultText) {
+        if !cleanedText.hasPrefix(resultText) || tone != resultTone {
             shouldScrollResultToTop = true
         }
 
+        resultTone = tone
+        resultTextView.textColor = tone.color
         let renderedText = Self.renderedMarkdownText(
             cleanedText,
             font: resultTextView.font ?? NSFont.systemFont(ofSize: Self.resultFontSize, weight: .regular),
-            color: resultTextView.textColor ?? NSColor.white
+            color: tone.color
         )
         if let textStorage = resultTextView.textStorage {
             textStorage.setAttributedString(renderedText)
@@ -6321,7 +6599,7 @@ final class TranslationContentView: NSView {
 
         resultText = cleanedText
         resultDisplayText = resultTextView.string
-        updateReplaceButtonState()
+        updateActionButtonStates()
         layoutForCurrentSize()
     }
 
@@ -6421,6 +6699,7 @@ final class TranslationContentView: NSView {
 
     @objc private func copyResult() {
         copyResultToPasteboard()
+        onClose?()
     }
 
     func copyResultToPasteboard() {
@@ -6432,7 +6711,7 @@ final class TranslationContentView: NSView {
         let replacement = TextNormalizer.cleanedTranslation(resultTextView.string)
         guard !replacement.isEmpty,
               !isShowingLoadingState,
-              !replacement.hasPrefix("Error:")
+              resultTone != .error
         else {
             return
         }
@@ -6444,21 +6723,29 @@ final class TranslationContentView: NSView {
         onClose?()
     }
 
-    private func updateReplaceButtonState() {
+    private func updateActionButtonStates() {
+        let result = TextNormalizer.cleanedTranslation(resultTextView.string)
+        let canUseResult = !result.isEmpty
+            && !isShowingLoadingState
+            && resultTone != .error
+
+        copyButton?.isEnabled = canUseResult
+        copyButton?.contentTintColor = NSColor(
+            calibratedRed: 0.12,
+            green: 0.58,
+            blue: 1.0,
+            alpha: canUseResult ? 0.90 : 0.32
+        )
+
         guard let replaceButton else {
             return
         }
-
-        let replacement = TextNormalizer.cleanedTranslation(resultTextView.string)
-        let canReplace = !replacement.isEmpty
-            && !isShowingLoadingState
-            && !replacement.hasPrefix("Error:")
-        replaceButton.isEnabled = canReplace
+        replaceButton.isEnabled = canUseResult
         replaceButton.contentTintColor = NSColor(
             calibratedRed: 0.12,
             green: 0.58,
             blue: 1.0,
-            alpha: canReplace ? 0.86 : 0.38
+            alpha: canUseResult ? 0.86 : 0.38
         )
     }
 
@@ -6485,7 +6772,9 @@ enum TranslationMode {
         switch self {
         case .smartReply:
             return "Thinking"
-        case .selection, .draftMessage:
+        case .draftMessage:
+            return "Rewriting"
+        case .selection:
             return "Translating"
         }
     }
@@ -6500,7 +6789,9 @@ enum TranslationMode {
         switch self {
         case .selection:
             """
-            Translate the user's text into natural \(targetLanguage.promptName) by preserving the intended meaning, not by translating word-for-word. Silently clean accidental line breaks, repeated spaces, OCR artifacts, and hyphenated line wraps. Preserve proper names, dates, numbers, URLs, concrete facts, and paragraph/bullet/list structure. If the source is long or dense, split the translation into readable paragraphs instead of returning one wall of text.
+            Translate the user's text into natural \(targetLanguage.promptName) by preserving the intended meaning, not by translating word-for-word. Treat a single `\\n` as a wrapped line inside one paragraph — join it silently. Treat a blank line (`\\n\\n`) as a deliberate paragraph break that the user wants to keep — render it as a blank line in the output. Clean repeated spaces, OCR artifacts, and hyphenated line wraps. Preserve proper names, dates, numbers, URLs, concrete facts, and paragraph/bullet/list structure. If the source has no paragraph breaks but is long or dense, split the translation into readable paragraphs instead of returning one wall of text.
+
+            Same-language mode — if the entire source text is already in \(targetLanguage.promptName), do not translate and do not echo it back unchanged. Instead, rewrite it for a curious ~12-year-old reader with no background in the field — accessible, but not babyish or condescending. Break long sentences into shorter ones, replace jargon and rare or technical vocabulary with plain everyday words, unwind passive voice and nested clauses, and prefer concrete wording over abstract phrasing. Where a concept stays abstract after a plain-word swap, anchor it inline with a short concrete example or everyday analogy in parentheses or em-dashes — e.g. "a queue (like the line at a coffee shop — first in, first served)". Keep every fact, name, date, number, quotation, URL, and the original paragraph/bullet/list structure exactly. Do not summarize, do not drop content, do not add new claims, opinions, or facts — examples and analogies must only illustrate what is already there, never extend it. If your rewrite differs from the source only by swapping a few synonyms (e.g. "specialized" → "special", "utilize" → "use") or replacing punctuation, you have not simplified — go further: add an illustrative example, restructure the sentence, or name the topic in plainer terms. If only part of the source is in \(targetLanguage.promptName) and the rest is in another language, translate the foreign parts and lightly simplify the rest.
 
             Context — the source text is from \(appCategory.promptHint)
 
@@ -6510,9 +6801,9 @@ enum TranslationMode {
             """
         case .draftMessage:
             """
-            Rewrite the user's drafted outgoing message as a natural message in \(targetLanguage.promptName). Do not translate mechanically. Infer the user's actual intent, emotion, and social situation, then say it the way a native \(targetLanguage.promptName) speaker would send it in a chat or message.
+            Translate the user's drafted outgoing message into natural \(targetLanguage.promptName). Infer the user's actual intent, emotion, and social situation, then say it the way a native \(targetLanguage.promptName) speaker would send it in a chat or message. If the draft is already entirely in \(targetLanguage.promptName), do not translate it; lightly rewrite/polish it only when needed so it sounds natural and sendable.
 
-            When goals conflict, follow this priority: (1) meaning, (2) the user's tone and intended directness/formality, (3) cultural naturalness — idioms, honorifics, word order, (4) surface details to preserve verbatim — emojis, URLs, usernames, product names, numbers, line breaks, (5) literal wording (always lowest). If the draft is blunt, the rewrite stays blunt — do not pad a curt one-liner into a polite paragraph just because the target language usually expects polite framing. If the draft is awkward or phrased like a direct translation, smooth it while keeping the same intent. If the draft is a fragment, return a natural sendable fragment without inventing extra context. If the draft is already in \(targetLanguage.promptName), lightly polish it only when needed.
+            The selected Writing style is authoritative. The source draft tells you meaning, intent, emotion, and how direct the user wants to be, but it must not override the selected Writing style. When goals conflict, follow this priority: (1) meaning, (2) selected Writing style, (3) intended directness and emotional signal within that style, (4) cultural naturalness — idioms, honorifics, word order, (5) surface details to preserve verbatim — emojis, URLs, usernames, product names, numbers, line breaks, (6) literal wording (always lowest). If the draft is blunt, keep the result concise and direct, but still use the selected Writing style. Do not pad a curt one-liner into a long paragraph unless the meaning requires it. If the draft is awkward or phrased like a direct translation, smooth it while keeping the same intent. If the draft is a fragment, return a natural sendable fragment without inventing extra context.
 
             Context — the user is composing this message in \(appCategory.promptHint)
 
@@ -6596,7 +6887,7 @@ enum AppCategory: String, CaseIterable, Codable {
     var promptHint: String {
         switch self {
         case .personalMessages:
-            return "a personal messaging app — chats with friends, family, partner. Informal medium where short, lowercased fragments are normal."
+            return "a personal messaging app — chats with friends, family, partner, or close contacts. Short fragments are common, but the writing style setting decides the register."
         case .workMessages:
             return "a workplace messaging app — Slack, Teams, LinkedIn. Colleagues and clients. Conversational but professional; complete thoughts but not stiff."
         case .email:
@@ -6609,25 +6900,25 @@ enum AppCategory: String, CaseIterable, Codable {
 
 enum WritingStyle: String, CaseIterable, Codable {
     case formal
+    case polite
     case casual
-    case excited
 
     var displayName: String {
         switch self {
         case .formal: return "Formal"
+        case .polite: return "Polite"
         case .casual: return "Casual"
-        case .excited: return "Excited"
         }
     }
 
     var promptDescription: String {
         switch self {
         case .formal:
-            return "full capitalization, complete punctuation, complete sentences. Polite, no exclamation marks unless the source had them."
+            return "highest formal register — the way you'd write to a senior client, superior, or in a business letter. In English: full sentences, no contractions, deferential tone. In Korean: use 합쇼체 (-습니다 / -십시오), never 해요체 and never 반말. In Japanese: use です/ます with deferential phrasing. In Russian: use Вы with full formal constructions. No exclamation marks unless the source had them. This register overrides any informality implied by the app context."
+        case .polite:
+            return "polite, friendly register — the way you'd write to a colleague, acquaintance, or in a warm but professional message. In English: complete sentences, contractions OK, warm but professional. In Korean: use 해요체 (-아요 / -어요 / -해요), not 합쇼체 and not 반말. In Japanese: use です/ます in their everyday softer form. In Russian: use Вы with conversational warmth. This register overrides any informality implied by the app context."
         case .casual:
-            return "natural casual capitalization (still capitalize names and sentence starts). Lighter punctuation — periods optional at the ends of short messages. Conversational rhythm."
-        case .excited:
-            return "energetic and enthusiastic. More exclamation marks where the source signal warrants them. Capitalization and punctuation otherwise normal."
+            return "casual register — the way you'd write to a close friend. In English: natural casual capitalization (still capitalize names and sentence starts). In Korean: use 반말 (-해, -야, -지), never 해요체 and never 합쇼체. In Japanese: use plain form (だ/する). In Russian: use ты-forms. Lighter punctuation — periods optional at the ends of short messages. Conversational rhythm."
         }
     }
 }
@@ -6677,6 +6968,7 @@ enum AppCategoryClassifier {
         "org.telegram.desktop": .personalMessages,
         "net.whatsapp.WhatsApp": .personalMessages,
         "com.kakao.KakaoTalk": .personalMessages,
+        "com.kakao.KakaoTalkMac": .personalMessages,
         "com.hnc.Discord": .personalMessages,
     ]
 
@@ -6862,7 +7154,7 @@ enum TranslationError: LocalizedError {
         case .modelMissing:
             "The translator isn't downloaded yet. Open setup to download it."
         case .signInRequired:
-            "Online mode needs sign-in. Open setup to finish."
+            "Sign in to Ollama to use the online translator. Open setup to finish."
         case .modelDownloading(let detail):
             "\(detail) Try again when the translator is ready."
         }
