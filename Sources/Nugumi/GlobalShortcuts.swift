@@ -3,15 +3,15 @@ import Carbon.HIToolbox
 import Foundation
 
 enum GlobalShortcutAction: String, CaseIterable {
+    case translateOrReply
     case translateSelection
     case screenshotArea
-    case translateOrReply
 
     var id: UInt32 {
         switch self {
-        case .screenshotArea: return 1
+        case .translateOrReply: return 1
         case .translateSelection: return 2
-        case .translateOrReply: return 3
+        case .screenshotArea: return 3
         }
     }
 
@@ -21,9 +21,9 @@ enum GlobalShortcutAction: String, CaseIterable {
 
     var menuTitle: String {
         switch self {
+        case .translateOrReply: return "Translate selected text"
         case .translateSelection: return "Rewrite my text"
         case .screenshotArea: return "Translate screen area"
-        case .translateOrReply: return "Translate selected text"
         }
     }
 
@@ -33,21 +33,21 @@ enum GlobalShortcutAction: String, CaseIterable {
 
     var defaultShortcut: GlobalShortcut {
         switch self {
-        case .translateSelection:
+        case .translateOrReply:
             return GlobalShortcut(
                 keyCode: UInt32(kVK_ANSI_1),
                 modifiers: [.control],
                 keyEquivalent: "1",
                 keyDisplay: "1"
             )
-        case .screenshotArea:
+        case .translateSelection:
             return GlobalShortcut(
                 keyCode: UInt32(kVK_ANSI_2),
                 modifiers: [.control],
                 keyEquivalent: "2",
                 keyDisplay: "2"
             )
-        case .translateOrReply:
+        case .screenshotArea:
             return GlobalShortcut(
                 keyCode: UInt32(kVK_ANSI_3),
                 modifiers: [.control],
