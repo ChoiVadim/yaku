@@ -426,8 +426,12 @@ private struct UsageStatsMenuSummaryView: View {
 
     private var snapshot: UsageStatsSnapshot { store.snapshot }
     private var todayWords: Int {
+        // Mirror the filter used for the lifetime total — exclude
+        // `.replacement` events so the same translation isn't counted twice
+        // (once as the originating use, once as the follow-up replacement).
         snapshot.events
             .filter { Calendar.current.isDateInToday($0.date) }
+            .filter { UsageStatsEventKind.useKinds.contains($0.kind) }
             .reduce(0) { $0 + max($1.sourceWordCount, $1.resultWordCount) }
     }
     private var workflowItems: [UsageStatsModeBreakdown] {
