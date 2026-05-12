@@ -478,6 +478,12 @@ private enum TextNormalizer {
     }
 }
 
+struct CompositionSettings: Equatable {
+    let style: WritingStyle
+    let cleanup: CleanupLevel
+    let snippets: [Snippet]
+}
+
 @MainActor
 private final class TranslationPrefetch {
     private enum State {
@@ -492,8 +498,6 @@ private final class TranslationPrefetch {
     let targetLanguage: TranslationLanguage
     let thinkingLevel: ThinkingLevel
     let appCategory: AppCategory
-    let cleanup: CleanupLevel
-    let snippets: [Snippet]
     private let ollamaClient: OllamaClient
     private var task: Task<Void, Never>?
     private var state: State = .pending
@@ -508,8 +512,6 @@ private final class TranslationPrefetch {
         targetLanguage: TranslationLanguage,
         thinkingLevel: ThinkingLevel,
         appCategory: AppCategory,
-        cleanup: CleanupLevel,
-        snippets: [Snippet],
         ollamaClient: OllamaClient,
         onComplete: @escaping (String, TranslationLanguage, ThinkingLevel, String) -> Void
     ) {
@@ -517,8 +519,6 @@ private final class TranslationPrefetch {
         self.targetLanguage = targetLanguage
         self.thinkingLevel = thinkingLevel
         self.appCategory = appCategory
-        self.cleanup = cleanup
-        self.snippets = snippets
         self.ollamaClient = ollamaClient
         self.onComplete = onComplete
     }
@@ -588,9 +588,6 @@ private final class TranslationPrefetch {
                 text,
                 to: targetLanguage,
                 appCategory: appCategory,
-                style: .casual,
-                cleanup: cleanup,
-                snippets: snippets,
                 thinkingLevel: thinkingLevel
             ) { [weak self] partial in
                 Task { @MainActor in
@@ -637,8 +634,8 @@ private final class TranslationCache {
         self.maxEntries = maxEntries
     }
 
-    func translation(for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel, cleanup: CleanupLevel) -> String? {
-        let key = cacheKey(for: text, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel, cleanup: cleanup)
+    func translation(for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel) -> String? {
+        let key = cacheKey(for: text, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel)
         guard let translation = entries[key] else {
             return nil
         }
@@ -647,8 +644,8 @@ private final class TranslationCache {
         return translation
     }
 
-    func store(_ translation: String, for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel, cleanup: CleanupLevel) {
-        let key = cacheKey(for: text, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel, cleanup: cleanup)
+    func store(_ translation: String, for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel) {
+        let key = cacheKey(for: text, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel)
         guard !key.isEmpty, !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return
         }
@@ -658,8 +655,8 @@ private final class TranslationCache {
         trimIfNeeded()
     }
 
-    private func cacheKey(for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel, cleanup: CleanupLevel) -> String {
-        "\(targetLanguage.id):\(thinkingLevel.rawValue):\(cleanup.rawValue):\(TextNormalizer.cleanedSelection(text))"
+    private func cacheKey(for text: String, targetLanguage: TranslationLanguage, thinkingLevel: ThinkingLevel) -> String {
+        "\(targetLanguage.id):\(thinkingLevel.rawValue):\(TextNormalizer.cleanedSelection(text))"
     }
 
     private func markRecentlyUsed(_ key: String) {
@@ -845,10 +842,6 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         applySelectionDisplayMode()
         setupGlobalHotKeys()
         setupBootstrap()
-        snippetsStore.onChange = { [weak self] in
-            self?.translationCache = TranslationCache()
-            self?.cancelPrefetch()
-        }
         _ = updaterController
     }
 
@@ -1656,8 +1649,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         if primaryMode == .selection {
             let language = targetLanguage
             let currentThinkingLevel = thinkingLevel
-            let currentCleanup = cleanupLevel
-            if translationCache.translation(for: selectedText, targetLanguage: language, thinkingLevel: currentThinkingLevel, cleanup: currentCleanup) == nil {
+            if translationCache.translation(for: selectedText, targetLanguage: language, thinkingLevel: currentThinkingLevel) == nil {
                 startPrefetchIfEligible(for: selectedText)
             } else {
                 cancelPrefetch()
@@ -1779,10 +1771,12 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 usageKind: .draftMessage,
                 selectionRect: selectionRect,
                 panelSide: panelSide,
-                keepPetReadyUntilPanelCloses: keepPetReadyUntilPanelCloses
-            ) { [weak self] translation in
-                self?.replaceCurrentSelection(with: translation)
-            }
+                keepPetReadyUntilPanelCloses: keepPetReadyUntilPanelCloses,
+                onReplace: { [weak self] translation in
+                    self?.replaceCurrentSelection(with: translation)
+                },
+                replaceShortcutSourcePID: lastReplacementSourcePID
+            )
         }
     }
 
@@ -1818,7 +1812,8 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         selectionRect: NSRect? = nil,
         panelSide: TranslationPanelController.Side = .right,
         keepPetReadyUntilPanelCloses: Bool = false,
-        onReplace: ((String) -> Void)? = nil
+        onReplace: ((String) -> Void)? = nil,
+        replaceShortcutSourcePID: pid_t? = nil
     ) {
         if let setupError = translationErrorIfBootstrapNeedsSetup() {
             handleTranslationFailure(setupError)
@@ -1828,9 +1823,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         let language = explicitTargetLanguage ?? targetLanguage
         let currentThinkingLevel = thinkingLevel
         let (_, currentAppCategory) = AppCategoryClassifier.detectFrontmost()
-        let currentStyle = writingStyle(for: currentAppCategory)
-        let currentCleanup = cleanupLevel
-        let currentSnippets = snippetsStore.usableSnippets()
+        let currentComposition = compositionSettings(for: mode, appCategory: currentAppCategory)
         let anchor: TranslationPanelController.Anchor =
             selectionRect.map(TranslationPanelController.Anchor.selection)
                 ?? .point(screenPoint, panelSide: panelSide)
@@ -1847,14 +1840,13 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                     mode: mode,
                     thinkingLevel: currentThinkingLevel,
                     appCategory: currentAppCategory,
-                    style: currentStyle,
-                    cleanup: currentCleanup,
-                    snippets: currentSnippets,
+                    composition: currentComposition,
                     useCache: useCache,
                     usageKind: usageKind
                 )
             },
             onReplace: onReplace,
+            replaceShortcutSourcePID: replaceShortcutSourcePID,
             onClose: { [weak self] in
                 self?.translationPanelController = nil
                 self?.petController?.clearReady()
@@ -1872,13 +1864,23 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             mode: mode,
             thinkingLevel: currentThinkingLevel,
             appCategory: currentAppCategory,
-            style: currentStyle,
-            cleanup: currentCleanup,
-            snippets: currentSnippets,
+            composition: currentComposition,
             useCache: useCache,
             usageKind: usageKind,
             controller: controller,
             requestID: requestID
+        )
+    }
+
+    @MainActor
+    private func compositionSettings(for mode: TranslationMode, appCategory: AppCategory) -> CompositionSettings? {
+        guard mode.usesCompositionSettings else {
+            return nil
+        }
+        return CompositionSettings(
+            style: writingStyle(for: appCategory),
+            cleanup: cleanupLevel,
+            snippets: snippetsStore.usableSnippets()
         )
     }
 
@@ -1902,9 +1904,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         mode: TranslationMode,
         thinkingLevel: ThinkingLevel,
         appCategory: AppCategory,
-        style: WritingStyle,
-        cleanup: CleanupLevel,
-        snippets: [Snippet],
+        composition: CompositionSettings?,
         useCache: Bool,
         usageKind: UsageStatsEventKind
     ) {
@@ -1919,9 +1919,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             mode: mode,
             thinkingLevel: thinkingLevel,
             appCategory: appCategory,
-            style: style,
-            cleanup: cleanup,
-            snippets: snippets,
+            composition: composition,
             useCache: useCache,
             usageKind: usageKind,
             controller: controller,
@@ -1936,9 +1934,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         mode: TranslationMode,
         thinkingLevel: ThinkingLevel,
         appCategory: AppCategory,
-        style: WritingStyle,
-        cleanup: CleanupLevel,
-        snippets: [Snippet],
+        composition: CompositionSettings?,
         useCache: Bool,
         usageKind: UsageStatsEventKind,
         controller: TranslationPanelController,
@@ -1949,7 +1945,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        if useCache, let cachedTranslation = translationCache.translation(for: text, targetLanguage: language, thinkingLevel: thinkingLevel, cleanup: cleanup) {
+        if useCache, let cachedTranslation = translationCache.translation(for: text, targetLanguage: language, thinkingLevel: thinkingLevel) {
             usageStatsStore.recordUse(
                 sourceText: text,
                 resultText: cachedTranslation,
@@ -1965,9 +1961,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
            translationPrefetch.text == text,
            translationPrefetch.targetLanguage == language,
            translationPrefetch.thinkingLevel == thinkingLevel,
-           translationPrefetch.appCategory == appCategory,
-           translationPrefetch.cleanup == cleanup,
-           translationPrefetch.snippets == snippets {
+           translationPrefetch.appCategory == appCategory {
             translationPrefetch.subscribe { partialTranslation in
                 controller.showTranslation(partialTranslation, requestID: requestID)
             } onCompletion: { [weak self] finalTranslation in
@@ -1995,9 +1989,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                     to: language,
                     mode: mode,
                     appCategory: appCategory,
-                    style: style,
-                    cleanup: cleanup,
-                    snippets: snippets,
+                    composition: composition,
                     thinkingLevel: thinkingLevel
                 ) { partialTranslation in
                     Task { @MainActor in
@@ -2006,7 +1998,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 }
                 await MainActor.run {
                     if useCache {
-                        self.translationCache.store(translated, for: text, targetLanguage: language, thinkingLevel: thinkingLevel, cleanup: cleanup)
+                        self.translationCache.store(translated, for: text, targetLanguage: language, thinkingLevel: thinkingLevel)
                     }
                     self.usageStatsStore.recordUse(
                         sourceText: text,
@@ -2106,18 +2098,14 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         let language = targetLanguage
         let currentThinkingLevel = thinkingLevel
         let (_, appCategory) = AppCategoryClassifier.detectFrontmost()
-        let currentCleanup = cleanupLevel
-        let currentSnippets = snippetsStore.usableSnippets()
         let prefetch = TranslationPrefetch(
             text: text,
             targetLanguage: language,
             thinkingLevel: currentThinkingLevel,
             appCategory: appCategory,
-            cleanup: currentCleanup,
-            snippets: currentSnippets,
             ollamaClient: ollamaClient
         ) { [weak self] sourceText, targetLanguage, thinkingLevel, translation in
-            self?.translationCache.store(translation, for: sourceText, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel, cleanup: currentCleanup)
+            self?.translationCache.store(translation, for: sourceText, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel)
         }
         translationPrefetch = prefetch
         prefetch.startAfterDelay(milliseconds: prefetchDelayMilliseconds)
@@ -2529,9 +2517,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
         let currentThinkingLevel = thinkingLevel
         let (_, currentAppCategory) = AppCategoryClassifier.detectFrontmost()
-        let currentStyle = writingStyle(for: currentAppCategory)
-        let currentCleanup = cleanupLevel
-        let currentSnippets = snippetsStore.usableSnippets()
+        let currentComposition = compositionSettings(for: .draftMessage, appCategory: currentAppCategory)
 
         let loadingBar = showInstantTranslationLoading(near: screenPoint)
 
@@ -2543,9 +2529,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                     to: language,
                     mode: .draftMessage,
                     appCategory: currentAppCategory,
-                    style: currentStyle,
-                    cleanup: currentCleanup,
-                    snippets: currentSnippets,
+                    composition: currentComposition,
                     thinkingLevel: currentThinkingLevel
                 ) { _ in }
                 await MainActor.run {
@@ -2631,18 +2615,24 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         let sourcePID = lastReplacementSourcePID
         lastReplacementSourcePID = nil
 
+        // Tear down panel + interceptors first so they can't intercept the
+        // synthesized Cmd+V or leave the source app's text view in a stale
+        // resign-key state.
+        translationPanelController?.close()
+        translationPanelController = nil
+
         let performPaste: @MainActor () -> Void = { [weak self] in
             PasteboardTextInserter.replaceCurrentSelection(with: cleanTranslation)
             self?.usageStatsStore.recordReplacement(text: cleanTranslation)
-            self?.translationPanelController?.close()
-            self?.translationPanelController = nil
         }
 
-        if let pid = sourcePID,
-           NSWorkspace.shared.frontmostApplication?.processIdentifier != pid,
-           let runningApp = NSRunningApplication(processIdentifier: pid) {
+        if let pid = sourcePID, let runningApp = NSRunningApplication(processIdentifier: pid) {
+            // Always reactivate source — even if frontmost == source — because
+            // some apps (notably Electron-based ones) drop their text view's
+            // selection when their window briefly resigned key while the panel
+            // was up.
             runningApp.activate()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
                 performPaste()
             }
         } else {
@@ -2856,8 +2846,6 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
               let style = WritingStyle(rawValue: parts[1])
         else { return }
         setWritingStyle(style, for: category)
-        cancelPrefetch()
-        translationCache = TranslationCache()
         updateMenuState()
     }
 
@@ -2867,8 +2855,6 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
               let level = CleanupLevel(rawValue: raw)
         else { return }
         cleanupLevel = level
-        cancelPrefetch()
-        translationCache = TranslationCache()
         updateMenuState()
     }
 
@@ -4208,6 +4194,86 @@ final class CommandCopyInterceptor {
     }
 }
 
+final class ReturnKeyInterceptor {
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private let sourcePID: pid_t
+    private let onReturn: @MainActor () -> Void
+
+    init(sourcePID: pid_t, onReturn: @escaping @MainActor () -> Void) {
+        self.sourcePID = sourcePID
+        self.onReturn = onReturn
+    }
+
+    func enable() {
+        guard eventTap == nil else { return }
+
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: { _, type, event, userInfo in
+                guard let userInfo, type == .keyDown else {
+                    return Unmanaged.passUnretained(event)
+                }
+
+                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                guard keyCode == Int64(kVK_Return) || keyCode == Int64(kVK_ANSI_KeypadEnter) else {
+                    return Unmanaged.passUnretained(event)
+                }
+
+                let modifiers = event.flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift])
+                guard modifiers == [] else {
+                    return Unmanaged.passUnretained(event)
+                }
+
+                let interceptor = Unmanaged<ReturnKeyInterceptor>.fromOpaque(userInfo).takeUnretainedValue()
+
+                // Only steal Return when the user is still in the source app
+                // where the selection lives. Otherwise let it through so it
+                // doesn't hijack typing in other apps.
+                let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+                guard frontmost == interceptor.sourcePID else {
+                    return Unmanaged.passUnretained(event)
+                }
+
+                Task { @MainActor in
+                    interceptor.onReturn()
+                }
+                return nil
+            },
+            userInfo: selfPointer
+        ) else {
+            return
+        }
+
+        eventTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        runLoopSource = source
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    func disable() {
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+        }
+        if let runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        }
+        runLoopSource = nil
+        eventTap = nil
+    }
+
+    deinit {
+        disable()
+    }
+}
+
 @MainActor
 final class PetController {
     private let panel: NSPanel
@@ -5132,6 +5198,12 @@ private final class RightClickableButton: NSButton {
     }
 }
 
+private final class FirstMouseButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+}
+
 @MainActor
 final class FloatingTranslateButtonView: NSView {
     var onClick: (() -> Void)?
@@ -5285,8 +5357,10 @@ final class TranslationPanelController {
     private var globalOutsideClickMonitor: Any?
     private var localOutsideClickMonitor: Any?
     private var commandCopyInterceptor: CommandCopyInterceptor?
+    private var returnKeyInterceptor: ReturnKeyInterceptor?
     private var didClose = false
     private let onClose: (() -> Void)?
+    private let replaceShortcutSourcePID: pid_t?
 
     var panelFrame: NSRect { panel.frame }
     var isVisible: Bool { panel.isVisible }
@@ -5301,11 +5375,13 @@ final class TranslationPanelController {
         loadingPlaceholder: String = "Translating",
         onTargetLanguageSelected: ((TranslationLanguage) -> Void)? = nil,
         onReplace: ((String) -> Void)? = nil,
+        replaceShortcutSourcePID: pid_t? = nil,
         onClose: (() -> Void)? = nil
     ) {
         self.loadingPlaceholder = loadingPlaceholder
         self.anchor = anchor
         self.onClose = onClose
+        self.replaceShortcutSourcePID = replaceShortcutSourcePID
         let referencePoint = Self.anchorReferencePoint(for: anchor)
         let visibleFrame = NSScreen.visibleFrame(containing: referencePoint)
         let panelHeight = min(
@@ -5342,6 +5418,10 @@ final class TranslationPanelController {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
+        // Keeps the source app's text view key so the action buttons fire on
+        // the first click. Without this, the panel grabs key on initial click
+        // and the button-tap is swallowed by the activation.
+        panel.becomesKeyOnlyIfNeeded = true
         panel.contentView = contentView
         contentView.onClose = { [weak self] in self?.close() }
         contentView.onNeedsResize = { [weak self] in
@@ -5352,6 +5432,7 @@ final class TranslationPanelController {
     deinit {
         removeOutsideClickMonitors()
         removeCommandCopyInterceptor()
+        removeReturnKeyInterceptor()
     }
 
     @discardableResult
@@ -5365,6 +5446,7 @@ final class TranslationPanelController {
         panel.orderFrontRegardless()
         installOutsideClickMonitors()
         installCommandCopyInterceptor()
+        installReturnKeyInterceptor()
         return activeRequestID
     }
 
@@ -5395,6 +5477,7 @@ final class TranslationPanelController {
         contentView.stopLoadingAnimation()
         removeOutsideClickMonitors()
         removeCommandCopyInterceptor()
+        removeReturnKeyInterceptor()
         panel.close()
         onClose?()
     }
@@ -5442,6 +5525,28 @@ final class TranslationPanelController {
     private func removeCommandCopyInterceptor() {
         commandCopyInterceptor?.disable()
         commandCopyInterceptor = nil
+    }
+
+    private func installReturnKeyInterceptor() {
+        guard returnKeyInterceptor == nil, let pid = replaceShortcutSourcePID else {
+            return
+        }
+
+        let interceptor = ReturnKeyInterceptor(sourcePID: pid) { [weak self] in
+            self?.triggerReplaceFromShortcut()
+        }
+        returnKeyInterceptor = interceptor
+        interceptor.enable()
+    }
+
+    private func removeReturnKeyInterceptor() {
+        returnKeyInterceptor?.disable()
+        returnKeyInterceptor = nil
+    }
+
+    private func triggerReplaceFromShortcut() {
+        guard panel.isVisible else { return }
+        contentView.triggerReplaceProgrammatically()
     }
 
     private func copyResultAndClose() {
@@ -6403,7 +6508,7 @@ final class TranslationContentView: NSView {
         let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
         let baseImage = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityDescription) ?? NSImage()
         let image = baseImage.withSymbolConfiguration(config) ?? baseImage
-        let button = NSButton(image: image, target: target, action: action)
+        let button = FirstMouseButton(image: image, target: target, action: action)
         button.imagePosition = .imageOnly
         button.isBordered = false
         button.contentTintColor = NSColor(calibratedWhite: 1.0, alpha: 0.55)
@@ -6719,6 +6824,10 @@ final class TranslationContentView: NSView {
         onReplace?(replacement)
     }
 
+    func triggerReplaceProgrammatically() {
+        replaceSelectedText()
+    }
+
     @objc private func closeTapped() {
         onClose?()
     }
@@ -6759,6 +6868,15 @@ enum TranslationMode {
     case draftMessage
     case smartReply
 
+    var usesCompositionSettings: Bool {
+        switch self {
+        case .selection:
+            return false
+        case .draftMessage, .smartReply:
+            return true
+        }
+    }
+
     var resultLabel: String? {
         switch self {
         case .selection, .draftMessage:
@@ -6782,9 +6900,7 @@ enum TranslationMode {
     func systemPrompt(
         targetLanguage: TranslationLanguage,
         appCategory: AppCategory,
-        style: WritingStyle,
-        cleanup: CleanupLevel,
-        snippets: [Snippet]
+        composition: CompositionSettings?
     ) -> String {
         switch self {
         case .selection:
@@ -6794,8 +6910,6 @@ enum TranslationMode {
             Same-language mode — if the entire source text is already in \(targetLanguage.promptName), do not translate and do not echo it back unchanged. Instead, rewrite it for a curious ~12-year-old reader with no background in the field — accessible, but not babyish or condescending. Break long sentences into shorter ones, replace jargon and rare or technical vocabulary with plain everyday words, unwind passive voice and nested clauses, and prefer concrete wording over abstract phrasing. Where a concept stays abstract after a plain-word swap, anchor it inline with a short concrete example or everyday analogy in parentheses or em-dashes — e.g. "a queue (like the line at a coffee shop — first in, first served)". Keep every fact, name, date, number, quotation, URL, and the original paragraph/bullet/list structure exactly. Do not summarize, do not drop content, do not add new claims, opinions, or facts — examples and analogies must only illustrate what is already there, never extend it. If your rewrite differs from the source only by swapping a few synonyms (e.g. "specialized" → "special", "utilize" → "use") or replacing punctuation, you have not simplified — go further: add an illustrative example, restructure the sentence, or name the topic in plainer terms. If only part of the source is in \(targetLanguage.promptName) and the rest is in another language, translate the foreign parts and lightly simplify the rest.
 
             Context — the source text is from \(appCategory.promptHint)
-
-            Cleanup — \(cleanup.promptDescription)\(TranslationMode.glossarySection(for: snippets, includeSnippets: false))
 
             Return only the \(targetLanguage.promptName) translation. No preamble, no commentary, no quotes around the output. Never write a wrapper like "Here is the translation:" — output the translated text directly.
             """
@@ -6807,9 +6921,9 @@ enum TranslationMode {
 
             Context — the user is composing this message in \(appCategory.promptHint)
 
-            Writing style — \(style.promptDescription)
+            Writing style — \(composition?.style.promptDescription ?? "")
 
-            Cleanup — \(cleanup.promptDescription)\(TranslationMode.glossarySection(for: snippets, includeSnippets: true))
+            Cleanup — \(composition?.cleanup.promptDescription ?? "")\(TranslationMode.glossarySection(for: composition?.snippets ?? [], includeSnippets: true))
 
             Return only the final \(targetLanguage.promptName) message, with no commentary, labels, alternatives, quotes, or explanations.
             """
@@ -6817,7 +6931,7 @@ enum TranslationMode {
             """
             The user has selected text in another app. The text is either (a) a message they received — email, chat message, DM, comment, support ticket, or similar; or (b) a question they need to answer — a quiz item, exam question, multiple-choice question, or open question. Decide which it is from the text itself, then respond appropriately. Always respond in the SAME language as the source text. Never translate.
 
-            If it is a received message: write a natural, ready-to-send reply as if the user is sending it now. Match the tone, register, formality, and length of the original. Be concise. Don't restate or quote the original. Don't add greetings or sign-offs unless the original suggests them. Don't address the user — produce only the message body they would paste into the reply field.
+            If it is a received message: write a natural, ready-to-send reply as if the user is sending it now. Match the intent, emotional signal, and approximate length of the original, but use the selected Writing style below for register and formality. Be concise. Don't restate or quote the original. Don't add greetings or sign-offs unless the original suggests them. Don't address the user — produce only the message body they would paste into the reply field.
 
             If it is a multiple-choice question: identify the correct option and respond with the option letter or number followed by the option text, then a brief one-sentence justification. Example: "B. Mitochondria — they generate most of the cell's ATP."
 
@@ -6825,7 +6939,9 @@ enum TranslationMode {
 
             Context — the user is replying inside \(appCategory.promptHint)
 
-            Cleanup — \(cleanup.promptDescription)\(TranslationMode.glossarySection(for: snippets, includeSnippets: false))
+            Writing style — \(composition?.style.promptDescription ?? "")
+
+            Cleanup — \(composition?.cleanup.promptDescription ?? "")\(TranslationMode.glossarySection(for: composition?.snippets ?? [], includeSnippets: true))
 
             Return only the reply or answer text. No commentary, no labels, no preface, no explanation of what you're doing, no quotes around the answer.
             """
@@ -6996,9 +7112,7 @@ struct OllamaClient {
         to targetLanguage: TranslationLanguage,
         mode: TranslationMode = .selection,
         appCategory: AppCategory,
-        style: WritingStyle,
-        cleanup: CleanupLevel,
-        snippets: [Snippet],
+        composition: CompositionSettings? = nil,
         thinkingLevel: ThinkingLevel,
         onPartial: @escaping (String) -> Void
     ) async throws -> String {
@@ -7029,9 +7143,7 @@ struct OllamaClient {
                     content: mode.systemPrompt(
                         targetLanguage: targetLanguage,
                         appCategory: appCategory,
-                        style: style,
-                        cleanup: cleanup,
-                        snippets: snippets
+                        composition: composition
                     )
                 ),
                 ChatMessage(role: "user", content: sourceText)
