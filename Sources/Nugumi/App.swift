@@ -5804,6 +5804,15 @@ final class HairlineSeparatorView: NSView {
     }
 }
 
+private enum TranslationPanelPalette {
+    static let targetTitle = NSColor(calibratedWhite: 1.0, alpha: 0.84)
+    static let resultText = NSColor(calibratedWhite: 0.94, alpha: 0.96)
+    static let resultLink = NSColor(calibratedWhite: 1.0, alpha: 0.82)
+    static let actionIconEnabled = NSColor(calibratedWhite: 1.0, alpha: 0.68)
+    static let actionIconDisabled = NSColor(calibratedWhite: 1.0, alpha: 0.30)
+    static let sourceAction = NSColor(calibratedWhite: 1.0, alpha: 0.70)
+}
+
 final class LanguagePickerButton: NSButton {
     static let titleLeadingInset: CGFloat = 8
 
@@ -5814,7 +5823,7 @@ final class LanguagePickerButton: NSButton {
     private static let chevronBackgroundSize: CGFloat = 18
 
     private let titleFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
-    private let titleColor = NSColor(calibratedRed: 0.12, green: 0.58, blue: 1.0, alpha: 0.96)
+    private let titleColor = TranslationPanelPalette.targetTitle
 
     private var hoverTrackingArea: NSTrackingArea?
     private var displayTitle = ""
@@ -5987,7 +5996,7 @@ final class SourcePreviewView: NSView {
         moreButton.action = #selector(moreTapped)
         moreButton.isBordered = false
         moreButton.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
-        moreButton.contentTintColor = NSColor(calibratedRed: 0.12, green: 0.58, blue: 1.0, alpha: 1.0)
+        moreButton.contentTintColor = TranslationPanelPalette.sourceAction
         moreButton.isHidden = true
         moreButton.toolTip = "Show full source"
         addSubview(moreButton)
@@ -6071,7 +6080,7 @@ final class TranslationContentView: NSView {
         var color: NSColor {
             switch self {
             case .normal:
-                return NSColor(calibratedRed: 0.12, green: 0.58, blue: 1.0, alpha: 1.0)
+                return TranslationPanelPalette.resultText
             case .error:
                 return NSColor(calibratedRed: 1.0, green: 0.48, blue: 0.30, alpha: 0.96)
             }
@@ -6350,7 +6359,7 @@ final class TranslationContentView: NSView {
         }
         for range in linkRuns {
             rendered.addAttributes([
-                .foregroundColor: NSColor(calibratedRed: 0.72, green: 0.86, blue: 1.0, alpha: 0.96),
+                .foregroundColor: TranslationPanelPalette.resultLink,
                 .underlineStyle: NSUnderlineStyle.single.rawValue
             ], range: range)
         }
@@ -6437,7 +6446,7 @@ final class TranslationContentView: NSView {
             action: #selector(copyResult),
             to: content
         )
-        copyButton?.contentTintColor = NSColor(calibratedRed: 0.12, green: 0.58, blue: 1.0, alpha: 0.90)
+        copyButton?.contentTintColor = TranslationPanelPalette.actionIconEnabled
 
         if onReplace != nil {
             let replaceButton = makeIconButton(
@@ -6449,7 +6458,7 @@ final class TranslationContentView: NSView {
                 to: content
             )
             replaceButton.isEnabled = false
-            replaceButton.contentTintColor = NSColor(calibratedRed: 0.12, green: 0.58, blue: 1.0, alpha: 0.38)
+            replaceButton.contentTintColor = TranslationPanelPalette.actionIconDisabled
             self.replaceButton = replaceButton
         }
 
@@ -6839,23 +6848,17 @@ final class TranslationContentView: NSView {
             && resultTone != .error
 
         copyButton?.isEnabled = canUseResult
-        copyButton?.contentTintColor = NSColor(
-            calibratedRed: 0.12,
-            green: 0.58,
-            blue: 1.0,
-            alpha: canUseResult ? 0.90 : 0.32
-        )
+        copyButton?.contentTintColor = canUseResult
+            ? TranslationPanelPalette.actionIconEnabled
+            : TranslationPanelPalette.actionIconDisabled
 
         guard let replaceButton else {
             return
         }
         replaceButton.isEnabled = canUseResult
-        replaceButton.contentTintColor = NSColor(
-            calibratedRed: 0.12,
-            green: 0.58,
-            blue: 1.0,
-            alpha: canUseResult ? 0.86 : 0.38
-        )
+        replaceButton.contentTintColor = canUseResult
+            ? TranslationPanelPalette.actionIconEnabled
+            : TranslationPanelPalette.actionIconDisabled
     }
 
     override func mouseDown(with event: NSEvent) {
