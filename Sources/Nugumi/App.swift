@@ -31,25 +31,89 @@ private enum MenuItemTag: Int {
     case keyboardShortcuts = 121
     case translateOrReplySelection = 122
     case resetSettings = 123
+    case invisibilityMode = 124
 }
 
-struct OllamaModelOption: Equatable {
+enum InvisibilityState {
+    static let defaultsKey = "invisibilityModeEnabled"
+    static let firstRunShownKey = "invisibilityModeFirstRunShown"
+
+    static var isEnabled: Bool {
+        UserDefaults.standard.bool(forKey: defaultsKey)
+    }
+
+    static var currentSharingType: NSWindow.SharingType {
+        isEnabled ? .none : .readOnly
+    }
+
+    static func apply(to window: NSWindow) {
+        window.sharingType = currentSharingType
+    }
+
+    @MainActor
+    static func applyToAllOpenWindows() {
+        let type = currentSharingType
+        for window in NSApp.windows {
+            window.sharingType = type
+        }
+    }
+}
+
+enum BackendKind: Equatable {
+    case ollama(requiresAccount: Bool)
+    case cloud(CloudProvider)
+}
+
+struct LLMModel: Equatable {
     let id: String
     let shortName: String
     let displayName: String
-    let isCloud: Bool
+    let backend: BackendKind
+    let supportsImages: Bool
 
-    static let all: [OllamaModelOption] = [
-        .init(id: "gpt-oss:120b-cloud", shortName: "Online", displayName: "Online (fast, needs sign-in)", isCloud: true),
-        .init(id: "gpt-oss:20b", shortName: "Offline", displayName: "Offline (slower, works without internet)", isCloud: false)
+    var isCloud: Bool {
+        if case .ollama(let requiresAccount) = backend { return requiresAccount }
+        return false
+    }
+
+    var isOllama: Bool {
+        if case .ollama = backend { return true }
+        return false
+    }
+
+    var cloudProvider: CloudProvider? {
+        if case .cloud(let provider) = backend { return provider }
+        return nil
+    }
+
+    static let all: [LLMModel] = [
+        // Ollama
+        .init(id: "gpt-oss:120b-cloud", shortName: "Online",  displayName: "Online (Ollama Cloud, needs sign-in)", backend: .ollama(requiresAccount: true),  supportsImages: false),
+        .init(id: "gpt-oss:20b",        shortName: "Offline", displayName: "Offline (Ollama local)",                backend: .ollama(requiresAccount: false), supportsImages: false),
+        // OpenAI (GPT-5 family, all vision-capable)
+        .init(id: "gpt-5.4-mini", shortName: "GPT-5.4 mini", displayName: "GPT-5.4 mini (OpenAI, fast)",  backend: .cloud(.openAI), supportsImages: true),
+        .init(id: "gpt-5.4",      shortName: "GPT-5.4",      displayName: "GPT-5.4 (OpenAI, affordable)", backend: .cloud(.openAI), supportsImages: true),
+        .init(id: "gpt-5.5",      shortName: "GPT-5.5",      displayName: "GPT-5.5 (OpenAI, flagship)",   backend: .cloud(.openAI), supportsImages: true),
+        // Anthropic
+        .init(id: "claude-haiku-4-5-20251001", shortName: "Claude Haiku 4.5",  displayName: "Claude Haiku 4.5 (Anthropic, fast)",  backend: .cloud(.anthropic), supportsImages: true),
+        .init(id: "claude-sonnet-4-6",         shortName: "Claude Sonnet 4.6", displayName: "Claude Sonnet 4.6 (Anthropic)",       backend: .cloud(.anthropic), supportsImages: true),
+        .init(id: "claude-opus-4-7",           shortName: "Claude Opus 4.7",   displayName: "Claude Opus 4.7 (Anthropic, top)",    backend: .cloud(.anthropic), supportsImages: true),
+        // Gemini
+        .init(id: "gemini-2.5-flash-lite", shortName: "Gemini 2.5 Flash Lite", displayName: "Gemini 2.5 Flash Lite (Google, fastest)", backend: .cloud(.gemini), supportsImages: true),
+        .init(id: "gemini-2.5-flash",      shortName: "Gemini 2.5 Flash",      displayName: "Gemini 2.5 Flash (Google)",               backend: .cloud(.gemini), supportsImages: true),
+        .init(id: "gemini-2.5-pro",        shortName: "Gemini 2.5 Pro",        displayName: "Gemini 2.5 Pro (Google, top)",            backend: .cloud(.gemini), supportsImages: true),
     ]
+
+    static let ollamaModels = all.filter(\.isOllama)
 
     static let defaultModel = all[0]
 
-    static func option(id: String) -> OllamaModelOption {
+    static func option(id: String) -> LLMModel {
         all.first { $0.id == id } ?? defaultModel
     }
 }
+
+typealias OllamaModelOption = LLMModel
 
 enum ThinkingLevel: String, CaseIterable {
     case low
@@ -353,6 +417,32 @@ private enum TextNormalizer {
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    static func looksMeaningful(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        var letterCount = 0
+        var hasIdeographOrKana = false
+        for scalar in trimmed.unicodeScalars {
+            if CharacterSet.letters.contains(scalar) {
+                letterCount += 1
+            }
+            switch scalar.value {
+            case 0x3040...0x30FF,     // Hiragana + Katakana
+                 0x3400...0x4DBF,     // CJK Unified Ideographs Extension A
+                 0x4E00...0x9FFF,     // CJK Unified Ideographs
+                 0xAC00...0xD7AF,     // Hangul Syllables
+                 0xF900...0xFAFF:     // CJK Compatibility Ideographs
+                hasIdeographOrKana = true
+            default:
+                break
+            }
+        }
+
+        if hasIdeographOrKana { return true }
+        return letterCount >= 2
+    }
+
     static func cleanedDraftMessage(_ text: String) -> String {
         var cleaned = normalizedBaseText(text)
 
@@ -495,10 +585,11 @@ private final class TranslationPrefetch {
     }
 
     let text: String
+    let images: [ImageInput]
     let targetLanguage: TranslationLanguage
     let thinkingLevel: ThinkingLevel
     let appCategory: AppCategory
-    private let ollamaClient: OllamaClient
+    private let backend: any LLMBackend
     private var task: Task<Void, Never>?
     private var state: State = .pending
     private var partialTranslation = ""
@@ -509,17 +600,19 @@ private final class TranslationPrefetch {
 
     init(
         text: String,
+        images: [ImageInput] = [],
         targetLanguage: TranslationLanguage,
         thinkingLevel: ThinkingLevel,
         appCategory: AppCategory,
-        ollamaClient: OllamaClient,
+        backend: any LLMBackend,
         onComplete: @escaping (String, TranslationLanguage, ThinkingLevel, String) -> Void
     ) {
         self.text = text
+        self.images = images
         self.targetLanguage = targetLanguage
         self.thinkingLevel = thinkingLevel
         self.appCategory = appCategory
-        self.ollamaClient = ollamaClient
+        self.backend = backend
         self.onComplete = onComplete
     }
 
@@ -584,10 +677,13 @@ private final class TranslationPrefetch {
         state = .running
 
         do {
-            let finalTranslation = try await ollamaClient.translate(
+            let finalTranslation = try await backend.translate(
                 text,
+                images: images,
                 to: targetLanguage,
+                mode: .selection,
                 appCategory: appCategory,
+                composition: nil,
                 thinkingLevel: thinkingLevel
             ) { [weak self] partial in
                 Task { @MainActor in
@@ -680,8 +776,15 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private var lastLeftMouseDownLocation: NSPoint?
     private let selectionReader = SelectionReader()
     private let ollamaBaseURL = URL(string: "http://127.0.0.1:11434")!
-    private var ollamaClient: OllamaClient {
-        OllamaClient(baseURL: ollamaBaseURL, model: selectedModelID)
+    private var currentBackend: any LLMBackend {
+        let model = LLMModel.option(id: selectedModelID)
+        switch model.backend {
+        case .ollama:
+            return OllamaClient(baseURL: ollamaBaseURL, model: model.id)
+        case .cloud(let provider):
+            let key = KeychainStore.apiKey(for: provider) ?? ""
+            return OpenAIChatClient(provider: provider, apiKey: key, model: model.id)
+        }
     }
 
     private var translateButtonController: FloatingTranslateButtonController?
@@ -703,7 +806,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private let snippetsStore = SnippetsStore()
     private lazy var bootstrap: OllamaBootstrap = OllamaBootstrap(
         baseURL: ollamaBaseURL,
-        models: OllamaModelOption.all
+        models: LLMModel.ollamaModels
     )
     private var onboardingWindowController: OnboardingWindowController?
     private var snippetsWindowController: SnippetsWindowController?
@@ -794,6 +897,11 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    private var invisibilityModeEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: InvisibilityState.defaultsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: InvisibilityState.defaultsKey) }
+    }
+
     private func writingStyle(for category: AppCategory) -> WritingStyle {
         let key = "writingStyle.\(category.rawValue)"
         if let raw = UserDefaults.standard.string(forKey: key),
@@ -832,6 +940,8 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         // when an unsupported app responds slowly. Cap it.
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.5)
         setupStatusItem()
+        statusItem?.isVisible = !invisibilityModeEnabled
+        InvisibilityState.applyToAllOpenWindows()
         requestAccessibilityPermissionIfNeeded()
         requestScreenRecordingPermissionIfNeeded()
         Task { @MainActor [weak self] in
@@ -876,12 +986,43 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         ) { [weak self] in
             self?.startSelectionTranslateOrReply()
         }
+        let toggleInvisibilityHotKey = GlobalHotKey(
+            definition: GlobalHotKeyDefinition(
+                action: .toggleInvisibility,
+                shortcut: shortcut(for: .toggleInvisibility)
+            )
+        ) { [weak self] in
+            self?.toggleInvisibilityMode()
+        }
         globalHotKeys = [
             screenshotHotKey,
             translateSelectionHotKey,
-            translateOrReplyHotKey
+            translateOrReplyHotKey,
+            toggleInvisibilityHotKey
         ]
         globalHotKeys.forEach { $0.register() }
+    }
+
+    @objc private func toggleInvisibilityMode() {
+        let now = !invisibilityModeEnabled
+        invisibilityModeEnabled = now
+        statusItem?.isVisible = !now
+        InvisibilityState.applyToAllOpenWindows()
+        updateMenuState()
+        if now && !UserDefaults.standard.bool(forKey: InvisibilityState.firstRunShownKey) {
+            showInvisibilityFirstRunDialog()
+            UserDefaults.standard.set(true, forKey: InvisibilityState.firstRunShownKey)
+        }
+    }
+
+    private func showInvisibilityFirstRunDialog() {
+        let chord = shortcut(for: .toggleInvisibility).displayString
+        NSApp.activate(ignoringOtherApps: true)
+        _ = NugumiAlertController(
+            title: "Invisibility mode is on",
+            message: "Nugumi is now hidden from screenshots and screen sharing, and the menu-bar icon is gone. Press \(chord) anywhere to bring it back.",
+            primaryButtonTitle: "Got it"
+        ).showModal()
     }
 
     private func setupBootstrap() {
@@ -967,9 +1108,21 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             onboardingWindowController.presentAndRefresh()
             return
         }
-        let controller = OnboardingWindowController(bootstrap: bootstrap) { [weak self] in
-            self?.onboardingWindowController = nil
-        }
+        let controller = OnboardingWindowController(
+            bootstrap: bootstrap,
+            onClose: { [weak self] in
+                self?.onboardingWindowController = nil
+            },
+            onCloudPick: { [weak self] provider in
+                guard let self else { return }
+                if let firstModel = LLMModel.all.first(where: { $0.cloudProvider == provider }) {
+                    self.applyModelSelection(firstModel.id)
+                }
+            },
+            onCloudTest: { [weak self] provider in
+                await self?.runCloudTest(for: provider) ?? .failure("Internal error.")
+            }
+        )
         onboardingWindowController = controller
         controller.presentAndRefresh()
     }
@@ -1058,6 +1211,14 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             tag: .replacementMode,
             symbolName: "return",
             submenu: makeReplacementModeMenu()
+        ))
+        menu.addItem(makeMenuItem(
+            title: "Invisibility mode",
+            tag: .invisibilityMode,
+            symbolName: "eye.slash",
+            action: #selector(toggleInvisibilityMode),
+            keyEquivalent: shortcut(for: .toggleInvisibility).menuKeyEquivalent,
+            keyEquivalentModifierMask: shortcut(for: .toggleInvisibility).keyEquivalentModifierMask
         ))
 
         menu.addItem(makeSectionHeader("Shortcuts"))
@@ -1359,17 +1520,41 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
     private func makeModelSelectionMenu() -> NSMenu {
         let menu = NSMenu()
-        for option in OllamaModelOption.all {
-            let item = NSMenuItem(
-                title: option.displayName,
-                action: #selector(selectModel(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = option.id
-            menu.addItem(item)
+        let groups: [(BackendKind?, [LLMModel])] = [
+            (nil, LLMModel.all.filter(\.isOllama)),
+            (nil, LLMModel.all.filter { $0.cloudProvider == .openAI }),
+            (nil, LLMModel.all.filter { $0.cloudProvider == .anthropic }),
+            (nil, LLMModel.all.filter { $0.cloudProvider == .gemini })
+        ]
+        for (index, group) in groups.enumerated() {
+            if index > 0 {
+                menu.addItem(.separator())
+            }
+            for option in group.1 {
+                let item = NSMenuItem(
+                    title: option.displayName,
+                    action: #selector(selectModel(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = option.id
+                menu.addItem(item)
+            }
         }
+        menu.addItem(.separator())
+        let configureItem = NSMenuItem(
+            title: "Configure API keys…",
+            action: #selector(openOnboardingChooser),
+            keyEquivalent: ""
+        )
+        configureItem.target = self
+        menu.addItem(configureItem)
         return menu
+    }
+
+    @MainActor
+    @objc private func openOnboardingChooser() {
+        presentOnboardingWindow()
     }
 
     private func makeWritingStyleMenu() -> NSMenu {
@@ -1536,7 +1721,9 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 }
 
                 let cleanedSelection = TextNormalizer.cleanedSelection(selection.text)
-                guard !cleanedSelection.isEmpty else {
+                guard !cleanedSelection.isEmpty,
+                      TextNormalizer.looksMeaningful(cleanedSelection)
+                else {
                     self.translateButtonController?.close()
                     self.translateButtonController = nil
                     self.petController?.clearReady()
@@ -1617,7 +1804,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         } else if let downLocation = lastLeftMouseDownLocation {
             let upLocation = NSEvent.mouseLocation
             let distance = hypot(upLocation.x - downLocation.x, upLocation.y - downLocation.y)
-            isSelectionGesture = distance >= 5
+            isSelectionGesture = distance >= 15
         } else {
             isSelectionGesture = false
         }
@@ -1982,10 +2169,12 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             return
         }
 
+        let backend = currentBackend
         Task {
             do {
-                let translated = try await ollamaClient.translate(
+                let translated = try await backend.translate(
                     text,
+                    images: [],
                     to: language,
                     mode: mode,
                     appCategory: appCategory,
@@ -2029,7 +2218,13 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             bootstrap.refresh()
             presentOnboardingWindow()
             return true
-        case .ollama, .emptyResponse, .modelDownloading:
+        case .invalidAPIKey(let provider):
+            controller?.close()
+            KeychainStore.setAPIKey(nil, for: provider)
+            bootstrap.refresh()
+            presentAPIKeySheet(for: provider) { _ in }
+            return true
+        case .ollama, .emptyResponse, .modelDownloading, .rateLimited, .cloudError:
             return false
         }
     }
@@ -2052,6 +2247,12 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             return "Translator is not downloaded yet."
         case .signInRequired:
             return "Sign in to Ollama to use the online translator."
+        case .invalidAPIKey(let provider):
+            return "\(provider.displayName) rejected the API key."
+        case .rateLimited(let provider):
+            return "\(provider.displayName) rate limit reached. Try again in a minute."
+        case .cloudError(let provider, let detail):
+            return "\(provider.displayName): \(detail)"
         }
     }
 
@@ -2103,7 +2304,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             targetLanguage: language,
             thinkingLevel: currentThinkingLevel,
             appCategory: appCategory,
-            ollamaClient: ollamaClient
+            backend: currentBackend
         ) { [weak self] sourceText, targetLanguage, thinkingLevel, translation in
             self?.translationCache.store(translation, for: sourceText, targetLanguage: targetLanguage, thinkingLevel: thinkingLevel)
         }
@@ -2218,7 +2419,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         menu.item(withTag: MenuItemTag.selectedModel.rawValue)?.title = "Mode: \(OllamaModelOption.option(id: selectedModelID).displayName)"
         menu.item(withTag: MenuItemTag.checkForUpdates.rawValue)?.isHidden = !isRunningFromAppBundle
         if let translateSelectionItem = menu.item(withTag: MenuItemTag.translateSelection.rawValue) {
-            translateSelectionItem.title = "Rewrite selected text..."
+            translateSelectionItem.title = "Rewrite my text in \(draftTargetLanguage.displayName)..."
             applyShortcut(for: .translateSelection, to: translateSelectionItem)
             translateSelectionItem.isEnabled = trusted
         }
@@ -2332,6 +2533,13 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 guard let raw = item.representedObject as? String else { continue }
                 item.state = raw == activeMode ? .on : .off
             }
+        }
+
+        if let invisibilityItem = menu.item(withTag: MenuItemTag.invisibilityMode.rawValue) {
+            invisibilityItem.state = invisibilityModeEnabled ? .on : .off
+            let chord = shortcut(for: .toggleInvisibility)
+            invisibilityItem.keyEquivalent = chord.menuKeyEquivalent
+            invisibilityItem.keyEquivalentModifierMask = chord.keyEquivalentModifierMask
         }
     }
 
@@ -2521,11 +2729,12 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
         let loadingBar = showInstantTranslationLoading(near: screenPoint)
 
-        let client = ollamaClient
+        let client = currentBackend
         Task { [weak self] in
             do {
                 let translated = try await client.translate(
                     text,
+                    images: [],
                     to: language,
                     mode: .draftMessage,
                     appCategory: currentAppCategory,
@@ -2825,16 +3034,104 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        let option = OllamaModelOption.option(id: modelID)
+        let option = LLMModel.option(id: modelID)
         guard option.id != selectedModelID else {
             return
         }
 
-        selectedModelID = option.id
+        if let provider = option.cloudProvider, KeychainStore.apiKey(for: provider) == nil {
+            presentAPIKeySheet(for: provider) { [weak self] saved in
+                guard let self, saved else { return }
+                self.applyModelSelection(option.id)
+            }
+            return
+        }
+
+        applyModelSelection(option.id)
+    }
+
+    @MainActor
+    private func runCloudTest(for provider: CloudProvider) async -> CloudTestResult {
+        guard let model = LLMModel.all.first(where: { $0.cloudProvider == provider }) else {
+            return .failure("No model registered for \(provider.displayName).")
+        }
+        guard let apiKey = KeychainStore.apiKey(for: provider), !apiKey.isEmpty else {
+            return .failure("No API key saved.")
+        }
+        let client = OpenAIChatClient(provider: provider, apiKey: apiKey, model: model.id)
+        do {
+            let translated = try await client.translate(
+                "Hello, this is a test sentence.",
+                images: [],
+                to: targetLanguage,
+                mode: .selection,
+                appCategory: .other,
+                composition: nil,
+                thinkingLevel: thinkingLevel,
+                onPartial: { _ in }
+            )
+            let preview = String(translated.prefix(160))
+            return .success(preview: "Model: \(model.shortName)\n\n\(preview)")
+        } catch let error as TranslationError {
+            return .failure(error.errorDescription ?? "Unknown error.")
+        } catch {
+            return .failure(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func applyModelSelection(_ modelID: String) {
+        selectedModelID = modelID
         cancelPrefetch()
         translationCache = TranslationCache()
         onSelectedModelChanged()
         updateMenuState()
+    }
+
+    @MainActor
+    private func presentAPIKeySheet(for provider: CloudProvider, errorMessage: String? = nil, onSave: @escaping (Bool) -> Void) {
+        NSApp.activate(ignoringOtherApps: true)
+        let baseMessage = "Your key is stored locally on this Mac. Nugumi sends your selected text to \(provider.displayName) for translation."
+        let fullMessage = errorMessage.map { "⚠️ \($0)\n\n\(baseMessage)" } ?? baseMessage
+        let controller = NugumiInputAlertController(
+            title: "Enter your \(provider.displayName) API key",
+            message: fullMessage,
+            placeholder: "sk-...",
+            initialValue: KeychainStore.apiKey(for: provider),
+            primaryButtonTitle: "Save",
+            secondaryButtonTitle: "Get a key…",
+            tertiaryButtonTitle: "Cancel"
+        )
+        let result = controller.showModal()
+        switch result.response {
+        case .alertFirstButtonReturn:
+            guard !result.text.isEmpty else {
+                onSave(false)
+                return
+            }
+            Task { @MainActor in
+                let outcome = await APIKeyValidator.validate(result.text, for: provider)
+                switch outcome {
+                case .valid:
+                    KeychainStore.setAPIKey(result.text, for: provider)
+                    self.bootstrap.refresh()
+                    onSave(true)
+                case .invalid(let reason):
+                    self.presentAPIKeySheet(for: provider, errorMessage: reason, onSave: onSave)
+                case .networkUnreachable(let detail):
+                    // Network problem — save anyway so user isn't stuck offline.
+                    KeychainStore.setAPIKey(result.text, for: provider)
+                    self.bootstrap.refresh()
+                    self.presentSelectionTranslationError("Couldn't reach \(provider.displayName) to verify the key (\(detail)). Saved it locally.", title: "Key saved without verification")
+                    onSave(true)
+                }
+            }
+        case .alertSecondButtonReturn:
+            NSWorkspace.shared.open(provider.apiKeyHelpURL)
+            onSave(false)
+        default:
+            onSave(false)
+        }
     }
 
     @MainActor
@@ -2937,6 +3234,8 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             "thinkingLevel",
             "cleanupLevel",
             "replacementMode",
+            InvisibilityState.defaultsKey,
+            InvisibilityState.firstRunShownKey,
             usageStatsExpandedKey
         ].forEach { defaults.removeObject(forKey: $0) }
 
@@ -2954,6 +3253,8 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         refreshStatusBarIcon()
         applySelectionDisplayMode()
         setupGlobalHotKeys()
+        statusItem?.isVisible = true
+        InvisibilityState.applyToAllOpenWindows()
 
         if selectedModelID != previousModelID {
             onSelectedModelChanged()
@@ -2982,10 +3283,304 @@ extension NugumiApp: SPUUpdaterDelegate {
 private final class NugumiModalPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == .command {
+            switch event.charactersIgnoringModifiers {
+            case "v":
+                if NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self) { return true }
+            case "c":
+                if NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: self) { return true }
+            case "x":
+                if NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: self) { return true }
+            case "a":
+                if NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: self) { return true }
+            default:
+                break
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 }
 
 @MainActor
-private final class NugumiAlertController: NSWindowController, NSWindowDelegate {
+final class NugumiInputAlertController: NSWindowController, NSWindowDelegate {
+    private static let horizontalPadding: CGFloat = 18
+    private static let verticalPadding: CGFloat = 18
+    private static let shadowMargin: CGFloat = 30
+    private static let cornerRadius: CGFloat = 28
+    private static let mascotSize = NSSize(width: 42, height: 34)
+    private static let textGap: CGFloat = 10
+    private static let fieldHeight: CGFloat = 30
+    private static let buttonHeight: CGFloat = 30
+    private static let buttonStackSpacing: CGFloat = 8
+    private static let textColumnWidth: CGFloat = 320
+    private static let titleFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
+    private static let messageFont = NSFont.systemFont(ofSize: 12, weight: .regular)
+
+    struct Result {
+        let response: NSApplication.ModalResponse
+        let text: String
+    }
+
+    private var textField: NSTextField!
+    private(set) var enteredText: String = ""
+
+    private let title_: String
+    private let message: String
+    private let placeholder: String
+    private let initialValue: String?
+    private let isSecure: Bool
+    private let primaryButtonTitle: String
+    private let secondaryButtonTitle: String?
+    private let tertiaryButtonTitle: String?
+
+    init(
+        title: String,
+        message: String,
+        placeholder: String,
+        initialValue: String? = nil,
+        isSecure: Bool = true,
+        primaryButtonTitle: String,
+        secondaryButtonTitle: String? = nil,
+        tertiaryButtonTitle: String? = nil
+    ) {
+        self.title_ = title
+        self.message = message
+        self.placeholder = placeholder
+        self.initialValue = initialValue
+        self.isSecure = isSecure
+        self.primaryButtonTitle = primaryButtonTitle
+        self.secondaryButtonTitle = secondaryButtonTitle
+        self.tertiaryButtonTitle = tertiaryButtonTitle
+
+        let cardSize = Self.cardSize(
+            title: title,
+            message: message,
+            buttons: [primaryButtonTitle, secondaryButtonTitle, tertiaryButtonTitle].compactMap { $0 }
+        )
+        let windowSize = NSSize(
+            width: cardSize.width + Self.shadowMargin * 2,
+            height: cardSize.height + Self.shadowMargin * 2
+        )
+        let panel = NugumiModalPanel(
+            contentRect: NSRect(origin: .zero, size: windowSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .modalPanel
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        InvisibilityState.apply(to: panel)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.isMovableByWindowBackground = true
+
+        super.init(window: panel)
+        panel.delegate = self
+        buildUI(panel: panel, windowSize: windowSize, cardSize: cardSize)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func showModal() -> Result {
+        guard let window else { return Result(response: .cancel, text: "") }
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(textField)
+        let response = NSApp.runModal(for: window)
+        return Result(response: response, text: enteredText)
+    }
+
+    nonisolated func windowWillClose(_ notification: Notification) {
+        Task { @MainActor in
+            NSApp.stopModal(withCode: .cancel)
+        }
+    }
+
+    private func buildUI(panel: NSPanel, windowSize: NSSize, cardSize: NSSize) {
+        let rootView = NSView(frame: NSRect(origin: .zero, size: windowSize))
+        rootView.wantsLayer = true
+        rootView.layer?.backgroundColor = NSColor.clear.cgColor
+        rootView.layer?.masksToBounds = false
+        panel.contentView = rootView
+
+        let glass = GlassHostView(
+            frame: NSRect(origin: NSPoint(x: Self.shadowMargin, y: Self.shadowMargin), size: cardSize),
+            cornerRadius: Self.cornerRadius,
+            tintColor: nil,
+            style: .regular
+        )
+        glass.wantsLayer = true
+        glass.layer?.masksToBounds = false
+        glass.layer?.shadowColor = NSColor.black.cgColor
+        glass.layer?.shadowOpacity = 0.24
+        glass.layer?.shadowRadius = 18
+        glass.layer?.shadowOffset = CGSize(width: 0, height: -4)
+        glass.layer?.shadowPath = CGPath(
+            roundedRect: NSRect(origin: .zero, size: cardSize),
+            cornerWidth: Self.cornerRadius,
+            cornerHeight: Self.cornerRadius,
+            transform: nil
+        )
+        glass.translatesAutoresizingMaskIntoConstraints = false
+        rootView.addSubview(glass)
+        let contentView = glass.contentView
+
+        let mascotColumn = NSView()
+        mascotColumn.translatesAutoresizingMaskIntoConstraints = false
+
+        let mascotView = PetMascotView(frame: NSRect(origin: .zero, size: Self.mascotSize))
+        mascotView.apply(state: .idle, mode: .selection)
+        mascotView.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleLabel = NSTextField(labelWithString: title_)
+        titleLabel.font = Self.titleFont
+        titleLabel.textColor = .labelColor
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let messageLabel = NSTextField(wrappingLabelWithString: message)
+        messageLabel.font = Self.messageFont
+        messageLabel.textColor = .secondaryLabelColor
+        messageLabel.maximumNumberOfLines = 0
+        messageLabel.preferredMaxLayoutWidth = Self.textColumnWidth
+        messageLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let field: NSTextField = isSecure ? NSSecureTextField() : NSTextField()
+        field.placeholderString = placeholder
+        if let initialValue { field.stringValue = initialValue }
+        field.font = NSFont.systemFont(ofSize: 13)
+        field.translatesAutoresizingMaskIntoConstraints = false
+        field.bezelStyle = .roundedBezel
+        field.focusRingType = .none
+        field.usesSingleLineMode = true
+        field.maximumNumberOfLines = 1
+        field.cell?.wraps = false
+        field.cell?.isScrollable = true
+        field.cell?.lineBreakMode = .byTruncatingTail
+        textField = field
+
+        let buttonStack = NSStackView()
+        buttonStack.orientation = .vertical
+        buttonStack.alignment = .centerX
+        buttonStack.distribution = .fillEqually
+        buttonStack.spacing = Self.buttonStackSpacing
+        buttonStack.translatesAutoresizingMaskIntoConstraints = false
+
+        var buttons: [NSButton] = []
+        let primary = makeButton(title: primaryButtonTitle, action: #selector(primaryTapped))
+        buttonStack.addArrangedSubview(primary)
+        buttons.append(primary)
+        if let secondaryButtonTitle {
+            let secondary = makeButton(title: secondaryButtonTitle, action: #selector(secondaryTapped))
+            buttonStack.addArrangedSubview(secondary)
+            buttons.append(secondary)
+        }
+        if let tertiaryButtonTitle {
+            let tertiary = makeButton(title: tertiaryButtonTitle, action: #selector(tertiaryTapped))
+            buttonStack.addArrangedSubview(tertiary)
+            buttons.append(tertiary)
+        }
+
+        contentView.addSubview(mascotColumn)
+        mascotColumn.addSubview(mascotView)
+        contentView.addSubview(titleLabel)
+        contentView.addSubview(messageLabel)
+        contentView.addSubview(field)
+        contentView.addSubview(buttonStack)
+
+        NSLayoutConstraint.activate([
+            glass.topAnchor.constraint(equalTo: rootView.topAnchor, constant: Self.shadowMargin),
+            glass.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: Self.shadowMargin),
+            glass.widthAnchor.constraint(equalToConstant: cardSize.width),
+            glass.heightAnchor.constraint(equalToConstant: cardSize.height),
+
+            mascotColumn.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Self.verticalPadding),
+            mascotColumn.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Self.horizontalPadding),
+            mascotColumn.widthAnchor.constraint(equalToConstant: Self.mascotSize.width),
+            mascotColumn.heightAnchor.constraint(equalToConstant: Self.mascotSize.height),
+
+            mascotView.centerXAnchor.constraint(equalTo: mascotColumn.centerXAnchor),
+            mascotView.centerYAnchor.constraint(equalTo: mascotColumn.centerYAnchor),
+            mascotView.widthAnchor.constraint(equalToConstant: Self.mascotSize.width),
+            mascotView.heightAnchor.constraint(equalToConstant: Self.mascotSize.height),
+
+            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Self.verticalPadding + 1),
+            titleLabel.leadingAnchor.constraint(equalTo: mascotColumn.trailingAnchor, constant: Self.textGap),
+            titleLabel.widthAnchor.constraint(equalToConstant: Self.textColumnWidth),
+
+            messageLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            messageLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            messageLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            field.topAnchor.constraint(equalTo: messageLabel.bottomAnchor, constant: 12),
+            field.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            field.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            field.heightAnchor.constraint(equalToConstant: Self.fieldHeight),
+
+            buttonStack.topAnchor.constraint(equalTo: field.bottomAnchor, constant: 12),
+            buttonStack.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            buttonStack.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            buttonStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Self.verticalPadding)
+        ])
+
+        for button in buttons {
+            NSLayoutConstraint.activate([
+                button.heightAnchor.constraint(equalToConstant: Self.buttonHeight),
+                button.widthAnchor.constraint(equalTo: buttonStack.widthAnchor)
+            ])
+        }
+    }
+
+    private func makeButton(title: String, action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .rounded
+        button.controlSize = .regular
+        button.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        button.focusRingType = .none
+        return button
+    }
+
+    @objc private func primaryTapped() {
+        enteredText = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        close(with: .alertFirstButtonReturn)
+    }
+
+    @objc private func secondaryTapped() {
+        enteredText = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        close(with: .alertSecondButtonReturn)
+    }
+
+    @objc private func tertiaryTapped() {
+        close(with: .alertThirdButtonReturn)
+    }
+
+    private func close(with response: NSApplication.ModalResponse) {
+        NSApp.stopModal(withCode: response)
+        window?.orderOut(nil)
+    }
+
+    private static func cardSize(title: String, message: String, buttons: [String]) -> NSSize {
+        let titleHeight = ceil(titleFont.boundingRectForFont.height)
+        let messageHeight = ceil((message as NSString).boundingRect(
+            with: NSSize(width: textColumnWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: messageFont]
+        ).height)
+        let buttonsBlock = CGFloat(buttons.count) * buttonHeight
+            + CGFloat(max(0, buttons.count - 1)) * buttonStackSpacing
+        let inner = titleHeight + 4 + messageHeight + 12 + fieldHeight + 12 + buttonsBlock
+        let height = verticalPadding * 2 + max(mascotSize.height, inner)
+        let width = horizontalPadding * 2 + mascotSize.width + textGap + textColumnWidth
+        return NSSize(width: ceil(width), height: ceil(height))
+    }
+}
+
+final class NugumiAlertController: NSWindowController, NSWindowDelegate {
     private static let horizontalPadding: CGFloat = 16
     private static let verticalPadding: CGFloat = 16
     private static let shadowMargin: CGFloat = 30
@@ -3026,6 +3621,7 @@ private final class NugumiAlertController: NSWindowController, NSWindowDelegate 
         )
         panel.level = .modalPanel
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        InvisibilityState.apply(to: panel)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -3601,7 +4197,8 @@ enum ClipboardSelectionReader {
             let copiedText = pasteboard.string(forType: .string)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             snapshot.restore(to: pasteboard)
-            completion((copiedText?.isEmpty == false) ? copiedText : nil)
+            let meaningful = copiedText.flatMap { TextNormalizer.looksMeaningful($0) ? $0 : nil }
+            completion(meaningful)
             return
         }
 
@@ -4324,6 +4921,7 @@ final class PetController {
         )
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        InvisibilityState.apply(to: panel)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -5121,6 +5719,7 @@ final class FloatingTranslateButtonController {
 
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        InvisibilityState.apply(to: panel)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -5413,6 +6012,7 @@ final class TranslationPanelController {
 
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        InvisibilityState.apply(to: panel)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
@@ -6933,19 +7533,33 @@ enum TranslationMode {
             Return only the \(targetLanguage.promptName) translation. No preamble, no commentary, no quotes around the output. Never write a wrapper like "Here is the translation:" — output the translated text directly.
             """
         case .draftMessage:
-            """
-            Translate the user's drafted outgoing message into natural \(targetLanguage.promptName). Infer the user's actual intent, emotion, and social situation, then say it the way a native \(targetLanguage.promptName) speaker would send it in a chat or message. If the draft is already entirely in \(targetLanguage.promptName), do not translate it; lightly rewrite/polish it only when needed so it sounds natural and sendable.
+            if composition?.cleanup == CleanupLevel.none {
+                """
+                Translate the user's drafted outgoing message into \(targetLanguage.promptName). Preserve the user's phrasing, sentence structure, and word choices as faithfully as the target language allows — even if the result reads slightly stiff or non-idiomatic. Do not polish, smooth, naturalize, or rewrite the draft beyond what literal translation strictly requires. If the draft is already entirely in \(targetLanguage.promptName), return it essentially unchanged; correct only outright errors.
 
-            The selected Writing style is authoritative. The source draft tells you meaning, intent, emotion, and how direct the user wants to be, but it must not override the selected Writing style. When goals conflict, follow this priority: (1) meaning, (2) selected Writing style, (3) intended directness and emotional signal within that style, (4) cultural naturalness — idioms, honorifics, word order, (5) surface details to preserve verbatim — emojis, URLs, usernames, product names, numbers, line breaks, (6) literal wording (always lowest). If the draft is blunt, keep the result concise and direct, but still use the selected Writing style. Do not pad a curt one-liner into a long paragraph unless the meaning requires it. If the draft is awkward or phrased like a direct translation, smooth it while keeping the same intent. If the draft is a fragment, return a natural sendable fragment without inventing extra context.
+                The selected Writing style controls register, honorifics, and formality — apply it for those purposes only, not as a license to rephrase or stylize. Preserve verbatim: emojis, URLs, usernames, product names, numbers, line breaks. If the draft is a fragment, translate the fragment as-is without inventing extra context.
 
-            Context — the user is composing this message in \(appCategory.promptHint)
+                Context — the user is composing this message in \(appCategory.promptHint)
 
-            Writing style — \(composition?.style.promptDescription ?? "")
+                Writing style — \(composition?.style.promptDescription ?? "")\(TranslationMode.glossarySection(for: composition?.snippets ?? [], includeSnippets: true))
 
-            Cleanup — \(composition?.cleanup.promptDescription ?? "")\(TranslationMode.glossarySection(for: composition?.snippets ?? [], includeSnippets: true))
+                Return only the final \(targetLanguage.promptName) message, with no commentary, labels, alternatives, quotes, or explanations.
+                """
+            } else {
+                """
+                Translate the user's drafted outgoing message into natural \(targetLanguage.promptName). Infer the user's actual intent, emotion, and social situation, then say it the way a native \(targetLanguage.promptName) speaker would send it in a chat or message. If the draft is already entirely in \(targetLanguage.promptName), do not translate it; lightly rewrite/polish it only when needed so it sounds natural and sendable.
 
-            Return only the final \(targetLanguage.promptName) message, with no commentary, labels, alternatives, quotes, or explanations.
-            """
+                The selected Writing style is authoritative. The source draft tells you meaning, intent, emotion, and how direct the user wants to be, but it must not override the selected Writing style. When goals conflict, follow this priority: (1) meaning, (2) selected Writing style, (3) intended directness and emotional signal within that style, (4) cultural naturalness — idioms, honorifics, word order, (5) surface details to preserve verbatim — emojis, URLs, usernames, product names, numbers, line breaks, (6) literal wording (always lowest). If the draft is blunt, keep the result concise and direct, but still use the selected Writing style. Do not pad a curt one-liner into a long paragraph unless the meaning requires it. If the draft is awkward or phrased like a direct translation, smooth it while keeping the same intent. If the draft is a fragment, return a natural sendable fragment without inventing extra context.
+
+                Context — the user is composing this message in \(appCategory.promptHint)
+
+                Writing style — \(composition?.style.promptDescription ?? "")
+
+                Cleanup — \(composition?.cleanup.promptDescription ?? "")\(TranslationMode.glossarySection(for: composition?.snippets ?? [], includeSnippets: true))
+
+                Return only the final \(targetLanguage.promptName) message, with no commentary, labels, alternatives, quotes, or explanations.
+                """
+            }
         case .smartReply:
             """
             The user has selected text in another app. The text is either (a) a message they received — email, chat message, DM, comment, support ticket, or similar; or (b) a question they need to answer — a quiz item, exam question, multiple-choice question, or open question. Decide which it is from the text itself, then respond appropriately. Always respond in the SAME language as the source text. Never translate.
@@ -7122,12 +7736,175 @@ enum AppCategoryClassifier {
     }
 }
 
-struct OllamaClient {
+enum CloudProvider: String, Codable, CaseIterable {
+    case openAI
+    case anthropic
+    case gemini
+
+    var baseURL: URL {
+        switch self {
+        case .openAI:    URL(string: "https://api.openai.com/v1/chat/completions")!
+        case .anthropic: URL(string: "https://api.anthropic.com/v1/chat/completions")!
+        case .gemini:    URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")!
+        }
+    }
+
+    var keychainService: String { "com.nugumi.app.\(rawValue.lowercased())" }
+
+    var displayName: String {
+        switch self {
+        case .openAI:    "OpenAI"
+        case .anthropic: "Anthropic"
+        case .gemini:    "Google Gemini"
+        }
+    }
+
+    var apiKeyHelpURL: URL {
+        switch self {
+        case .openAI:    URL(string: "https://platform.openai.com/api-keys")!
+        case .anthropic: URL(string: "https://console.anthropic.com/settings/keys")!
+        case .gemini:    URL(string: "https://aistudio.google.com/app/apikey")!
+        }
+    }
+
+    var modelsURL: URL {
+        switch self {
+        case .openAI:    URL(string: "https://api.openai.com/v1/models")!
+        case .anthropic: URL(string: "https://api.anthropic.com/v1/models")!
+        case .gemini:    URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/models")!
+        }
+    }
+}
+
+enum APIKeyValidator {
+    enum Outcome {
+        case valid
+        case invalid(reason: String)
+        case networkUnreachable(detail: String)
+    }
+
+    static func validate(_ apiKey: String, for provider: CloudProvider) async -> Outcome {
+        var request = URLRequest(url: provider.modelsURL)
+        request.httpMethod = "GET"
+        switch provider {
+        case .openAI, .gemini:
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        case .anthropic:
+            // Native Anthropic /v1/models requires x-api-key + anthropic-version,
+            // not the OpenAI-compat Bearer header (compat only covers /chat/completions).
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        }
+        request.timeoutInterval = 10
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .invalid(reason: "Invalid response from \(provider.displayName).")
+            }
+            switch http.statusCode {
+            case 200..<300:
+                return .valid
+            case 401, 403:
+                return .invalid(reason: "\(provider.displayName) rejected this key.")
+            case 429:
+                return .invalid(reason: "\(provider.displayName) rate-limited the check. Try later.")
+            default:
+                return .invalid(reason: "\(provider.displayName) returned HTTP \(http.statusCode).")
+            }
+        } catch let urlError as URLError where urlError.code == .notConnectedToInternet
+            || urlError.code == .cannotConnectToHost
+            || urlError.code == .cannotFindHost
+            || urlError.code == .timedOut
+            || urlError.code == .networkConnectionLost {
+            return .networkUnreachable(detail: urlError.localizedDescription)
+        } catch {
+            return .networkUnreachable(detail: error.localizedDescription)
+        }
+    }
+}
+
+enum KeychainStore {
+    private enum CacheEntry {
+        case missing
+        case present(String)
+    }
+    private static var cache: [CloudProvider: CacheEntry] = [:]
+
+    private static let storageDirectory: URL = {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupport.appending(path: "Nugumi", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    static func apiKey(for provider: CloudProvider) -> String? {
+        if let entry = cache[provider] {
+            switch entry {
+            case .missing: return nil
+            case .present(let key): return key
+            }
+        }
+        let key = readFromFile(for: provider)
+        cache[provider] = key.map { .present($0) } ?? .missing
+        return key
+    }
+
+    static func setAPIKey(_ key: String?, for provider: CloudProvider) {
+        let url = fileURL(for: provider)
+        guard let key, !key.isEmpty else {
+            try? FileManager.default.removeItem(at: url)
+            cache[provider] = .missing
+            return
+        }
+        do {
+            try key.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {
+            // If we can't write, at least keep the in-memory cache so this session works.
+        }
+        cache[provider] = .present(key)
+    }
+
+    private static func readFromFile(for provider: CloudProvider) -> String? {
+        let url = fileURL(for: provider)
+        guard let content = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func fileURL(for provider: CloudProvider) -> URL {
+        storageDirectory.appending(path: "\(provider.rawValue).key", directoryHint: .notDirectory)
+    }
+}
+
+struct ImageInput {
+    let data: Data
+    let mediaType: String
+
+    var base64String: String { data.base64EncodedString() }
+    var openAIDataURI: String { "data:\(mediaType);base64,\(base64String)" }
+}
+
+protocol LLMBackend {
+    func translate(
+        _ text: String,
+        images: [ImageInput],
+        to targetLanguage: TranslationLanguage,
+        mode: TranslationMode,
+        appCategory: AppCategory,
+        composition: CompositionSettings?,
+        thinkingLevel: ThinkingLevel,
+        onPartial: @escaping (String) -> Void
+    ) async throws -> String
+}
+
+struct OllamaClient: LLMBackend {
     let baseURL: URL
     let model: String
 
     func translate(
         _ text: String,
+        images: [ImageInput] = [],
         to targetLanguage: TranslationLanguage,
         mode: TranslationMode = .selection,
         appCategory: AppCategory,
@@ -7152,6 +7929,11 @@ struct OllamaClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 120
 
+        if !images.isEmpty, !LLMModel.option(id: model).supportsImages {
+            throw TranslationError.ollama("Selected Ollama model doesn't support images.")
+        }
+
+        let imageStrings = images.isEmpty ? nil : images.map(\.base64String)
         let body = ChatRequest(
             model: model,
             stream: true,
@@ -7165,7 +7947,7 @@ struct OllamaClient {
                         composition: composition
                     )
                 ),
-                ChatMessage(role: "user", content: sourceText)
+                ChatMessage(role: "user", content: sourceText, images: imageStrings)
             ]
         )
         request.httpBody = try JSONEncoder().encode(body)
@@ -7245,6 +8027,190 @@ struct OllamaClient {
     }
 }
 
+struct OpenAIChatClient: LLMBackend {
+    let provider: CloudProvider
+    let apiKey: String
+    let model: String
+
+    private static let maxImageBytes = 5 * 1024 * 1024
+
+    func translate(
+        _ text: String,
+        images: [ImageInput] = [],
+        to targetLanguage: TranslationLanguage,
+        mode: TranslationMode = .selection,
+        appCategory: AppCategory,
+        composition: CompositionSettings? = nil,
+        thinkingLevel: ThinkingLevel,
+        onPartial: @escaping (String) -> Void
+    ) async throws -> String {
+        guard !apiKey.isEmpty else {
+            throw TranslationError.invalidAPIKey(provider)
+        }
+
+        let sourceText: String
+        switch mode {
+        case .selection, .smartReply:
+            sourceText = TextNormalizer.cleanedSelection(text)
+        case .draftMessage:
+            sourceText = TextNormalizer.cleanedDraftMessage(text)
+        }
+        guard !sourceText.isEmpty || !images.isEmpty else {
+            throw TranslationError.emptyResponse
+        }
+
+        for image in images where image.data.count > Self.maxImageBytes {
+            throw TranslationError.cloudError(provider, "Image too large (limit 5 MB)")
+        }
+
+        let systemPrompt = mode.systemPrompt(
+            targetLanguage: targetLanguage,
+            appCategory: appCategory,
+            composition: composition
+        )
+        let userContent: OpenAIContent = images.isEmpty
+            ? .string(sourceText)
+            : .parts([.text(sourceText)] + images.map { .imageURL($0.openAIDataURI) })
+
+        let body = OpenAIRequest(
+            model: model,
+            stream: true,
+            messages: [
+                OpenAIMessage(role: "system", content: .string(systemPrompt)),
+                OpenAIMessage(role: "user", content: userContent)
+            ]
+        )
+
+        var request = URLRequest(url: provider.baseURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 120
+        request.httpBody = try JSONEncoder().encode(body)
+
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (bytes, response) = try await URLSession.shared.bytes(for: request)
+        } catch let urlError as URLError where urlError.code == .cannotConnectToHost
+            || urlError.code == .cannotFindHost
+            || urlError.code == .networkConnectionLost
+            || urlError.code == .notConnectedToInternet
+            || urlError.code == .timedOut {
+            throw TranslationError.serverUnavailable
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw TranslationError.cloudError(provider, "invalid response")
+        }
+
+        switch httpResponse.statusCode {
+        case 200..<300:
+            break
+        case 401, 403:
+            throw TranslationError.invalidAPIKey(provider)
+        case 429:
+            throw TranslationError.rateLimited(provider)
+        default:
+            throw TranslationError.cloudError(provider, "HTTP \(httpResponse.statusCode)")
+        }
+
+        var translated = ""
+        let decoder = JSONDecoder()
+        for try await rawLine in bytes.lines {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix(":") { continue }
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            if payload == "[DONE]" { break }
+            guard let data = payload.data(using: .utf8),
+                  let chunk = try? decoder.decode(OpenAIStreamChunk.self, from: data)
+            else { continue }
+            if let delta = chunk.choices.first?.delta.content, !delta.isEmpty {
+                translated += delta
+                let partial = TextNormalizer.cleanedTranslation(translated)
+                if !partial.isEmpty {
+                    onPartial(partial)
+                }
+            }
+            if chunk.choices.first?.finishReason != nil { break }
+        }
+
+        let finalTranslation = TextNormalizer.cleanedTranslation(translated)
+        guard !finalTranslation.isEmpty else {
+            throw TranslationError.emptyResponse
+        }
+        return finalTranslation
+    }
+}
+
+private enum OpenAIContent: Encodable {
+    case string(String)
+    case parts([OpenAIPart])
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let text):
+            try container.encode(text)
+        case .parts(let parts):
+            try container.encode(parts)
+        }
+    }
+}
+
+private enum OpenAIPart: Encodable {
+    case text(String)
+    case imageURL(String)
+
+    private enum CodingKeys: String, CodingKey {
+        case type, text, image_url
+    }
+
+    private struct ImageURLBox: Encodable {
+        let url: String
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .text(let text):
+            try container.encode("text", forKey: .type)
+            try container.encode(text, forKey: .text)
+        case .imageURL(let url):
+            try container.encode("image_url", forKey: .type)
+            try container.encode(ImageURLBox(url: url), forKey: .image_url)
+        }
+    }
+}
+
+private struct OpenAIMessage: Encodable {
+    let role: String
+    let content: OpenAIContent
+}
+
+private struct OpenAIRequest: Encodable {
+    let model: String
+    let stream: Bool
+    let messages: [OpenAIMessage]
+}
+
+private struct OpenAIStreamChunk: Decodable {
+    struct Choice: Decodable {
+        struct Delta: Decodable {
+            let content: String?
+        }
+        let delta: Delta
+        let finishReason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case delta
+            case finishReason = "finish_reason"
+        }
+    }
+    let choices: [Choice]
+}
+
 struct ChatRequest: Encodable {
     let model: String
     let stream: Bool
@@ -7255,6 +8221,13 @@ struct ChatRequest: Encodable {
 struct ChatMessage: Codable {
     let role: String
     let content: String
+    let images: [String]?
+
+    init(role: String, content: String, images: [String]? = nil) {
+        self.role = role
+        self.content = content
+        self.images = images
+    }
 }
 
 struct ChatResponse: Decodable {
@@ -7273,6 +8246,9 @@ enum TranslationError: LocalizedError {
     case modelMissing(String)
     case signInRequired
     case modelDownloading(String)
+    case invalidAPIKey(CloudProvider)
+    case rateLimited(CloudProvider)
+    case cloudError(CloudProvider, String)
 
     var errorDescription: String? {
         switch self {
@@ -7288,6 +8264,12 @@ enum TranslationError: LocalizedError {
             "Sign in to Ollama to use the online translator. Open setup to finish."
         case .modelDownloading(let detail):
             "\(detail) Try again when the translator is ready."
+        case .invalidAPIKey(let provider):
+            "\(provider.displayName) rejected the API key. Open settings to update it."
+        case .rateLimited(let provider):
+            "\(provider.displayName) rate limit reached. Try again in a minute, or switch model."
+        case .cloudError(let provider, let detail):
+            "\(provider.displayName): \(detail)"
         }
     }
 }

@@ -1,6 +1,11 @@
 import AppKit
 import Foundation
 
+enum CloudTestResult {
+    case success(preview: String)
+    case failure(String)
+}
+
 enum BootstrapStepStatus: Equatable {
     case unknown
     case checking
@@ -20,15 +25,24 @@ struct BootstrapState: Equatable {
     var serverRunning: BootstrapStepStatus = .unknown
     var ollamaSignedIn: BootstrapStepStatus = .unknown
     var modelReady: [String: BootstrapStepStatus] = [:]
+    var cloudKeys: [CloudProvider: BootstrapStepStatus] = [:]
 
     func modelReady(for modelID: String) -> BootstrapStepStatus {
         modelReady[modelID] ?? .unknown
+    }
+
+    func cloudKey(for provider: CloudProvider) -> BootstrapStepStatus {
+        cloudKeys[provider] ?? .unknown
     }
 
     func isReady(for modelID: String, requiresAccount: Bool) -> Bool {
         guard ollamaInstalled.isTerminalOK, serverRunning.isTerminalOK else { return false }
         if requiresAccount, !ollamaSignedIn.isTerminalOK { return false }
         return modelReady(for: modelID).isTerminalOK
+    }
+
+    func isCloudReady(for provider: CloudProvider) -> Bool {
+        cloudKey(for: provider).isTerminalOK
     }
 }
 
@@ -61,8 +75,17 @@ final class OllamaBootstrap {
     }
 
     func isReady(for modelID: String) -> Bool {
-        let requiresAccount = models.first(where: { $0.id == modelID })?.isCloud ?? false
+        let model = LLMModel.option(id: modelID)
+        if let provider = model.cloudProvider {
+            return state.isCloudReady(for: provider)
+        }
+        let requiresAccount = model.isCloud
         return state.isReady(for: modelID, requiresAccount: requiresAccount)
+    }
+
+    func setCloudAPIKey(_ key: String?, for provider: CloudProvider) {
+        KeychainStore.setAPIKey(key, for: provider)
+        refresh()
     }
 
     // MARK: - Public actions
@@ -135,6 +158,7 @@ final class OllamaBootstrap {
     // MARK: - Detection
 
     private func runRefresh() async {
+        refreshCloudKeys()
         update(\.ollamaInstalled, .checking)
         update(\.serverRunning, .checking)
         update(\.ollamaSignedIn, .checking)
@@ -205,6 +229,14 @@ final class OllamaBootstrap {
                     : "Free and private. Several GB download, then works without internet."))
             }
         }
+    }
+
+    private func refreshCloudKeys() {
+        var keys: [CloudProvider: BootstrapStepStatus] = [:]
+        for provider in CloudProvider.allCases {
+            keys[provider] = KeychainStore.apiKey(for: provider) != nil ? .ok : .needsAction("Paste your \(provider.displayName) API key.")
+        }
+        update(\.cloudKeys, keys)
     }
 
     private func pingServer() async -> Bool {
@@ -393,18 +425,29 @@ private struct PullProgress: Decodable {
 final class OnboardingWindowController: NSWindowController {
     private let bootstrap: OllamaBootstrap
     private let onClose: () -> Void
+    private let onCloudPick: (CloudProvider) -> Void
+    private let onCloudTest: (CloudProvider) async -> CloudTestResult
     private var installRow: StepRow?
     private var serverRow: StepRow?
     private var signInRow: StepRow?
     private var modelRows: [String: StepRow] = [:]
+    private var cloudKeyRow: [CloudProvider: StepRow] = [:]
+    private var testingProviders: Set<CloudProvider> = []
 
-    init(bootstrap: OllamaBootstrap, onClose: @escaping () -> Void) {
+    init(
+        bootstrap: OllamaBootstrap,
+        onClose: @escaping () -> Void,
+        onCloudPick: @escaping (CloudProvider) -> Void = { _ in },
+        onCloudTest: @escaping (CloudProvider) async -> CloudTestResult = { _ in .failure("Test not wired.") }
+    ) {
         self.bootstrap = bootstrap
         self.onClose = onClose
+        self.onCloudPick = onCloudPick
+        self.onCloudTest = onCloudTest
 
         let modelCount = bootstrap.models.count
-        // title + subtitle + 2 section headers + 3 ollama rows + footer
-        let baseHeight: CGFloat = 420
+        // title + subtitle + cloud section (3 rows) + 2 section headers + ollama rows + footer
+        let baseHeight: CGFloat = 580
         let perModelRow: CGFloat = 58
         let height = baseHeight + perModelRow * CGFloat(modelCount)
 
@@ -464,13 +507,30 @@ final class OnboardingWindowController: NSWindowController {
         title.translatesAutoresizingMaskIntoConstraints = false
 
         let subtitle = NSTextField(wrappingLabelWithString:
-            "Nugumi translates whatever you select. To do that, it talks to Ollama — a small free app you'll install once. Two short sections below: get Ollama ready, then pick how Nugumi translates.")
+            "Pick how Nugumi translates. Cloud option is fastest to set up — just paste an API key. Local option keeps everything on your Mac.")
         subtitle.font = NSFont.systemFont(ofSize: 12)
         subtitle.textColor = .secondaryLabelColor
         subtitle.translatesAutoresizingMaskIntoConstraints = false
 
-        let ollamaSectionHeader = Self.makeSectionHeader("1. Get Ollama ready (one time)")
-        let translatorSectionHeader = Self.makeSectionHeader("2. Pick a translator (Online alone is enough)")
+        let cloudSectionHeader = Self.makeSectionHeader("Quick — paste a cloud API key")
+        let ollamaSectionHeader = Self.makeSectionHeader("Or — install Ollama locally (private, free, ~12 GB)")
+        let translatorSectionHeader = Self.makeSectionHeader("Then pick an Ollama translator")
+
+        var cloudRows: [StepRow] = []
+        for provider in CloudProvider.allCases {
+            let row = StepRow(
+                title: "Use \(provider.displayName)",
+                primaryActionTitle: "Paste API key"
+            ) { [weak self] in
+                self?.promptCloudKey(for: provider)
+            }
+            row.secondaryActionTitle = "Get a key →"
+            row.secondaryAction = { [weak self] in
+                self?.openProviderKeyPage(provider)
+            }
+            cloudKeyRow[provider] = row
+            cloudRows.append(row)
+        }
 
         let installRow = StepRow(
             title: "Install Ollama",
@@ -528,6 +588,10 @@ final class OnboardingWindowController: NSWindowController {
 
         contentView.addSubview(title)
         contentView.addSubview(subtitle)
+        contentView.addSubview(cloudSectionHeader)
+        for row in cloudRows {
+            contentView.addSubview(row)
+        }
         contentView.addSubview(ollamaSectionHeader)
         contentView.addSubview(installRow)
         contentView.addSubview(serverRow)
@@ -557,9 +621,28 @@ final class OnboardingWindowController: NSWindowController {
             subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             subtitle.trailingAnchor.constraint(equalTo: title.trailingAnchor),
 
-            ollamaSectionHeader.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: sectionGap),
+            cloudSectionHeader.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: sectionGap),
+            cloudSectionHeader.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
+            cloudSectionHeader.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
+
             ollamaSectionHeader.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
             ollamaSectionHeader.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
+        ]
+
+        var cloudPreviousAnchor = cloudSectionHeader.bottomAnchor
+        var firstCloudRow = true
+        for row in cloudRows {
+            constraints.append(contentsOf: [
+                row.topAnchor.constraint(equalTo: cloudPreviousAnchor, constant: firstCloudRow ? 10 : rowSpacing),
+                row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
+                row.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing)
+            ])
+            cloudPreviousAnchor = row.bottomAnchor
+            firstCloudRow = false
+        }
+
+        constraints.append(contentsOf: [
+            ollamaSectionHeader.topAnchor.constraint(equalTo: cloudPreviousAnchor, constant: sectionGap),
 
             installRow.topAnchor.constraint(equalTo: ollamaSectionHeader.bottomAnchor, constant: 10),
             installRow.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
@@ -576,7 +659,7 @@ final class OnboardingWindowController: NSWindowController {
             translatorSectionHeader.topAnchor.constraint(equalTo: signInRow.bottomAnchor, constant: sectionGap),
             translatorSectionHeader.leadingAnchor.constraint(equalTo: installRow.leadingAnchor),
             translatorSectionHeader.trailingAnchor.constraint(equalTo: installRow.trailingAnchor)
-        ]
+        ])
 
         var previousBottomAnchor = translatorSectionHeader.bottomAnchor
         var firstTranslatorRow = true
@@ -612,7 +695,97 @@ final class OnboardingWindowController: NSWindowController {
         model.isCloud ? "Online translator" : "Offline translator (optional)"
     }
 
+    private func promptCloudKey(for provider: CloudProvider, errorMessage: String? = nil) {
+        NSApp.activate(ignoringOtherApps: true)
+        let baseMessage = "Your key is stored locally on this Mac. Nugumi sends your selected text to \(provider.displayName) for translation."
+        let fullMessage = errorMessage.map { "⚠️ \($0)\n\n\(baseMessage)" } ?? baseMessage
+        let controller = NugumiInputAlertController(
+            title: "Enter your \(provider.displayName) API key",
+            message: fullMessage,
+            placeholder: "sk-...",
+            initialValue: KeychainStore.apiKey(for: provider),
+            primaryButtonTitle: "Save",
+            secondaryButtonTitle: "Get a key…",
+            tertiaryButtonTitle: "Cancel"
+        )
+        let result = controller.showModal()
+        switch result.response {
+        case .alertFirstButtonReturn:
+            guard !result.text.isEmpty else { return }
+            Task { @MainActor in
+                let outcome = await APIKeyValidator.validate(result.text, for: provider)
+                switch outcome {
+                case .valid:
+                    self.bootstrap.setCloudAPIKey(result.text, for: provider)
+                    self.onCloudPick(provider)
+                case .invalid(let reason):
+                    self.promptCloudKey(for: provider, errorMessage: reason)
+                case .networkUnreachable(let detail):
+                    self.bootstrap.setCloudAPIKey(result.text, for: provider)
+                    self.onCloudPick(provider)
+                    NSLog("Nugumi: \(provider.displayName) key saved without verification — \(detail)")
+                }
+            }
+        case .alertSecondButtonReturn:
+            openProviderKeyPage(provider)
+        default:
+            break
+        }
+    }
+
+    private func openProviderKeyPage(_ provider: CloudProvider) {
+        NSWorkspace.shared.open(provider.apiKeyHelpURL)
+    }
+
+    private func runCloudTest(for provider: CloudProvider) {
+        guard !testingProviders.contains(provider) else { return }
+        testingProviders.insert(provider)
+        render(state: bootstrap.state)
+        Task { @MainActor in
+            let result = await onCloudTest(provider)
+            self.testingProviders.remove(provider)
+            self.render(state: self.bootstrap.state)
+            self.showTestResult(provider: provider, result: result)
+        }
+    }
+
+    private func showTestResult(provider: CloudProvider, result: CloudTestResult) {
+        let title: String
+        let message: String
+        switch result {
+        case .success(let preview):
+            title = "\(provider.displayName) works"
+            message = preview
+        case .failure(let detail):
+            title = "\(provider.displayName) failed"
+            message = detail
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        _ = NugumiAlertController(title: title, message: message, primaryButtonTitle: "OK").showModal()
+    }
+
     private func render(state: BootstrapState) {
+        for provider in CloudProvider.allCases {
+            let status = state.cloudKey(for: provider)
+            if case .ok = status {
+                let isTesting = testingProviders.contains(provider)
+                cloudKeyRow[provider]?.applyKeySaved(
+                    message: isTesting ? "Testing…" : "Key saved. Click to change.",
+                    primaryTitle: "Change",
+                    secondaryTitle: "Test"
+                )
+                cloudKeyRow[provider]?.secondaryAction = { [weak self] in
+                    self?.runCloudTest(for: provider)
+                }
+                cloudKeyRow[provider]?.setPrimaryEnabled(!isTesting)
+                cloudKeyRow[provider]?.setSecondaryEnabled(!isTesting)
+            } else {
+                cloudKeyRow[provider]?.apply(status)
+                cloudKeyRow[provider]?.secondaryAction = { [weak self] in
+                    self?.openProviderKeyPage(provider)
+                }
+            }
+        }
         installRow?.apply(state.ollamaInstalled)
         serverRow?.apply(state.serverRunning)
         if !bootstrap.requiresOllamaAccount, case .ok = state.ollamaSignedIn {
@@ -948,6 +1121,33 @@ private final class StepRow: NSView {
         statusLabel.textColor = .secondaryLabelColor
         primaryButton.isEnabled = false
         secondaryButton.isHidden = true
+    }
+
+    func applyKeySaved(message: String, primaryTitle: String, secondaryTitle: String? = nil) {
+        progressIndicator.stopAnimation(nil)
+        progressIndicator.isHidden = true
+        statusIndicator.isHidden = false
+        statusIndicator.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Ready")
+        statusIndicator.contentTintColor = .systemGreen
+        statusLabel.stringValue = message
+        statusLabel.textColor = .secondaryLabelColor
+        primaryButton.title = primaryTitle
+        primaryButton.isEnabled = true
+        if let secondaryTitle {
+            secondaryButton.title = secondaryTitle
+            secondaryButton.isEnabled = true
+            secondaryButton.isHidden = false
+        } else {
+            secondaryButton.isHidden = true
+        }
+    }
+
+    func setPrimaryEnabled(_ enabled: Bool) {
+        primaryButton.isEnabled = enabled
+    }
+
+    func setSecondaryEnabled(_ enabled: Bool) {
+        secondaryButton.isEnabled = enabled
     }
 
     func apply(_ status: BootstrapStepStatus) {
