@@ -6,3 +6,5 @@
 - For AppKit borderless prompt fields, vertical centering should be solved in the `NSTextFieldCell`, not by eyeballing a constraint offset.
 - For floating AppKit glass popups with layer shadows, make the panel larger than the visible pill and place the pill inside a transparent `shadowMargin`; otherwise the shadow/blur is clipped by the window content rect.
 - When reducing the Ask prompt height, scale the pill height, corner radius, font size, input height, and shadow radius together so the result feels intentionally compact instead of vertically squashed.
+- Do not reuse the floating-bar Ask input chrome for pet mode. In pet mode, double-Control should stop the pet and open a larger speech-bubble prompt attached to the mascot, then collapse back into the pet's existing thinking/loading state after Enter.
+- A pet prompt that contains an editable `NSTextField` cannot stay in a non-activating panel while composing. Keep the pet non-activating in idle/selection states, but temporarily remove `.nonactivatingPanel` while the prompt is open so keyboard input reaches the field.
