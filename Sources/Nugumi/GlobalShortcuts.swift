@@ -169,6 +169,65 @@ struct GlobalShortcut: Codable, Equatable {
     }
 }
 
+@MainActor
+final class DoubleControlPressDetector {
+    private let interval: TimeInterval
+    private let onDetected: @MainActor () -> Void
+    private var monitor: Any?
+    private var lastControlDownDate: Date?
+    private var wasControlDown = false
+    var isEnabled = true {
+        didSet {
+            if isEnabled != oldValue {
+                resetState()
+            }
+        }
+    }
+
+    init(interval: TimeInterval = 0.30, onDetected: @escaping @MainActor () -> Void) {
+        self.interval = interval
+        self.onDetected = onDetected
+    }
+
+    func start() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handle(event)
+            }
+        }
+    }
+
+    func stop() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        monitor = nil
+        resetState()
+    }
+
+    private func resetState() {
+        lastControlDownDate = nil
+        wasControlDown = false
+    }
+
+    private func handle(_ event: NSEvent) {
+        guard isEnabled else { return }
+
+        let isControlDown = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.control)
+        defer { wasControlDown = isControlDown }
+        guard isControlDown, !wasControlDown else { return }
+
+        let now = Date()
+        if let last = lastControlDownDate, now.timeIntervalSince(last) <= interval {
+            lastControlDownDate = nil
+            onDetected()
+        } else {
+            lastControlDownDate = now
+        }
+    }
+}
+
 enum GlobalShortcutStore {
     static func shortcut(
         for action: GlobalShortcutAction,

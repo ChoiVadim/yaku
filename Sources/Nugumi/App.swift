@@ -798,6 +798,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private var screenshotPanelSide: TranslationPanelController.Side?
     private var screenshotDragTracker: ScreenshotDragTracker?
     private var globalHotKeys: [GlobalHotKey] = []
+    private var doubleControlDetector: DoubleControlPressDetector?
     private var shortcutRecorderWindowController: ShortcutRecorderWindowController?
     private var lastReplacementSourcePID: pid_t?
     private var translationCache = TranslationCache()
@@ -951,6 +952,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         startMouseMonitor()
         applySelectionDisplayMode()
         setupGlobalHotKeys()
+        setupDoubleControlDetector()
         setupBootstrap()
         _ = updaterController
     }
@@ -1001,6 +1003,19 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             toggleInvisibilityHotKey
         ]
         globalHotKeys.forEach { $0.register() }
+    }
+
+    private func setupDoubleControlDetector() {
+        let detector = DoubleControlPressDetector { [weak self] in
+            self?.startAskNugumiPrompt()
+        }
+        doubleControlDetector = detector
+        detector.start()
+    }
+
+    @MainActor
+    private func startAskNugumiPrompt() {
+        NSLog("Nugumi: Ask prompt requested")
     }
 
     @objc private func toggleInvisibilityMode() {
@@ -1132,6 +1147,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             NSEvent.removeMonitor(mouseMonitor)
         }
         petController?.close()
+        doubleControlDetector?.stop()
         globalHotKeys.forEach { $0.unregister() }
         accessibilityTrustTimer?.invalidate()
         accessibilityTrustTimer = nil
@@ -3170,6 +3186,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
               let action = GlobalShortcutAction(rawValue: raw)
         else { return }
 
+        doubleControlDetector?.isEnabled = false
         shortcutRecorderWindowController?.close()
         let controller = ShortcutRecorderWindowController(
             action: action,
@@ -3178,6 +3195,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 self?.setKeyboardShortcut(shortcut, for: action) ?? false
             },
             onClose: { [weak self] in
+                self?.doubleControlDetector?.isEnabled = true
                 self?.shortcutRecorderWindowController = nil
             }
         )
