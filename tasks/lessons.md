@@ -24,3 +24,4 @@
 - Pet Ask prompt bubbles should sit visually close to the mascot sprite, not just close to the transparent pet panel; use a small negative bubble-to-panel gap so the tail reads attached.
 - Pet Ask input placeholder should feel like the pet is inviting the user, not a product label; prefer short friendly copy such as `Hey, need me?`.
 - Pet Ask input height measurement should be slightly narrower than the visible text frame, with bottom slack, so the bubble grows before a newly wrapped line is hidden.
+- Pet Ask prompt, loading, and answer states should only dismiss or cancel from a deliberate pet click; accidental outside clicks elsewhere on the desktop must be ignored.

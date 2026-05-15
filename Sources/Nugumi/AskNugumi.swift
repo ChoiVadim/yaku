@@ -278,6 +278,14 @@ enum AskNugumiTargetMarkerMetrics {
     }
 }
 
+enum AskNugumiPetDismissalPolicy {
+    static let hitTolerance: CGFloat = 4
+
+    static func shouldDismissPrompt(clickPoint: CGPoint, petFrame: CGRect) -> Bool {
+        petFrame.insetBy(dx: -hitTolerance, dy: -hitTolerance).contains(clickPoint)
+    }
+}
+
 enum AskNugumiPetBubblePresentationMetrics {
     static let bubbleToPetPanelGap: CGFloat = -6
 

@@ -176,6 +176,32 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertEqual(frame.height, AskNugumiTargetMarkerMetrics.size)
     }
 
+    func testPetPromptDismissesOnlyWhenClickTargetsPet() {
+        let petFrame = CGRect(x: 40, y: 50, width: 54, height: 46)
+
+        XCTAssertTrue(AskNugumiPetDismissalPolicy.shouldDismissPrompt(
+            clickPoint: CGPoint(x: 67, y: 73),
+            petFrame: petFrame
+        ))
+        XCTAssertFalse(AskNugumiPetDismissalPolicy.shouldDismissPrompt(
+            clickPoint: CGPoint(x: 160, y: 120),
+            petFrame: petFrame
+        ))
+    }
+
+    func testPetPromptDismissalAllowsSmallPetHitTolerance() {
+        let petFrame = CGRect(x: 40, y: 50, width: 54, height: 46)
+
+        XCTAssertTrue(AskNugumiPetDismissalPolicy.shouldDismissPrompt(
+            clickPoint: CGPoint(x: petFrame.minX - AskNugumiPetDismissalPolicy.hitTolerance, y: petFrame.midY),
+            petFrame: petFrame
+        ))
+        XCTAssertFalse(AskNugumiPetDismissalPolicy.shouldDismissPrompt(
+            clickPoint: CGPoint(x: petFrame.minX - AskNugumiPetDismissalPolicy.hitTolerance - 1, y: petFrame.midY),
+            petFrame: petFrame
+        ))
+    }
+
     func testPetBubblePresentationKeepsPetStillWhenBubbleFitsAboveMascot() {
         let layout = AskNugumiPromptInputMetrics.layout(forContentHeight: 18)
         let petOrigin = CGPoint(x: 40, y: 40)

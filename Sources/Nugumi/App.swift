@@ -5754,7 +5754,12 @@ final class PetController: NSObject, NSTextFieldDelegate {
         panel.contentView = containerView
         promptPanel.contentView = promptContainerView
         petView.onClick = { [weak self] in
-            self?.invokeCurrentMode()
+            guard let self else { return }
+            if self.isPromptVisible || self.onPromptClose != nil {
+                self.closePromptFromUser()
+                return
+            }
+            self.invokeCurrentMode()
         }
         petView.onRightClick = { [weak self] in
             self?.invokeRewriteMode()
@@ -5836,7 +5841,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptLoading = false
         isAnswerOpen = false
         currentAnswerMarkerTarget = nil
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = false
+        petView.allowsClickWhenNotReady = true
         tabInterceptor?.disable()
         tabInterceptor = nil
         appIconView.isHidden = true
@@ -5884,7 +5890,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
         removePromptOutsideClickMonitors()
         removePromptKeyInterceptor()
         promptTextField.isEnabled = false
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = false
+        petView.allowsClickWhenNotReady = true
         petView.apply(state: .thinking, mode: currentMode)
         let targetFrame = panel.frame
 
@@ -5914,7 +5921,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isAnswerOpen = false
         currentAnswerMarkerTarget = nil
         isThinking = false
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = false
+        petView.allowsClickWhenNotReady = true
         promptTextField.isEnabled = true
         configurePromptTextFieldForInput()
         promptBubbleView.isError = true
@@ -5968,7 +5976,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptHasFullSelection = false
         removePromptKeyInterceptor()
 
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = false
+        petView.allowsClickWhenNotReady = true
         tabInterceptor?.disable()
         tabInterceptor = nil
         appIconView.isHidden = true
@@ -6068,6 +6077,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptPanel.alphaValue = 1
         if !isThinking {
             panel.ignoresMouseEvents = true
+            petView.allowsClickWhenNotReady = false
             petView.apply(state: .idle, mode: currentMode, emotion: .neutral)
             refreshAppIcon()
         }
@@ -6383,21 +6393,13 @@ final class PetController: NSObject, NSTextFieldDelegate {
     }
 
     private func closePromptIfClickIsOutside(_ event: NSEvent) {
-        guard isPromptOpen || isAnswerOpen, panel.isVisible else { return }
+        guard isPromptVisible, panel.isVisible else { return }
 
         let screenPoint = event.window?.convertPoint(toScreen: event.locationInWindow) ?? NSEvent.mouseLocation
-        let insidePrompt: Bool
-        if isAnswerOpen {
-            let localPoint = NSPoint(
-                x: screenPoint.x - promptPanel.frame.minX,
-                y: screenPoint.y - promptPanel.frame.minY
-            )
-            insidePrompt = currentAnswerLayout.bubbleFrame.insetBy(dx: -4, dy: -4).contains(localPoint)
-        } else {
-            insidePrompt = promptPanel.frame.insetBy(dx: -4, dy: -4).contains(screenPoint)
-        }
-        let insidePet = panel.frame.insetBy(dx: -4, dy: -4).contains(screenPoint)
-        guard !insidePrompt, !insidePet else {
+        guard AskNugumiPetDismissalPolicy.shouldDismissPrompt(
+            clickPoint: screenPoint,
+            petFrame: panel.frame
+        ) else {
             return
         }
 
@@ -6469,7 +6471,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
         onRewrite = nil
         onSmartReply = nil
         isReadyLockedUntilPanelCloses = false
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = !isPromptLoading
+        petView.allowsClickWhenNotReady = isPromptLoading
         tabInterceptor?.disable()
         tabInterceptor = nil
         appIconView.isHidden = true
@@ -6480,6 +6483,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
     func clearThinking() {
         isThinking = false
         isPromptLoading = false
+        panel.ignoresMouseEvents = true
+        petView.allowsClickWhenNotReady = false
         petView.apply(state: .idle, mode: currentMode)
         refreshAppIcon()
     }
@@ -6721,6 +6726,7 @@ final class PetMascotView: NSView {
 
     var onClick: (() -> Void)?
     var onRightClick: (() -> Void)?
+    var allowsClickWhenNotReady = false
 
     private var state: State = .idle
     private var mode: TranslationMode = .selection
@@ -6742,7 +6748,7 @@ final class PetMascotView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard state == .ready else { return }
+        guard state == .ready || allowsClickWhenNotReady else { return }
         onClick?()
     }
 
