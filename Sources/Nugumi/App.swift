@@ -6100,8 +6100,65 @@ final class FloatingTranslateButtonController {
 private final class AskPromptTextField: NSTextField {
     var onEscape: (() -> Void)?
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        cell = AskPromptTextFieldCell(textCell: "")
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
     override func cancelOperation(_ sender: Any?) {
         onEscape?()
+    }
+}
+
+private final class AskPromptTextFieldCell: NSTextFieldCell {
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        verticallyCenteredRect(forBounds: rect)
+    }
+
+    override func select(
+        withFrame rect: NSRect,
+        in controlView: NSView,
+        editor textObj: NSText,
+        delegate: Any?,
+        start selStart: Int,
+        length selLength: Int
+    ) {
+        super.select(
+            withFrame: verticallyCenteredRect(forBounds: rect),
+            in: controlView,
+            editor: textObj,
+            delegate: delegate,
+            start: selStart,
+            length: selLength
+        )
+    }
+
+    override func edit(
+        withFrame rect: NSRect,
+        in controlView: NSView,
+        editor textObj: NSText,
+        delegate: Any?,
+        event: NSEvent?
+    ) {
+        super.edit(
+            withFrame: verticallyCenteredRect(forBounds: rect),
+            in: controlView,
+            editor: textObj,
+            delegate: delegate,
+            event: event
+        )
+    }
+
+    private func verticallyCenteredRect(forBounds rect: NSRect) -> NSRect {
+        var centeredRect = super.drawingRect(forBounds: rect)
+        let textHeight = cellSize(forBounds: rect).height
+        centeredRect.origin.y = rect.origin.y + (rect.height - textHeight) / 2
+        centeredRect.size.height = textHeight
+        return centeredRect
     }
 }
 
@@ -6110,13 +6167,67 @@ private final class AskPromptPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+private final class AskPromptChromeView: NSView {
+    var cornerRadius: CGFloat = 16
+
+    override var isOpaque: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 1, dy: 1)
+        let path = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
+        NSGraphicsContext.saveGraphicsState()
+        path.addClip()
+
+        if let leftGlow = NSGradient(colors: [
+            NSColor(srgbRed: 0.08, green: 0.32, blue: 1.0, alpha: 0.22),
+            NSColor(srgbRed: 0.08, green: 0.32, blue: 1.0, alpha: 0.08),
+            NSColor.clear
+        ]) {
+            let glowRect = NSRect(x: rect.minX, y: rect.minY, width: 150, height: rect.height)
+            leftGlow.draw(in: glowRect, angle: 0)
+        }
+
+        if let topSheen = NSGradient(colors: [
+            NSColor(calibratedWhite: 1.0, alpha: 0.22),
+            NSColor(calibratedWhite: 1.0, alpha: 0.04),
+            NSColor.clear
+        ]) {
+            let sheenRect = NSRect(x: rect.minX, y: rect.midY, width: rect.width, height: rect.height / 2)
+            topSheen.draw(in: sheenRect, angle: 90)
+        }
+
+        NSGraphicsContext.restoreGraphicsState()
+
+        NSColor(calibratedWhite: 1.0, alpha: 0.28).setStroke()
+        path.lineWidth = 0.9
+        path.stroke()
+
+        let innerRect = bounds.insetBy(dx: 2.5, dy: 2.5)
+        let innerPath = NSBezierPath(
+            roundedRect: innerRect,
+            xRadius: max(0, cornerRadius - 2),
+            yRadius: max(0, cornerRadius - 2)
+        )
+        NSColor(calibratedWhite: 1.0, alpha: 0.08).setStroke()
+        innerPath.lineWidth = 0.8
+        innerPath.stroke()
+    }
+}
+
 @MainActor
 final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
-    private static let panelSize = NSSize(width: 360, height: 52)
+    private static let pillSize = NSSize(width: 220, height: 32)
+    private static let shadowMargin: CGFloat = 14
+    private static let panelSize = NSSize(
+        width: pillSize.width + shadowMargin * 2,
+        height: pillSize.height + shadowMargin * 2
+    )
     private static let edgeMargin: CGFloat = 12
-    private static let fieldInsetX: CGFloat = 14
-    private static let fieldInsetY: CGFloat = 9
-    private static let cornerRadius: CGFloat = 18
+    private static let cornerRadius: CGFloat = 16
     private static let textMovementUserInfoKey = "NSTextMovement"
 
     private let panel: NSPanel
@@ -6125,6 +6236,8 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
     private let onClose: () -> Void
     private var didClose = false
     private var isSubmitting = false
+    private var globalOutsideClickMonitor: Any?
+    private var localOutsideClickMonitor: Any?
 
     var isVisible: Bool { panel.isVisible }
 
@@ -6154,7 +6267,7 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
         panel.isReleasedWhenClosed = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
 
@@ -6165,6 +6278,7 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(textField)
+        installOutsideClickMonitors()
     }
 
     func setLoading() {
@@ -6187,6 +6301,7 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
     func close() {
         guard !didClose else { return }
         didClose = true
+        removeOutsideClickMonitors()
         panel.close()
         onClose()
     }
@@ -6195,7 +6310,17 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
         Task { @MainActor [weak self] in
             guard let self, !self.didClose else { return }
             self.didClose = true
+            self.removeOutsideClickMonitors()
             self.onClose()
+        }
+    }
+
+    deinit {
+        if let globalOutsideClickMonitor {
+            NSEvent.removeMonitor(globalOutsideClickMonitor)
+        }
+        if let localOutsideClickMonitor {
+            NSEvent.removeMonitor(localOutsideClickMonitor)
         }
     }
 
@@ -6210,24 +6335,48 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
         let rootView = NSView(frame: NSRect(origin: .zero, size: Self.panelSize))
         rootView.wantsLayer = true
         rootView.layer?.backgroundColor = NSColor.clear.cgColor
+        rootView.layer?.masksToBounds = false
 
         let glass = GlassHostView(
-            frame: rootView.bounds,
+            frame: NSRect(
+                origin: NSPoint(x: Self.shadowMargin, y: Self.shadowMargin),
+                size: Self.pillSize
+            ),
             cornerRadius: Self.cornerRadius,
-            tintColor: NSColor(srgbRed: 0.06, green: 0.12, blue: 0.22, alpha: 0.35),
+            tintColor: nil,
             style: .regular
         )
         glass.autoresizingMask = [.width, .height]
+        glass.wantsLayer = true
+        glass.layer?.masksToBounds = false
+        glass.layer?.shadowColor = NSColor.black.cgColor
+        glass.layer?.shadowOpacity = 0.16
+        glass.layer?.shadowRadius = 10
+        glass.layer?.shadowOffset = CGSize(width: 0, height: -2)
+        glass.layer?.shadowPath = CGPath(
+            roundedRect: NSRect(origin: .zero, size: Self.pillSize),
+            cornerWidth: Self.cornerRadius,
+            cornerHeight: Self.cornerRadius,
+            transform: nil
+        )
         rootView.addSubview(glass)
+
+        let chrome = AskPromptChromeView(frame: glass.contentView.bounds)
+        chrome.cornerRadius = Self.cornerRadius
+        chrome.autoresizingMask = [.width, .height]
+        glass.contentView.addSubview(chrome)
 
         textField.delegate = self
         textField.onEscape = { [weak self] in
             self?.close()
         }
-        setPlaceholder("Ask about this screen...")
+        setPlaceholder("Ask Nugumi")
         textField.font = NSFont.systemFont(ofSize: 14, weight: .regular)
-        textField.textColor = .labelColor
-        textField.bezelStyle = .roundedBezel
+        textField.textColor = NSColor(calibratedWhite: 1.0, alpha: 0.88)
+        textField.isBordered = false
+        textField.isBezeled = false
+        textField.drawsBackground = false
+        textField.backgroundColor = .clear
         textField.focusRingType = .none
         textField.usesSingleLineMode = true
         textField.maximumNumberOfLines = 1
@@ -6238,10 +6387,10 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
         glass.contentView.addSubview(textField)
 
         NSLayoutConstraint.activate([
-            textField.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: Self.fieldInsetX),
-            textField.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -Self.fieldInsetX),
-            textField.topAnchor.constraint(equalTo: glass.contentView.topAnchor, constant: Self.fieldInsetY),
-            textField.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -Self.fieldInsetY)
+            textField.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 22),
+            textField.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -22),
+            textField.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
+            textField.heightAnchor.constraint(equalToConstant: 22)
         ])
 
         panel.contentView = rootView
@@ -6263,14 +6412,55 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
         textField.placeholderAttributedString = NSAttributedString(
             string: text,
             attributes: [
-                .foregroundColor: NSColor.secondaryLabelColor,
-                .font: NSFont.systemFont(ofSize: 14, weight: .regular)
+                .foregroundColor: NSColor(calibratedWhite: 1.0, alpha: 0.44),
+                .font: textField.font ?? NSFont.systemFont(ofSize: 14, weight: .regular)
             ]
         )
     }
 
     private func textMovement(from notification: Notification) -> Int? {
         notification.userInfo?[Self.textMovementUserInfoKey] as? Int
+    }
+
+    private func installOutsideClickMonitors() {
+        guard globalOutsideClickMonitor == nil, localOutsideClickMonitor == nil else {
+            return
+        }
+
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        globalOutsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+            self?.closeIfClickIsOutside(event)
+        }
+
+        localOutsideClickMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            self?.closeIfClickIsOutside(event)
+            return event
+        }
+    }
+
+    private func removeOutsideClickMonitors() {
+        if let globalOutsideClickMonitor {
+            NSEvent.removeMonitor(globalOutsideClickMonitor)
+            self.globalOutsideClickMonitor = nil
+        }
+
+        if let localOutsideClickMonitor {
+            NSEvent.removeMonitor(localOutsideClickMonitor)
+            self.localOutsideClickMonitor = nil
+        }
+    }
+
+    private func closeIfClickIsOutside(_ event: NSEvent) {
+        guard panel.isVisible else {
+            return
+        }
+
+        let screenPoint = event.window?.convertPoint(toScreen: event.locationInWindow) ?? NSEvent.mouseLocation
+        guard !panel.frame.insetBy(dx: -4, dy: -4).contains(screenPoint) else {
+            return
+        }
+
+        close()
     }
 
     private static func origin(near point: NSPoint, size: NSSize) -> NSPoint {
