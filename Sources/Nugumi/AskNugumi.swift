@@ -190,6 +190,8 @@ enum AskNugumiPromptInputMetrics {
     static let minimumPanelHeight: CGFloat = 98
     static let maximumPanelHeight: CGFloat = 210
     static let fontSize: CGFloat = 13
+    static let textMeasurementWidth: CGFloat = 104
+    static let textMeasurementBottomInset: CGFloat = 6
 
     private static let bubbleX: CGFloat = 0
     private static let bubbleY: CGFloat = 34

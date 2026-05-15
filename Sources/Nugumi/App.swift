@@ -6202,13 +6202,13 @@ final class PetController: NSObject, NSTextFieldDelegate {
         ]
         let boundingRect = (measuredText as NSString).boundingRect(
             with: NSSize(
-                width: AskNugumiPromptInputMetrics.layout(forContentHeight: 0).textFrame.width,
+                width: AskNugumiPromptInputMetrics.textMeasurementWidth,
                 height: .greatestFiniteMagnitude
             ),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: attributes
         )
-        return ceil(boundingRect.height) + 4
+        return ceil(boundingRect.height) + AskNugumiPromptInputMetrics.textMeasurementBottomInset
     }
 
     private func insertPromptText(_ text: String) {

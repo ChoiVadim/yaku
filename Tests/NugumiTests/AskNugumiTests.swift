@@ -245,6 +245,18 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertEqual(layout.bubbleFrame.maxX - layout.textFrame.maxX, 30, accuracy: 0.001)
     }
 
+    func testPromptInputMeasuresWrappingBeforeVisibleTextFrameEdge() {
+        let layout = AskNugumiPromptInputMetrics.layout(forContentHeight: 18)
+
+        XCTAssertLessThan(AskNugumiPromptInputMetrics.textMeasurementWidth, layout.textFrame.width)
+        XCTAssertEqual(
+            layout.textFrame.width - AskNugumiPromptInputMetrics.textMeasurementWidth,
+            12,
+            accuracy: 0.001
+        )
+        XCTAssertGreaterThanOrEqual(AskNugumiPromptInputMetrics.textMeasurementBottomInset, 6)
+    }
+
     func testPromptInputLayoutGrowsWhenTextWraps() {
         let short = AskNugumiPromptInputMetrics.layout(forContentHeight: 18)
         let taller = AskNugumiPromptInputMetrics.layout(forContentHeight: 72)
