@@ -7943,11 +7943,25 @@ protocol LLMBackend {
         thinkingLevel: ThinkingLevel,
         onPartial: @escaping (String) -> Void
     ) async throws -> String
+
+    func ask(
+        prompt: String,
+        image: ImageInput,
+        onPartial: @escaping (String) -> Void
+    ) async throws -> AskNugumiResponse
 }
 
 struct OllamaClient: LLMBackend {
     let baseURL: URL
     let model: String
+
+    func ask(
+        prompt: String,
+        image: ImageInput,
+        onPartial: @escaping (String) -> Void
+    ) async throws -> AskNugumiResponse {
+        throw TranslationError.ollama("Ask Nugumi needs a vision model.")
+    }
 
     func translate(
         _ text: String,
@@ -8080,6 +8094,120 @@ struct OpenAIChatClient: LLMBackend {
     let model: String
 
     private static let maxImageBytes = 5 * 1024 * 1024
+    private static let askSystemPrompt = """
+You are Nugumi, a concise desktop visual assistant. The user will provide a screenshot and a question about what is visible on screen.
+
+Return only JSON with this shape:
+{"message":"short helpful answer","petTarget":{"x":0.0,"y":0.0,"coordinateSpace":"screenshot_normalized"}}
+
+Rules:
+- `message` is required and must be useful on its own.
+- Include `petTarget` only when pointing to a visible screen location helps.
+- `petTarget.x` is left-to-right from 0.0 to 1.0 across the screenshot.
+- `petTarget.y` is top-to-bottom from 0.0 to 1.0 across the screenshot.
+- Use coordinateSpace exactly "screenshot_normalized".
+- Do not click, automate, or claim you took an action.
+- If uncertain, omit `petTarget` and explain what to look for in `message`.
+"""
+
+    func ask(
+        prompt: String,
+        image: ImageInput,
+        onPartial: @escaping (String) -> Void
+    ) async throws -> AskNugumiResponse {
+        guard !apiKey.isEmpty else {
+            throw TranslationError.invalidAPIKey(provider)
+        }
+
+        guard LLMModel.option(id: model).supportsImages else {
+            throw TranslationError.cloudError(provider, "Ask Nugumi needs a vision model.")
+        }
+
+        guard image.data.count <= Self.maxImageBytes else {
+            throw TranslationError.cloudError(provider, "Image too large (limit 5 MB)")
+        }
+
+        let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanPrompt.isEmpty else {
+            return AskNugumiResponse(message: "", petTarget: nil)
+        }
+
+        let userContent = OpenAIContent.parts([
+            .text(cleanPrompt),
+            .imageURL(image.openAIDataURI)
+        ])
+
+        let body = OpenAIRequest(
+            model: model,
+            stream: true,
+            messages: [
+                OpenAIMessage(role: "system", content: .string(Self.askSystemPrompt)),
+                OpenAIMessage(role: "user", content: userContent)
+            ]
+        )
+
+        var request = URLRequest(url: provider.baseURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 120
+        request.httpBody = try JSONEncoder().encode(body)
+
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (bytes, response) = try await URLSession.shared.bytes(for: request)
+        } catch let urlError as URLError where urlError.code == .cannotConnectToHost
+            || urlError.code == .cannotFindHost
+            || urlError.code == .networkConnectionLost
+            || urlError.code == .notConnectedToInternet
+            || urlError.code == .timedOut {
+            throw TranslationError.serverUnavailable
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw TranslationError.cloudError(provider, "invalid response")
+        }
+
+        switch httpResponse.statusCode {
+        case 200..<300:
+            break
+        case 401, 403:
+            throw TranslationError.invalidAPIKey(provider)
+        case 429:
+            throw TranslationError.rateLimited(provider)
+        default:
+            throw TranslationError.cloudError(provider, "HTTP \(httpResponse.statusCode)")
+        }
+
+        var answer = ""
+        let decoder = JSONDecoder()
+        for try await rawLine in bytes.lines {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix(":") { continue }
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            if payload == "[DONE]" { break }
+            guard let data = payload.data(using: .utf8) else { continue }
+            if let streamError = try? decoder.decode(OpenAIStreamError.self, from: data) {
+                throw TranslationError.cloudError(provider, streamError.displayMessage)
+            }
+            guard let chunk = try? decoder.decode(OpenAIStreamChunk.self, from: data) else {
+                throw TranslationError.cloudError(provider, "Unexpected stream payload")
+            }
+            if let delta = chunk.choices.first?.delta.content, !delta.isEmpty {
+                answer += delta
+                onPartial(answer)
+            }
+            if chunk.choices.first?.finishReason != nil { break }
+        }
+
+        let parsed = AskNugumiResponse.parse(answer)
+        guard !parsed.message.isEmpty else {
+            throw TranslationError.emptyResponse
+        }
+        return parsed
+    }
 
     func translate(
         _ text: String,
@@ -8170,9 +8298,13 @@ struct OpenAIChatClient: LLMBackend {
             guard line.hasPrefix("data:") else { continue }
             let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
             if payload == "[DONE]" { break }
-            guard let data = payload.data(using: .utf8),
-                  let chunk = try? decoder.decode(OpenAIStreamChunk.self, from: data)
-            else { continue }
+            guard let data = payload.data(using: .utf8) else { continue }
+            if let streamError = try? decoder.decode(OpenAIStreamError.self, from: data) {
+                throw TranslationError.cloudError(provider, streamError.displayMessage)
+            }
+            guard let chunk = try? decoder.decode(OpenAIStreamChunk.self, from: data) else {
+                throw TranslationError.cloudError(provider, "Unexpected stream payload")
+            }
             if let delta = chunk.choices.first?.delta.content, !delta.isEmpty {
                 translated += delta
                 let partial = TextNormalizer.cleanedTranslation(translated)
@@ -8256,6 +8388,20 @@ private struct OpenAIStreamChunk: Decodable {
         }
     }
     let choices: [Choice]
+}
+
+private struct OpenAIStreamError: Decodable {
+    struct ErrorBody: Decodable {
+        let message: String?
+        let type: String?
+        let code: String?
+    }
+
+    let error: ErrorBody
+
+    var displayMessage: String {
+        error.message ?? error.type ?? error.code ?? "stream error"
+    }
 }
 
 struct ChatRequest: Encodable {
