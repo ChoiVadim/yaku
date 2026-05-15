@@ -5248,7 +5248,7 @@ final class ReturnKeyInterceptor {
     }
 }
 
-final class PetPromptKeyInterceptor {
+final class PromptKeyInterceptor {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private let onInsertText: @MainActor (String) -> Void
@@ -5289,7 +5289,7 @@ final class PetPromptKeyInterceptor {
                     return Unmanaged.passUnretained(event)
                 }
 
-                let interceptor = Unmanaged<PetPromptKeyInterceptor>.fromOpaque(userInfo).takeUnretainedValue()
+                let interceptor = Unmanaged<PromptKeyInterceptor>.fromOpaque(userInfo).takeUnretainedValue()
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                 let flags = event.flags
                 let hasCommand = flags.contains(.maskCommand)
@@ -5579,7 +5579,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private var workspaceObserver: NSObjectProtocol?
     private var trackingTimer: Timer?
     private var tabInterceptor: TabKeyInterceptor?
-    private var promptKeyInterceptor: PetPromptKeyInterceptor?
+    private var promptKeyInterceptor: PromptKeyInterceptor?
     private var promptGlobalOutsideClickMonitor: Any?
     private var promptLocalOutsideClickMonitor: Any?
     private var selectedText: String?
@@ -6269,7 +6269,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
 
     private func installPromptKeyInterceptor() {
         guard promptKeyInterceptor == nil else { return }
-        let interceptor = PetPromptKeyInterceptor(
+        let interceptor = PromptKeyInterceptor(
             onInsertText: { [weak self] text in
                 self?.insertPromptText(text)
             },
@@ -7456,14 +7456,6 @@ private final class AskPromptChromeView: NSView {
 
 @MainActor
 final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
-    private static let pillSize = NSSize(width: 220, height: 32)
-    private static let shadowMargin: CGFloat = 14
-    private static let panelSize = NSSize(
-        width: pillSize.width + shadowMargin * 2,
-        height: pillSize.height + shadowMargin * 2
-    )
-    private static let edgeMargin: CGFloat = 12
-    private static let cornerRadius: CGFloat = 16
     private static let textMovementUserInfoKey = "NSTextMovement"
 
     private let panel: NSPanel
@@ -7474,6 +7466,8 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
     private var isSubmitting = false
     private var globalOutsideClickMonitor: Any?
     private var localOutsideClickMonitor: Any?
+    private var promptInput = AskNugumiPromptInputBuffer()
+    private var keyInterceptor: PromptKeyInterceptor?
 
     var isVisible: Bool { panel.isVisible }
 
@@ -7485,9 +7479,10 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
         self.onSubmit = onSubmit
         self.onClose = onClose
 
-        let origin = Self.origin(near: screenPoint, size: Self.panelSize)
+        let layout = AskNugumiFloatingPromptMetrics.layout
+        let origin = Self.origin(near: screenPoint, size: layout.panelSize)
         panel = AskPromptPanel(
-            contentRect: NSRect(origin: origin, size: Self.panelSize),
+            contentRect: NSRect(origin: origin, size: layout.panelSize),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -7511,32 +7506,41 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
     }
 
     func show() {
+        promptInput.reset()
+        renderPromptText()
+        textField.isEnabled = true
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(textField)
+        installKeyInterceptor()
         installOutsideClickMonitors()
     }
 
     func setLoading() {
+        removeKeyInterceptor()
         panel.sharingType = .none
         textField.isEnabled = false
-        textField.stringValue = ""
+        promptInput.reset()
+        renderPromptText()
         setPlaceholder("Looking...")
     }
 
     func showError(_ message: String) {
         isSubmitting = false
         textField.isEnabled = true
-        textField.stringValue = ""
+        promptInput.reset()
+        renderPromptText()
         setPlaceholder(message)
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(textField)
+        installKeyInterceptor()
     }
 
     func close() {
         guard !didClose else { return }
         didClose = true
+        removeKeyInterceptor()
         removeOutsideClickMonitors()
         panel.close()
         onClose()
@@ -7546,12 +7550,15 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
         Task { @MainActor [weak self] in
             guard let self, !self.didClose else { return }
             self.didClose = true
+            self.removeKeyInterceptor()
             self.removeOutsideClickMonitors()
             self.onClose()
         }
     }
 
     deinit {
+        keyInterceptor?.disable()
+        keyInterceptor = nil
         if let globalOutsideClickMonitor {
             NSEvent.removeMonitor(globalOutsideClickMonitor)
         }
@@ -7564,21 +7571,20 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
         guard textMovement(from: notification) == NSTextMovement.return.rawValue else {
             return
         }
+        promptInput.replace(with: textField.stringValue)
         submit()
     }
 
     private func buildUI() {
-        let rootView = NSView(frame: NSRect(origin: .zero, size: Self.panelSize))
+        let layout = AskNugumiFloatingPromptMetrics.layout
+        let rootView = NSView(frame: NSRect(origin: .zero, size: layout.panelSize))
         rootView.wantsLayer = true
         rootView.layer?.backgroundColor = NSColor.clear.cgColor
         rootView.layer?.masksToBounds = false
 
         let glass = GlassHostView(
-            frame: NSRect(
-                origin: NSPoint(x: Self.shadowMargin, y: Self.shadowMargin),
-                size: Self.pillSize
-            ),
-            cornerRadius: Self.cornerRadius,
+            frame: layout.pillFrame,
+            cornerRadius: layout.cornerRadius,
             tintColor: nil,
             style: .regular
         )
@@ -7590,15 +7596,15 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
         glass.layer?.shadowRadius = 10
         glass.layer?.shadowOffset = CGSize(width: 0, height: -2)
         glass.layer?.shadowPath = CGPath(
-            roundedRect: NSRect(origin: .zero, size: Self.pillSize),
-            cornerWidth: Self.cornerRadius,
-            cornerHeight: Self.cornerRadius,
+            roundedRect: NSRect(origin: .zero, size: layout.pillFrame.size),
+            cornerWidth: layout.cornerRadius,
+            cornerHeight: layout.cornerRadius,
             transform: nil
         )
         rootView.addSubview(glass)
 
         let chrome = AskPromptChromeView(frame: glass.contentView.bounds)
-        chrome.cornerRadius = Self.cornerRadius
+        chrome.cornerRadius = layout.cornerRadius
         chrome.autoresizingMask = [.width, .height]
         glass.contentView.addSubview(chrome)
 
@@ -7623,10 +7629,16 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
         glass.contentView.addSubview(textField)
 
         NSLayoutConstraint.activate([
-            textField.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 22),
-            textField.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -22),
+            textField.leadingAnchor.constraint(
+                equalTo: glass.contentView.leadingAnchor,
+                constant: layout.textFrame.minX - layout.pillFrame.minX
+            ),
+            textField.trailingAnchor.constraint(
+                equalTo: glass.contentView.trailingAnchor,
+                constant: -(layout.pillFrame.maxX - layout.textFrame.maxX)
+            ),
             textField.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
-            textField.heightAnchor.constraint(equalToConstant: 22)
+            textField.heightAnchor.constraint(equalToConstant: layout.textFrame.height)
         ])
 
         panel.contentView = rootView
@@ -7634,13 +7646,76 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
 
     private func submit() {
         guard textField.isEnabled, !isSubmitting else { return }
-        let text = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if promptInput.text != textField.stringValue {
+            promptInput.replace(with: textField.stringValue)
+        }
+        let text = promptInput.trimmedText
         guard !text.isEmpty else {
             panel.makeFirstResponder(textField)
             return
         }
         isSubmitting = true
+        removeKeyInterceptor()
         onSubmit(text)
+    }
+
+    private func renderPromptText() {
+        textField.stringValue = promptInput.text
+    }
+
+    private func insertPromptText(_ text: String) {
+        guard textField.isEnabled, !isSubmitting else { return }
+        promptInput.insert(text)
+        renderPromptText()
+    }
+
+    private func deletePromptBackward() {
+        guard textField.isEnabled, !isSubmitting else { return }
+        promptInput.deleteBackward()
+        renderPromptText()
+    }
+
+    private func pastePromptText() {
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+            return
+        }
+        insertPromptText(text)
+    }
+
+    private func selectAllPromptText() {
+        guard textField.isEnabled, !isSubmitting else { return }
+        promptInput.selectAll()
+    }
+
+    private func installKeyInterceptor() {
+        guard keyInterceptor == nil else { return }
+        let interceptor = PromptKeyInterceptor(
+            onInsertText: { [weak self] text in
+                self?.insertPromptText(text)
+            },
+            onBackspace: { [weak self] in
+                self?.deletePromptBackward()
+            },
+            onSubmit: { [weak self] in
+                self?.submit()
+            },
+            onCancel: { [weak self] in
+                self?.close()
+            },
+            onPaste: { [weak self] in
+                self?.pastePromptText()
+            },
+            onSelectAll: { [weak self] in
+                self?.selectAllPromptText()
+            }
+        )
+        keyInterceptor = interceptor
+        interceptor.enable()
+    }
+
+    private func removeKeyInterceptor() {
+        keyInterceptor?.disable()
+        keyInterceptor = nil
     }
 
     private func setPlaceholder(_ text: String) {
@@ -7701,6 +7776,7 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
 
     private static func origin(near point: NSPoint, size: NSSize) -> NSPoint {
         let visibleFrame = NSScreen.visibleFrame(containing: point)
+        let edgeMargin = AskNugumiFloatingPromptMetrics.edgeMargin
         let preferredGap: CGFloat = 10
         let preferredBelowY = point.y - size.height - preferredGap
         let preferredAboveY = point.y + preferredGap

@@ -203,9 +203,93 @@ struct AskNugumiPromptInputLayout: Equatable {
     let textFrame: CGRect
 }
 
+struct AskNugumiFloatingPromptLayout: Equatable {
+    let panelSize: CGSize
+    let pillFrame: CGRect
+    let textFrame: CGRect
+    let cornerRadius: CGFloat
+}
+
 struct AskNugumiPetBubblePresentation: Equatable {
     let promptFrame: CGRect
     let petOrigin: CGPoint
+}
+
+struct AskNugumiPromptInputBuffer: Equatable {
+    private(set) var text = ""
+    private(set) var hasFullSelection = false
+
+    var trimmedText: String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    mutating func insert(_ insertedText: String) {
+        guard !insertedText.isEmpty else { return }
+        if hasFullSelection {
+            text = insertedText
+        } else {
+            text.append(insertedText)
+        }
+        hasFullSelection = false
+    }
+
+    mutating func deleteBackward() {
+        if hasFullSelection {
+            text = ""
+            hasFullSelection = false
+        } else if !text.isEmpty {
+            text.removeLast()
+        }
+    }
+
+    mutating func selectAll() {
+        guard !text.isEmpty else { return }
+        hasFullSelection = true
+    }
+
+    mutating func replace(with newText: String) {
+        text = newText
+        hasFullSelection = false
+    }
+
+    mutating func reset() {
+        replace(with: "")
+    }
+}
+
+enum AskNugumiFloatingPromptMetrics {
+    static let pillSize = CGSize(width: 220, height: 38)
+    static let shadowMargin: CGFloat = 14
+    static let edgeMargin: CGFloat = 12
+    static let textHorizontalInset: CGFloat = 22
+    static let textFieldHeight: CGFloat = 24
+    static let cornerRadius: CGFloat = pillSize.height / 2
+
+    static var layout: AskNugumiFloatingPromptLayout {
+        let panelSize = CGSize(
+            width: pillSize.width + shadowMargin * 2,
+            height: pillSize.height + shadowMargin * 2
+        )
+        let pillFrame = CGRect(
+            x: shadowMargin,
+            y: shadowMargin,
+            width: pillSize.width,
+            height: pillSize.height
+        )
+        let textFrame = CGRect(
+            x: pillFrame.minX + textHorizontalInset,
+            y: pillFrame.minY + (pillFrame.height - textFieldHeight) / 2,
+            width: pillFrame.width - textHorizontalInset * 2,
+            height: textFieldHeight
+        )
+
+        return AskNugumiFloatingPromptLayout(
+            panelSize: panelSize,
+            pillFrame: pillFrame,
+            textFrame: textFrame,
+            cornerRadius: cornerRadius
+        )
+    }
 }
 
 enum AskNugumiPromptInputMetrics {

@@ -351,6 +351,30 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertGreaterThan(taller.bubbleFrame.height, short.bubbleFrame.height)
     }
 
+    func testFloatingPromptLayoutHasTallerPillAndCenteredInput() {
+        let layout = AskNugumiFloatingPromptMetrics.layout
+
+        XCTAssertEqual(layout.pillFrame.size.height, 38, accuracy: 0.001)
+        XCTAssertEqual(layout.panelSize.height, 66, accuracy: 0.001)
+        XCTAssertEqual(layout.cornerRadius, 19, accuracy: 0.001)
+        XCTAssertEqual(layout.textFrame.height, 24, accuracy: 0.001)
+        XCTAssertEqual(layout.textFrame.midY, layout.pillFrame.midY, accuracy: 0.001)
+    }
+
+    func testPromptInputBufferSupportsTypingDeletionAndReplacement() {
+        var input = AskNugumiPromptInputBuffer()
+
+        input.insert("hello")
+        input.insert(" world")
+        input.deleteBackward()
+        input.selectAll()
+        input.insert("Ask Nugumi")
+
+        XCTAssertEqual(input.text, "Ask Nugumi")
+        XCTAssertEqual(input.trimmedText, "Ask Nugumi")
+        XCTAssertFalse(input.hasFullSelection)
+    }
+
     func testAnswerBubbleLayoutGrowsBeforeScrollLimit() {
         let short = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 30)
         let taller = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 120)
