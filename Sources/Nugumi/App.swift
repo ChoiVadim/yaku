@@ -5153,6 +5153,125 @@ final class ReturnKeyInterceptor {
     }
 }
 
+final class PetPromptKeyInterceptor {
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private let onInsertText: @MainActor (String) -> Void
+    private let onBackspace: @MainActor () -> Void
+    private let onSubmit: @MainActor () -> Void
+    private let onCancel: @MainActor () -> Void
+    private let onPaste: @MainActor () -> Void
+    private let onSelectAll: @MainActor () -> Void
+
+    init(
+        onInsertText: @escaping @MainActor (String) -> Void,
+        onBackspace: @escaping @MainActor () -> Void,
+        onSubmit: @escaping @MainActor () -> Void,
+        onCancel: @escaping @MainActor () -> Void,
+        onPaste: @escaping @MainActor () -> Void,
+        onSelectAll: @escaping @MainActor () -> Void
+    ) {
+        self.onInsertText = onInsertText
+        self.onBackspace = onBackspace
+        self.onSubmit = onSubmit
+        self.onCancel = onCancel
+        self.onPaste = onPaste
+        self.onSelectAll = onSelectAll
+    }
+
+    func enable() {
+        guard eventTap == nil else { return }
+
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: { _, type, event, userInfo in
+                guard let userInfo, type == .keyDown else {
+                    return Unmanaged.passUnretained(event)
+                }
+
+                let interceptor = Unmanaged<PetPromptKeyInterceptor>.fromOpaque(userInfo).takeUnretainedValue()
+                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                let flags = event.flags
+                let hasCommand = flags.contains(.maskCommand)
+                let hasControl = flags.contains(.maskControl)
+                let hasOption = flags.contains(.maskAlternate)
+
+                if keyCode == Int64(kVK_Escape) {
+                    Task { @MainActor in interceptor.onCancel() }
+                    return nil
+                }
+
+                if keyCode == Int64(kVK_Return) || keyCode == Int64(kVK_ANSI_KeypadEnter) {
+                    guard !hasCommand, !hasControl, !hasOption else {
+                        return Unmanaged.passUnretained(event)
+                    }
+                    Task { @MainActor in interceptor.onSubmit() }
+                    return nil
+                }
+
+                if keyCode == Int64(kVK_Delete) || keyCode == Int64(kVK_ForwardDelete) {
+                    guard !hasCommand, !hasControl else {
+                        return Unmanaged.passUnretained(event)
+                    }
+                    Task { @MainActor in interceptor.onBackspace() }
+                    return nil
+                }
+
+                if hasCommand, keyCode == Int64(kVK_ANSI_V) {
+                    Task { @MainActor in interceptor.onPaste() }
+                    return nil
+                }
+
+                if hasCommand, keyCode == Int64(kVK_ANSI_A) {
+                    Task { @MainActor in interceptor.onSelectAll() }
+                    return nil
+                }
+
+                guard !hasCommand, !hasControl,
+                      let nsEvent = NSEvent(cgEvent: event),
+                      let characters = nsEvent.characters,
+                      !characters.isEmpty,
+                      characters.rangeOfCharacter(from: .controlCharacters) == nil
+                else {
+                    return Unmanaged.passUnretained(event)
+                }
+
+                Task { @MainActor in interceptor.onInsertText(characters) }
+                return nil
+            },
+            userInfo: selfPointer
+        ) else {
+            return
+        }
+
+        eventTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        runLoopSource = source
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    func disable() {
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+        }
+        if let runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        }
+        runLoopSource = nil
+        eventTap = nil
+    }
+
+    deinit {
+        disable()
+    }
+}
+
 private final class PetPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -5234,6 +5353,8 @@ private final class PetPromptBubbleView: NSView {
 final class PetController: NSObject, NSTextFieldDelegate {
     private let panel: NSPanel
     private let containerView: NSView
+    private let promptPanel: NSPanel
+    private let promptContainerView: NSView
     private let petView: PetMascotView
     private let appIconView: NSImageView
     private let promptBubbleView: PetPromptBubbleView
@@ -5241,6 +5362,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private var workspaceObserver: NSObjectProtocol?
     private var trackingTimer: Timer?
     private var tabInterceptor: TabKeyInterceptor?
+    private var promptKeyInterceptor: PetPromptKeyInterceptor?
     private var promptGlobalOutsideClickMonitor: Any?
     private var promptLocalOutsideClickMonitor: Any?
     private var selectedText: String?
@@ -5254,6 +5376,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private var isThinking = false
     private var isPromptOpen = false
     private var isPromptLoading = false
+    private var promptBuffer = ""
+    private var promptHasFullSelection = false
     private var pointingTarget: NSPoint?
     private var pointingReturnTimer: Timer?
     private var lastCursorLocation = NSEvent.mouseLocation
@@ -5298,6 +5422,13 @@ final class PetController: NSObject, NSTextFieldDelegate {
             defer: false
         )
         containerView = NSView(frame: NSRect(origin: .zero, size: Self.panelSize))
+        promptPanel = PetPanel(
+            contentRect: NSRect(origin: origin, size: Self.promptPanelSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        promptContainerView = NSView(frame: NSRect(origin: .zero, size: Self.promptPanelSize))
         petView = PetMascotView(frame: NSRect(
             origin: .zero,
             size: Self.panelSize
@@ -5322,7 +5453,18 @@ final class PetController: NSObject, NSTextFieldDelegate {
         panel.hidesOnDeactivate = false
         panel.ignoresMouseEvents = true
 
+        promptPanel.level = .floating
+        promptPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        InvisibilityState.apply(to: promptPanel)
+        promptPanel.isReleasedWhenClosed = false
+        promptPanel.isOpaque = false
+        promptPanel.backgroundColor = .clear
+        promptPanel.hasShadow = false
+        promptPanel.hidesOnDeactivate = false
+        promptPanel.ignoresMouseEvents = false
+
         containerView.autoresizingMask = [.width, .height]
+        promptContainerView.autoresizingMask = [.width, .height]
         petView.wantsLayer = true
         petView.layer?.shadowColor = NSColor.black.cgColor
         petView.layer?.shadowOpacity = 0.32
@@ -5337,7 +5479,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
 
         promptBubbleView.alphaValue = 0
         promptBubbleView.isHidden = true
-        containerView.addSubview(promptBubbleView)
+        promptContainerView.addSubview(promptBubbleView)
 
         promptTextField.delegate = self
         promptTextField.onEscape = { [weak self] in
@@ -5350,6 +5492,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptTextField.drawsBackground = false
         promptTextField.backgroundColor = .clear
         promptTextField.focusRingType = .none
+        promptTextField.isEditable = false
+        promptTextField.isSelectable = false
         promptTextField.usesSingleLineMode = true
         promptTextField.maximumNumberOfLines = 1
         promptTextField.cell?.wraps = false
@@ -5358,9 +5502,10 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptTextField.alphaValue = 0
         promptTextField.isHidden = true
         setPromptPlaceholder("Ask Nugumi")
-        containerView.addSubview(promptTextField)
+        promptContainerView.addSubview(promptTextField)
 
         panel.contentView = containerView
+        promptPanel.contentView = promptContainerView
         petView.onClick = { [weak self] in
             self?.invokeCurrentMode()
         }
@@ -5423,6 +5568,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         trackingTimer = nil
         cancelPointingAnimation()
         panel.close()
+        promptPanel.close()
     }
 
     func showPrompt(
@@ -5441,31 +5587,32 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isThinking = false
         isPromptOpen = true
         isPromptLoading = false
-        setPromptWindowInteractionEnabled(true)
+        panel.ignoresMouseEvents = true
         tabInterceptor?.disable()
         tabInterceptor = nil
         appIconView.isHidden = true
         petView.apply(state: .idle, mode: currentMode)
 
-        promptTextField.stringValue = ""
+        promptBuffer = ""
+        promptHasFullSelection = false
+        renderPromptText()
         promptTextField.isEnabled = true
         promptBubbleView.isError = false
         setPromptPlaceholder("Ask Nugumi")
         showPromptViews()
-        resizePanel(to: Self.promptPanelSize, animate: panel.isVisible)
+        let frame = promptFrameAnchoredToPet()
+        panel.setFrameOrigin(frame.origin)
+        promptPanel.setFrame(frame, display: true)
+        promptPanel.alphaValue = 1
         show()
-        NSApp.activate(ignoringOtherApps: true)
-        panel.orderFrontRegardless()
-        panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(promptTextField)
+        promptPanel.orderFrontRegardless()
+        installPromptKeyInterceptor()
         installPromptOutsideClickMonitors()
     }
 
     func focusPrompt() {
         guard isPromptOpen else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(promptTextField)
+        promptPanel.orderFrontRegardless()
     }
 
     func setPromptLoading() {
@@ -5477,15 +5624,19 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptOpen = false
         isPromptLoading = true
         isThinking = true
+        promptHasFullSelection = false
         removePromptOutsideClickMonitors()
+        removePromptKeyInterceptor()
         promptTextField.isEnabled = false
-        setPromptWindowInteractionEnabled(false)
+        panel.ignoresMouseEvents = true
         petView.apply(state: .thinking, mode: currentMode)
-        resizePanel(to: Self.panelSize, animate: true)
+        let targetFrame = panel.frame
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.12
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            promptPanel.animator().setFrame(targetFrame, display: true)
+            promptPanel.animator().alphaValue = 0
             promptBubbleView.animator().alphaValue = 0
             promptTextField.animator().alphaValue = 0
         } completionHandler: { [weak self] in
@@ -5493,6 +5644,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
                 guard let self, self.isPromptLoading else { return }
                 self.promptBubbleView.isHidden = true
                 self.promptTextField.isHidden = true
+                self.promptPanel.orderOut(nil)
+                self.promptPanel.alphaValue = 1
             }
         }
     }
@@ -5503,15 +5656,19 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptOpen = true
         isPromptLoading = false
         isThinking = false
-        setPromptWindowInteractionEnabled(true)
+        panel.ignoresMouseEvents = true
         promptTextField.isEnabled = true
         promptBubbleView.isError = true
         setPromptPlaceholder(message)
         showPromptViews()
         petView.apply(state: .idle, mode: currentMode)
-        resizePanel(to: Self.promptPanelSize, animate: true)
+        let frame = promptFrameAnchoredToPet()
+        panel.setFrameOrigin(frame.origin)
+        promptPanel.setFrame(frame, display: true)
+        promptPanel.alphaValue = 1
         show()
         focusPrompt()
+        installPromptKeyInterceptor()
         installPromptOutsideClickMonitors()
     }
 
@@ -5528,9 +5685,10 @@ final class PetController: NSObject, NSTextFieldDelegate {
 
     private func submitPrompt() {
         guard isPromptOpen, promptTextField.isEnabled else { return }
-        let text = promptTextField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = promptBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
-            panel.makeFirstResponder(promptTextField)
+            promptHasFullSelection = false
+            renderPromptText()
             return
         }
         onPromptSubmit?(text)
@@ -5546,18 +5704,22 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private func clearPrompt(animate: Bool) {
         guard isPromptVisible || onPromptSubmit != nil || onPromptClose != nil else { return }
         removePromptOutsideClickMonitors()
+        removePromptKeyInterceptor()
         isPromptOpen = false
         isPromptLoading = false
         onPromptSubmit = nil
         onPromptClose = nil
-        promptTextField.stringValue = ""
+        promptBuffer = ""
+        promptHasFullSelection = false
+        renderPromptText()
         promptTextField.isEnabled = true
         promptBubbleView.isError = false
         setPromptPlaceholder("Ask Nugumi")
         hidePromptViews()
+        promptPanel.orderOut(nil)
+        promptPanel.alphaValue = 1
         if !isThinking {
-            setPromptWindowInteractionEnabled(false)
-            resizePanel(to: Self.panelSize, animate: animate && panel.isVisible)
+            panel.ignoresMouseEvents = true
             petView.apply(state: .idle, mode: currentMode)
             refreshAppIcon()
         }
@@ -5591,31 +5753,90 @@ final class PetController: NSObject, NSTextFieldDelegate {
         )
     }
 
-    private func setPromptWindowInteractionEnabled(_ isEnabled: Bool) {
-        var styleMask = panel.styleMask
-        if isEnabled {
-            styleMask.remove(.nonactivatingPanel)
+    private func renderPromptText() {
+        promptTextField.stringValue = promptBuffer
+    }
+
+    private func insertPromptText(_ text: String) {
+        guard isPromptOpen, promptTextField.isEnabled else { return }
+        if promptHasFullSelection {
+            promptBuffer = text
         } else {
-            styleMask.insert(.nonactivatingPanel)
+            promptBuffer.append(text)
         }
-        if panel.styleMask != styleMask {
-            panel.styleMask = styleMask
+        promptHasFullSelection = false
+        promptBubbleView.isError = false
+        setPromptPlaceholder("Ask Nugumi")
+        renderPromptText()
+    }
+
+    private func deletePromptBackward() {
+        guard isPromptOpen, promptTextField.isEnabled else { return }
+        if promptHasFullSelection {
+            promptBuffer = ""
+            promptHasFullSelection = false
+        } else if !promptBuffer.isEmpty {
+            promptBuffer.removeLast()
         }
-        panel.ignoresMouseEvents = !isEnabled
+        renderPromptText()
+    }
+
+    private func pastePromptText() {
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+            return
+        }
+        insertPromptText(text)
+    }
+
+    private func selectAllPromptText() {
+        guard isPromptOpen, !promptBuffer.isEmpty else { return }
+        promptHasFullSelection = true
+    }
+
+    private func installPromptKeyInterceptor() {
+        guard promptKeyInterceptor == nil else { return }
+        let interceptor = PetPromptKeyInterceptor(
+            onInsertText: { [weak self] text in
+                self?.insertPromptText(text)
+            },
+            onBackspace: { [weak self] in
+                self?.deletePromptBackward()
+            },
+            onSubmit: { [weak self] in
+                self?.submitPrompt()
+            },
+            onCancel: { [weak self] in
+                self?.closePromptFromUser()
+            },
+            onPaste: { [weak self] in
+                self?.pastePromptText()
+            },
+            onSelectAll: { [weak self] in
+                self?.selectAllPromptText()
+            }
+        )
+        promptKeyInterceptor = interceptor
+        interceptor.enable()
+    }
+
+    private func removePromptKeyInterceptor() {
+        promptKeyInterceptor?.disable()
+        promptKeyInterceptor = nil
     }
 
     private func textMovement(from notification: Notification) -> Int? {
         notification.userInfo?[Self.textMovementUserInfoKey] as? Int
     }
 
-    private func resizePanel(to size: NSSize, animate: Bool) {
+    private func promptFrameAnchoredToPet() -> NSRect {
         let referencePoint = NSPoint(x: panel.frame.midX, y: panel.frame.midY)
         let visibleFrame = NSScreen.visibleFrame(containing: referencePoint)
-        let origin = Self.clampedOrigin(panel.frame.origin, size: size, visibleFrame: visibleFrame)
-        let frame = NSRect(origin: origin, size: size)
-        containerView.frame = NSRect(origin: .zero, size: size)
-        layoutPromptSubviews()
-        panel.setFrame(frame, display: true, animate: animate)
+        let origin = Self.clampedOrigin(
+            panel.frame.origin,
+            size: Self.promptPanelSize,
+            visibleFrame: visibleFrame
+        )
+        return NSRect(origin: origin, size: Self.promptPanelSize)
     }
 
     private func layoutPromptSubviews() {
@@ -5661,7 +5882,9 @@ final class PetController: NSObject, NSTextFieldDelegate {
         guard isPromptOpen, panel.isVisible else { return }
 
         let screenPoint = event.window?.convertPoint(toScreen: event.locationInWindow) ?? NSEvent.mouseLocation
-        guard !panel.frame.insetBy(dx: -4, dy: -4).contains(screenPoint) else {
+        let insidePrompt = promptPanel.frame.insetBy(dx: -4, dy: -4).contains(screenPoint)
+        let insidePet = panel.frame.insetBy(dx: -4, dy: -4).contains(screenPoint)
+        guard !insidePrompt, !insidePet else {
             return
         }
 
