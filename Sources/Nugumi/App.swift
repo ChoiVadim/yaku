@@ -5494,14 +5494,17 @@ private final class PetPromptBubbleView: NSView {
 
     private func drawTargetMarker(center: NSPoint, unit: CGFloat) {
         let isBrightFrame = targetMarkerFrame < 34
-        let border = NSColor(srgbRed: 0.08, green: 0.30, blue: 0.84, alpha: 0.92)
-        let fill = isBrightFrame
-            ? NSColor(srgbRed: 0.18, green: 0.58, blue: 1.0, alpha: 0.96)
-            : NSColor(srgbRed: 0.70, green: 0.84, blue: 1.0, alpha: 0.58)
+        let border = NSColor(srgbRed: 0.04, green: 0.31, blue: 0.29, alpha: 0.88)
+        let fill = NSColor(
+            srgbRed: 17.0 / 255.0,
+            green: 118.0 / 255.0,
+            blue: 110.0 / 255.0,
+            alpha: isBrightFrame ? 0.94 : 0.52
+        )
         let core = isBrightFrame
-            ? NSColor.white.withAlphaComponent(0.95)
-            : NSColor.white.withAlphaComponent(0.55)
-        let shadow = NSColor(calibratedWhite: 0.0, alpha: isBrightFrame ? 0.22 : 0.10)
+            ? NSColor(srgbRed: 0.88, green: 0.96, blue: 0.94, alpha: 0.86)
+            : NSColor(srgbRed: 0.88, green: 0.96, blue: 0.94, alpha: 0.42)
+        let shadow = NSColor(calibratedWhite: 0.0, alpha: isBrightFrame ? 0.16 : 0.07)
 
         drawPixelMarkerRows(center: NSPoint(x: center.x + unit, y: center.y - unit), unit: unit, border: shadow, fill: shadow, core: shadow)
         drawPixelMarkerRows(center: center, unit: unit, border: border, fill: fill, core: core)
