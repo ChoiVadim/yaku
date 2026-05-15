@@ -4366,7 +4366,54 @@ enum ScreenshotTranslationError: LocalizedError {
     }
 }
 
+struct AskNugumiScreenCapture {
+    let image: ImageInput
+    // AppKit global coordinates in points.
+    let screenFrame: CGRect
+    let visibleFrame: CGRect
+}
+
 enum ScreenshotCapture {
+    @MainActor
+    static func captureActiveScreen(containing point: NSPoint = NSEvent.mouseLocation) async throws -> AskNugumiScreenCapture {
+        guard CGPreflightScreenCaptureAccess() else {
+            throw ScreenshotTranslationError.screenRecordingPermissionDenied
+        }
+
+        let screen = NSScreen.screens.first { $0.frame.contains(point) }
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+
+        guard let screen else {
+            throw ScreenshotTranslationError.captureFailedDetail("No screen is available.")
+        }
+
+        guard let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+            throw ScreenshotTranslationError.captureFailedDetail("Could not capture the active screen.")
+        }
+        let screenFrame = screen.frame
+        let visibleFrame = screen.visibleFrame
+
+        let image = try await Task.detached(priority: .userInitiated) {
+            guard let cgImage = CGDisplayCreateImage(screenID) else {
+                throw ScreenshotTranslationError.captureFailedDetail("Could not capture the active screen.")
+            }
+
+            let bitmap = NSBitmapImageRep(cgImage: cgImage)
+            guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
+                throw ScreenshotTranslationError.captureFailedDetail("Could not encode the active screen.")
+            }
+
+            return ImageInput(data: pngData, mediaType: "image/png")
+        }.value
+
+        return AskNugumiScreenCapture(
+            image: image,
+            screenFrame: screenFrame,
+            visibleFrame: visibleFrame
+        )
+    }
+
     static func captureInteractiveArea() async throws -> URL {
         // Permission is requested once at launch (requestScreenRecordingPermissionIfNeeded),
         // which is what registers Nugumi in System Settings. Calling CGRequestScreenCaptureAccess
