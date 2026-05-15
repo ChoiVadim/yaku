@@ -10,3 +10,4 @@
 - If a floating pet prompt keeps beeping on keys, stop trying to make `NSTextField` focus work through borderless panels. Use a prompt-scoped `CGEvent` key interceptor, render the typed buffer manually, and consume handled key events so input works independently of AppKit first-responder state.
 - Pet-attached prompt windows should match the pixel mascot style. Avoid smooth rounded macOS dialog chrome there; draw a blocky pixel speech bubble with stepped corners, pixel tail, and no antialiasing.
 - When adding a pixel prompt font, bundle the font and its OFL license inside target resources, register it with CoreText from `Bundle.module`, and keep the prompt positioned close enough to the pet that the tail reads as attached.
+- In pet Ask mode, keep the answer inside the same pet speech-bubble surface instead of opening the normal result panel. Only move the pet when the model returns a real `petTarget`; otherwise display the answer in place and keep the pet still.

@@ -1022,7 +1022,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private func startAskNugumiPrompt() {
         guard !isAskNugumiRunning else { return }
         guard askPromptController?.isVisible != true else { return }
-        guard petController?.isPromptVisible != true else {
+        guard petController?.isPromptComposingVisible != true else {
             petController?.focusPrompt()
             return
         }
@@ -1149,10 +1149,16 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         clearAskNugumiRequestIfCurrent(requestID)
         askPromptController?.close()
         askPromptController = nil
-        petController?.clearPrompt()
 
         translationPanelController?.close()
         translationPanelController = nil
+
+        if selectionDisplayMode == .pet {
+            presentPetAskNugumiResult(response, capture: capture)
+            return
+        }
+
+        petController?.clearPrompt()
         let controller = TranslationPanelController(
             anchor: .point(NSEvent.mouseLocation, panelSide: .right),
             sourceText: prompt,
@@ -1177,6 +1183,33 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 petController = PetController(initialMode: .selection)
             }
             petController?.pointTemporarily(at: point)
+        }
+    }
+
+    @MainActor
+    private func presentPetAskNugumiResult(
+        _ response: AskNugumiResponse,
+        capture: AskNugumiScreenCapture
+    ) {
+        if petController == nil {
+            petController = PetController(initialMode: .selection)
+        }
+
+        guard let petController else { return }
+
+        if let target = response.petTarget {
+            let point = AskNugumiCoordinateMapper.screenPoint(
+                for: target,
+                screenFrame: capture.screenFrame,
+                visibleFrame: capture.visibleFrame
+            )
+            petController.moveToAnswerTarget(
+                point,
+                message: response.message,
+                emotion: response.emotion
+            )
+        } else {
+            petController.showAnswer(response.message, emotion: response.emotion)
         }
     }
 
@@ -5419,9 +5452,11 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private var isThinking = false
     private var isPromptOpen = false
     private var isPromptLoading = false
+    private var isAnswerOpen = false
     private var promptBuffer = ""
     private var promptHasFullSelection = false
     private var pointingTarget: NSPoint?
+    private var pendingPointArrival: (() -> Void)?
     private var pointingReturnTimer: Timer?
     private var lastCursorLocation = NSEvent.mouseLocation
     private var lastCursorMovementDate = Date.distantPast
@@ -5440,6 +5475,9 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private static let promptPanelSize = NSSize(width: 260, height: 90)
     private static let promptBubbleFrame = NSRect(x: 32, y: 26, width: 222, height: 60)
     private static let promptTextFieldFrame = NSRect(x: 54, y: 44, width: 180, height: 22)
+    private static let answerPanelSize = NSSize(width: 300, height: 128)
+    private static let answerBubbleFrame = NSRect(x: 32, y: 26, width: 262, height: 98)
+    private static let answerTextFieldFrame = NSRect(x: 54, y: 48, width: 220, height: 54)
     private static let edgeMargin: CGFloat = 6
     private static let textMovementUserInfoKey = "NSTextMovement"
     private static let defaultCursorOffset = NSPoint(
@@ -5448,6 +5486,10 @@ final class PetController: NSObject, NSTextFieldDelegate {
     )
 
     var isPromptVisible: Bool {
+        isPromptOpen || isPromptLoading || isAnswerOpen
+    }
+
+    var isPromptComposingVisible: Bool {
         isPromptOpen || isPromptLoading
     }
 
@@ -5537,11 +5579,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptTextField.focusRingType = .none
         promptTextField.isEditable = false
         promptTextField.isSelectable = false
-        promptTextField.usesSingleLineMode = true
-        promptTextField.maximumNumberOfLines = 1
-        promptTextField.cell?.wraps = false
-        promptTextField.cell?.isScrollable = true
-        promptTextField.cell?.lineBreakMode = .byTruncatingTail
+        configurePromptTextFieldForInput()
         promptTextField.alphaValue = 0
         promptTextField.isHidden = true
         setPromptPlaceholder("Ask Nugumi")
@@ -5630,6 +5668,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isThinking = false
         isPromptOpen = true
         isPromptLoading = false
+        isAnswerOpen = false
         panel.ignoresMouseEvents = true
         tabInterceptor?.disable()
         tabInterceptor = nil
@@ -5640,10 +5679,11 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptHasFullSelection = false
         renderPromptText()
         promptTextField.isEnabled = true
+        configurePromptTextFieldForInput()
         promptBubbleView.isError = false
         setPromptPlaceholder("Ask Nugumi")
         showPromptViews()
-        let frame = promptFrameAnchoredToPet()
+        let frame = promptFrameAnchoredToPet(size: Self.promptPanelSize)
         panel.setFrameOrigin(frame.origin)
         promptPanel.setFrame(frame, display: true)
         promptPanel.alphaValue = 1
@@ -5666,6 +5706,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
 
         isPromptOpen = false
         isPromptLoading = true
+        isAnswerOpen = false
         isThinking = true
         promptHasFullSelection = false
         removePromptOutsideClickMonitors()
@@ -5698,14 +5739,16 @@ final class PetController: NSObject, NSTextFieldDelegate {
 
         isPromptOpen = true
         isPromptLoading = false
+        isAnswerOpen = false
         isThinking = false
         panel.ignoresMouseEvents = true
         promptTextField.isEnabled = true
+        configurePromptTextFieldForInput()
         promptBubbleView.isError = true
         setPromptPlaceholder(message)
         showPromptViews()
         petView.apply(state: .idle, mode: currentMode)
-        let frame = promptFrameAnchoredToPet()
+        let frame = promptFrameAnchoredToPet(size: Self.promptPanelSize)
         panel.setFrameOrigin(frame.origin)
         promptPanel.setFrame(frame, display: true)
         promptPanel.alphaValue = 1
@@ -5724,6 +5767,76 @@ final class PetController: NSObject, NSTextFieldDelegate {
             return
         }
         submitPrompt()
+    }
+
+    func showAnswer(_ message: String, emotion: AskNugumiEmotion?) {
+        let cleanMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanMessage.isEmpty else { return }
+
+        cancelPointingAnimation()
+        selectedText = nil
+        onTranslate = nil
+        onRewrite = nil
+        onSmartReply = nil
+        onPromptSubmit = nil
+        onPromptClose = nil
+        isReadyLockedUntilPanelCloses = false
+        isThinking = false
+        isPromptOpen = false
+        isPromptLoading = false
+        isAnswerOpen = true
+        promptBuffer = ""
+        promptHasFullSelection = false
+        removePromptKeyInterceptor()
+
+        panel.ignoresMouseEvents = true
+        tabInterceptor?.disable()
+        tabInterceptor = nil
+        appIconView.isHidden = true
+        promptBubbleView.isError = false
+        configurePromptTextFieldForAnswer()
+        promptTextField.stringValue = cleanMessage
+        showPromptViews()
+
+        let frame = promptFrameAnchoredToPet(size: Self.answerPanelSize)
+        panel.setFrameOrigin(frame.origin)
+        promptPanel.setFrame(frame, display: true)
+        promptPanel.alphaValue = 1
+        show()
+        promptPanel.orderFrontRegardless()
+        petView.apply(state: .idle, mode: currentMode, emotion: emotion ?? .neutral)
+        installPromptOutsideClickMonitors()
+    }
+
+    func moveToAnswerTarget(_ destination: NSPoint, message: String, emotion: AskNugumiEmotion?) {
+        let targetOrigin = Self.originNearPoint(destination, size: Self.panelSize)
+        let distance = hypot(targetOrigin.x - panel.frame.origin.x, targetOrigin.y - panel.frame.origin.y)
+        guard distance > 3 else {
+            showAnswer(message, emotion: emotion)
+            return
+        }
+
+        cancelPointingAnimation()
+        selectedText = nil
+        onTranslate = nil
+        onRewrite = nil
+        onSmartReply = nil
+        isReadyLockedUntilPanelCloses = false
+        isThinking = false
+        isPromptOpen = false
+        isPromptLoading = false
+        isAnswerOpen = false
+        panel.ignoresMouseEvents = true
+        tabInterceptor?.disable()
+        tabInterceptor = nil
+        appIconView.isHidden = true
+        promptPanel.orderOut(nil)
+        pointingTarget = destination
+        pendingPointArrival = { [weak self] in
+            self?.showAnswer(message, emotion: emotion)
+        }
+        petView.apply(state: .run, mode: currentMode)
+        show()
     }
 
     private func submitPrompt() {
@@ -5750,6 +5863,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         removePromptKeyInterceptor()
         isPromptOpen = false
         isPromptLoading = false
+        isAnswerOpen = false
         onPromptSubmit = nil
         onPromptClose = nil
         promptBuffer = ""
@@ -5763,7 +5877,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptPanel.alphaValue = 1
         if !isThinking {
             panel.ignoresMouseEvents = true
-            petView.apply(state: .idle, mode: currentMode)
+            petView.apply(state: .idle, mode: currentMode, emotion: .neutral)
             refreshAppIcon()
         }
     }
@@ -5781,6 +5895,24 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptTextField.alphaValue = 0
         promptBubbleView.isHidden = true
         promptTextField.isHidden = true
+    }
+
+    private func configurePromptTextFieldForInput() {
+        promptTextField.font = NugumiFont.pixelPrompt(size: 16)
+        promptTextField.usesSingleLineMode = true
+        promptTextField.maximumNumberOfLines = 1
+        promptTextField.cell?.wraps = false
+        promptTextField.cell?.isScrollable = true
+        promptTextField.cell?.lineBreakMode = .byTruncatingTail
+    }
+
+    private func configurePromptTextFieldForAnswer() {
+        promptTextField.font = NugumiFont.pixelPrompt(size: 14)
+        promptTextField.usesSingleLineMode = false
+        promptTextField.maximumNumberOfLines = 4
+        promptTextField.cell?.wraps = true
+        promptTextField.cell?.isScrollable = false
+        promptTextField.cell?.lineBreakMode = .byWordWrapping
     }
 
     private func setPromptPlaceholder(_ text: String) {
@@ -5871,15 +6003,15 @@ final class PetController: NSObject, NSTextFieldDelegate {
         notification.userInfo?[Self.textMovementUserInfoKey] as? Int
     }
 
-    private func promptFrameAnchoredToPet() -> NSRect {
+    private func promptFrameAnchoredToPet(size: NSSize) -> NSRect {
         let referencePoint = NSPoint(x: panel.frame.midX, y: panel.frame.midY)
         let visibleFrame = NSScreen.visibleFrame(containing: referencePoint)
         let origin = Self.clampedOrigin(
             panel.frame.origin,
-            size: Self.promptPanelSize,
+            size: size,
             visibleFrame: visibleFrame
         )
-        return NSRect(origin: origin, size: Self.promptPanelSize)
+        return NSRect(origin: origin, size: size)
     }
 
     private func layoutPromptSubviews() {
@@ -5890,8 +6022,13 @@ final class PetController: NSObject, NSTextFieldDelegate {
             width: Self.appIconSize.width,
             height: Self.appIconSize.height
         )
-        promptBubbleView.frame = Self.promptBubbleFrame
-        promptTextField.frame = Self.promptTextFieldFrame
+        if isAnswerOpen {
+            promptBubbleView.frame = Self.answerBubbleFrame
+            promptTextField.frame = Self.answerTextFieldFrame
+        } else {
+            promptBubbleView.frame = Self.promptBubbleFrame
+            promptTextField.frame = Self.promptTextFieldFrame
+        }
     }
 
     private func installPromptOutsideClickMonitors() {
@@ -5922,7 +6059,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
     }
 
     private func closePromptIfClickIsOutside(_ event: NSEvent) {
-        guard isPromptOpen, panel.isVisible else { return }
+        guard isPromptOpen || isAnswerOpen, panel.isVisible else { return }
 
         let screenPoint = event.window?.convertPoint(toScreen: event.locationInWindow) ?? NSEvent.mouseLocation
         let insidePrompt = promptPanel.frame.insetBy(dx: -4, dy: -4).contains(screenPoint)
@@ -6016,6 +6153,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
 
     func pointTemporarily(at destination: NSPoint, holdDuration: TimeInterval = 3.0) {
         pointingReturnTimer?.invalidate()
+        pendingPointArrival = nil
         pointingTarget = destination
         selectedText = nil
         onTranslate = nil
@@ -6045,6 +6183,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         pointingReturnTimer?.invalidate()
         pointingReturnTimer = nil
         pointingTarget = nil
+        pendingPointArrival = nil
     }
 
     func setActionMode(_ mode: TranslationMode) {
@@ -6082,6 +6221,11 @@ final class PetController: NSObject, NSTextFieldDelegate {
             panel.setFrameOrigin(nextOrigin)
             let distance = hypot(dx, dy)
             petView.apply(state: distance > 3 ? .run : .ready, mode: currentMode)
+            if distance <= 3, let pendingPointArrival {
+                self.pointingTarget = nil
+                self.pendingPointArrival = nil
+                pendingPointArrival()
+            }
             return
         }
         guard selectedText == nil, !isReadyLockedUntilPanelCloses, !isThinking, !isPromptVisible else {
@@ -6222,6 +6366,7 @@ final class PetMascotView: NSView {
 
     private var state: State = .idle
     private var mode: TranslationMode = .selection
+    private var emotion: AskNugumiEmotion = .neutral
     private var animationFrame = 0
 
     override init(frame frameRect: NSRect) {
@@ -6248,10 +6393,11 @@ final class PetMascotView: NSView {
         onRightClick?()
     }
 
-    func apply(state: State, mode: TranslationMode) {
-        let didChange = self.state != state || self.mode != mode
+    func apply(state: State, mode: TranslationMode, emotion: AskNugumiEmotion = .neutral) {
+        let didChange = self.state != state || self.mode != mode || self.emotion != emotion
         self.state = state
         self.mode = mode
+        self.emotion = emotion
         toolTip = tooltip(for: state, mode: mode)
         if didChange {
             needsDisplay = true
@@ -6327,6 +6473,9 @@ final class PetMascotView: NSView {
     private func spriteRows() -> [String] {
         switch state {
         case .idle:
+            if emotion != .neutral {
+                return emotionSpriteRows(emotion)
+            }
             return spriteRows(faceOffset: idleFaceOffset(), noseWidth: 1)
         case .run:
             if (animationFrame / 5) % 2 == 0 {
@@ -6367,6 +6516,50 @@ final class PetMascotView: NSView {
         }
     }
 
+    private func emotionSpriteRows(_ emotion: AskNugumiEmotion) -> [String] {
+        switch emotion {
+        case .neutral:
+            return spriteRows(faceOffset: 0, noseWidth: 1)
+        case .happy:
+            return spriteRows(
+                eyeRow: "WWWKWWWWWWKWWWWW",
+                noseRow: "GWWWWWPPWWWWWWWG"
+            )
+        case .surprised:
+            return spriteRows(
+                eyeRow: "WWWWKKWWWWKKWWWW",
+                noseRow: "GWWWWWKKWWWWWWWG"
+            )
+        case .confused:
+            return spriteRows(
+                eyeRow: "WWWKKWWWWWKWWWWW",
+                noseRow: "GWWWWWWPWWWWWWWG"
+            )
+        case .concerned:
+            return spriteRows(
+                eyeRow: "WWWWKWWWWWWKWWWW",
+                noseRow: "GWWWWKKWWWWWWWWG"
+            )
+        }
+    }
+
+    private func spriteRows(eyeRow: String, noseRow: String) -> [String] {
+        [
+            "................",
+            "..WG........GW..",
+            ".GWWW......WWWG.",
+            ".GWWWWWWWWWWWWG.",
+            "GWWWWWWWWWWWWWWG",
+            eyeRow,
+            eyeRow,
+            noseRow,
+            "WWGWWWWWWWWWWGWW",
+            ".GWWWWWWWWWWWWG.",
+            "...WW......WW...",
+            "................"
+        ]
+    }
+
     private func spriteRows(faceOffset: Int, noseWidth: Int) -> [String] {
         let eyeRow: String
         let noseRow: String
@@ -6382,20 +6575,7 @@ final class PetMascotView: NSView {
             noseRow = noseWidth == 1 ? "GWWWWWWPWWWWWWWG" : "GWWWWWPPWWWWWWG."
         }
 
-        return [
-            "................",
-            "..WG........GW..",
-            ".GWWW......WWWG.",
-            ".GWWWWWWWWWWWWG.",
-            "GWWWWWWWWWWWWWWG",
-            eyeRow,
-            eyeRow,
-            noseRow,
-            "WWGWWWWWWWWWWGWW",
-            ".GWWWWWWWWWWWWG.",
-            "...WW......WW...",
-            "................"
-        ]
+        return spriteRows(eyeRow: eyeRow, noseRow: noseRow)
     }
 
     private func drawPixelRows(_ rows: [String], origin: NSPoint, cellSize: CGFloat) {
@@ -9437,12 +9617,17 @@ struct OpenAIChatClient: LLMBackend {
     private static let askSystemPrompt = """
 You are Nugumi, a concise desktop visual assistant. The user will provide a screenshot and a question about what is visible on screen.
 
-Return only JSON with this shape:
-{"message":"short helpful answer","petTarget":{"x":0.0,"y":0.0,"coordinateSpace":"screenshot_normalized"}}
+Return only JSON. Use this default shape when no movement is needed:
+{"message":"short helpful answer","emotion":"neutral"}
+
+Use this shape only when pointing to a specific visible place helps:
+{"message":"short helpful answer","emotion":"neutral","petTarget":{"x":0.0,"y":0.0,"coordinateSpace":"screenshot_normalized"}}
 
 Rules:
 - `message` is required and must be useful on its own.
-- Include `petTarget` only when pointing to a visible screen location helps.
+- `emotion` is optional. Use one of: "neutral", "happy", "surprised", "confused", "concerned".
+- Include `petTarget` only when the pet should physically move to point at a specific visible screen location.
+- If the answer does not require pointing to a specific visible location, omit `petTarget` completely. Do not include it just to animate movement.
 - `petTarget.x` is left-to-right from 0.0 to 1.0 across the screenshot.
 - `petTarget.y` is top-to-bottom from 0.0 to 1.0 across the screenshot.
 - Use coordinateSpace exactly "screenshot_normalized".
@@ -9469,7 +9654,7 @@ Rules:
 
         let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanPrompt.isEmpty else {
-            return AskNugumiResponse(message: "", petTarget: nil)
+            return AskNugumiResponse(message: "", petTarget: nil, emotion: nil)
         }
 
         let userContent = OpenAIContent.parts([

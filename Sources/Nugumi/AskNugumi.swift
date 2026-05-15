@@ -19,9 +19,18 @@ struct AskNugumiPetTarget: Codable, Equatable {
     }
 }
 
+enum AskNugumiEmotion: String, Codable, Equatable {
+    case neutral
+    case happy
+    case surprised
+    case confused
+    case concerned
+}
+
 struct AskNugumiResponse: Codable, Equatable {
     let message: String
     let petTarget: AskNugumiPetTarget?
+    let emotion: AskNugumiEmotion?
 
     static func parse(_ raw: String) -> AskNugumiResponse {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -35,7 +44,7 @@ struct AskNugumiResponse: Codable, Equatable {
             return decoded
         }
 
-        return AskNugumiResponse(message: trimmed, petTarget: nil)
+        return AskNugumiResponse(message: trimmed, petTarget: nil, emotion: nil)
     }
 
     private static func parseJSONResponse(from json: String) -> AskNugumiResponse? {
@@ -46,7 +55,7 @@ struct AskNugumiResponse: Codable, Equatable {
         }
 
         guard !decoded.message.isEmpty else {
-            return AskNugumiResponse(message: "", petTarget: nil)
+            return AskNugumiResponse(message: "", petTarget: nil, emotion: nil)
         }
 
         return decoded
@@ -96,25 +105,29 @@ struct AskNugumiResponse: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case message
         case petTarget
+        case emotion
     }
 
-    init(message: String, petTarget: AskNugumiPetTarget?) {
+    init(message: String, petTarget: AskNugumiPetTarget?, emotion: AskNugumiEmotion?) {
         self.message = message.trimmingCharacters(in: .whitespacesAndNewlines)
         self.petTarget = petTarget?.isValid == true ? petTarget : nil
+        self.emotion = emotion
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let message = try container.decode(String.self, forKey: .message)
         let petTarget = try? container.decode(AskNugumiPetTarget.self, forKey: .petTarget)
+        let emotion = try? container.decode(AskNugumiEmotion.self, forKey: .emotion)
 
-        self.init(message: message, petTarget: petTarget)
+        self.init(message: message, petTarget: petTarget, emotion: emotion)
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(message, forKey: .message)
         try container.encodeIfPresent(petTarget, forKey: .petTarget)
+        try container.encodeIfPresent(emotion, forKey: .emotion)
     }
 }
 

@@ -30,6 +30,29 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertEqual(response.petTarget?.y, 0.5)
     }
 
+    func testParsesOptionalEmotion() {
+        let raw = """
+        {"message":"That worked.","emotion":"happy"}
+        """
+
+        let response = AskNugumiResponse.parse(raw)
+
+        XCTAssertEqual(response.message, "That worked.")
+        XCTAssertEqual(response.emotion, .happy)
+        XCTAssertNil(response.petTarget)
+    }
+
+    func testRejectsUnsupportedEmotion() {
+        let raw = """
+        {"message":"I am not sure.","emotion":"sleepy"}
+        """
+
+        let response = AskNugumiResponse.parse(raw)
+
+        XCTAssertEqual(response.message, "I am not sure.")
+        XCTAssertNil(response.emotion)
+    }
+
     func testFallsBackToPlainMessageForNonJSON() {
         let response = AskNugumiResponse.parse("The save button is at the top right.")
 
