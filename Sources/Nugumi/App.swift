@@ -790,6 +790,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
     private var translateButtonController: FloatingTranslateButtonController?
     private var floatingLoadingBar: FloatingTranslateButtonController?
+    private var floatingTargetButton: FloatingTranslateButtonController?
     private var petController: PetController?
     private var translationPanelController: TranslationPanelController?
     private var askPromptController: AskPromptController?
@@ -1035,6 +1036,8 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
         translateButtonController?.close()
         translateButtonController = nil
+        floatingTargetButton?.close()
+        floatingTargetButton = nil
         translationPanelController?.close()
         translationPanelController = nil
         cancelPrefetch()
@@ -1189,6 +1192,8 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             resultLabel: "Answer",
             onClose: { [weak self] in
                 self?.translationPanelController = nil
+                self?.floatingTargetButton?.close()
+                self?.floatingTargetButton = nil
                 self?.petController?.clearReady()
             }
         )
@@ -1197,16 +1202,37 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         controller.showTranslation(response.message, requestID: panelRequestID)
 
         if let target = response.petTarget {
-            let point = AskNugumiCoordinateMapper.screenPoint(
-                for: target,
-                screenFrame: capture.screenFrame,
-                visibleFrame: capture.visibleFrame
-            )
-            if petController == nil {
-                petController = PetController(initialMode: .selection)
-            }
-            petController?.pointTemporarily(at: point)
+            presentFloatingAskTargetPointer(for: target, capture: capture)
+        } else {
+            floatingTargetButton?.close()
+            floatingTargetButton = nil
         }
+    }
+
+    @MainActor
+    private func presentFloatingAskTargetPointer(
+        for target: AskNugumiPetTarget,
+        capture: AskNugumiScreenCapture
+    ) {
+        let point = AskNugumiCoordinateMapper.exactScreenPoint(
+            for: target,
+            screenFrame: capture.screenFrame
+        )
+        let button: FloatingTranslateButtonController
+        if let existing = floatingTargetButton {
+            button = existing
+        } else {
+            button = FloatingTranslateButtonController(
+                screenPoint: NSEvent.mouseLocation,
+                selectedText: "",
+                initialMode: .selection,
+                onTranslate: { _ in },
+                onRewrite: { _ in },
+                onSmartReply: { _ in }
+            )
+            floatingTargetButton = button
+        }
+        button.pointAt(point, visibleFrame: capture.visibleFrame)
     }
 
     @MainActor
@@ -1277,6 +1303,8 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         isAskNugumiRunning = false
         petController?.clearThinking()
         petController?.clearPrompt()
+        floatingTargetButton?.close()
+        floatingTargetButton = nil
     }
 
     @MainActor
@@ -7251,9 +7279,9 @@ final class FloatingTranslateButtonController {
         self.onSmartReply = onSmartReply
         self.currentMode = initialMode
 
-        let buttonSize: CGFloat = 30
-        let shadowPadding: CGFloat = 15
-        let totalSize: CGFloat = buttonSize + shadowPadding * 2
+        let buttonSize = AskNugumiFloatingTargetPresentationPolicy.buttonSize
+        let shadowPadding = AskNugumiFloatingTargetPresentationPolicy.shadowPadding
+        let totalSize = AskNugumiFloatingTargetPresentationPolicy.totalSize
         let origin = NSPoint(
             x: screenPoint.x + 5 - shadowPadding,
             y: screenPoint.y - buttonSize - 5 - shadowPadding
@@ -7309,6 +7337,24 @@ final class FloatingTranslateButtonController {
         tabInterceptor?.disable()
         tabInterceptor = nil
         buttonView.setLoading(true)
+    }
+
+    func pointAt(_ targetPoint: NSPoint, visibleFrame: NSRect) {
+        let presentation = AskNugumiFloatingTargetPresentationPolicy.presentation(
+            targetPoint: targetPoint,
+            visibleFrame: visibleFrame
+        )
+        panel.ignoresMouseEvents = true
+        tabInterceptor?.disable()
+        tabInterceptor = nil
+        buttonView.setTargetArrow(angle: presentation.arrowAngleRadians)
+        panel.orderFrontRegardless()
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.24
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().setFrame(presentation.panelFrame, display: true)
+        }
     }
 
     private func toggleMode() {
@@ -7915,6 +7961,17 @@ final class FloatingTranslateButtonView: NSView {
         }
     }
 
+    func setTargetArrow(angle: CGFloat) {
+        isLoading = false
+        progressIndicator.stopAnimation(nil)
+        progressIndicator.isHidden = true
+        actionButton.isHidden = false
+        actionButton.image = Self.targetArrowImage(angle: angle)
+        actionButton.title = ""
+        actionButton.imagePosition = .imageOnly
+        actionButton.toolTip = "Target"
+    }
+
     private func applyModeVisuals() {
         switch currentMode {
         case .selection:
@@ -7949,6 +8006,39 @@ final class FloatingTranslateButtonView: NSView {
 
     @objc private func buttonTapped() {
         onClick?()
+    }
+
+    private static func targetArrowImage(angle: CGFloat) -> NSImage {
+        let imageSize = NSSize(width: 18, height: 18)
+        let image = NSImage(size: imageSize)
+        image.lockFocus()
+        NSGraphicsContext.saveGraphicsState()
+
+        let transform = NSAffineTransform()
+        transform.translateX(by: imageSize.width / 2, yBy: imageSize.height / 2)
+        transform.rotate(byRadians: angle)
+        transform.concat()
+
+        let shaft = NSBezierPath()
+        shaft.lineWidth = 2.2
+        shaft.lineCapStyle = .round
+        shaft.move(to: NSPoint(x: -5.5, y: 0))
+        shaft.line(to: NSPoint(x: 4.3, y: 0))
+        NSColor.white.setStroke()
+        shaft.stroke()
+
+        let head = NSBezierPath()
+        head.move(to: NSPoint(x: 6.2, y: 0))
+        head.line(to: NSPoint(x: 0.6, y: 4.3))
+        head.line(to: NSPoint(x: 0.6, y: -4.3))
+        head.close()
+        NSColor.white.setFill()
+        head.fill()
+
+        NSGraphicsContext.restoreGraphicsState()
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
     }
 }
 

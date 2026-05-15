@@ -26,3 +26,4 @@
 - Pet Ask input height measurement should be slightly narrower than the visible text frame, with bottom slack, so the bubble grows before a newly wrapped line is hidden.
 - Pet Ask prompt, loading, and answer states should only dismiss or cancel from a deliberate pet click; accidental outside clicks elsewhere on the desktop must be ignored.
 - In pet Ask mode, `petTarget` should not move the mascot onto the UI element being described; keep the pet anchored near its bubble and use only the blinking pixel marker to indicate the returned target point.
+- In floating-bar Ask mode, never route `petTarget` through `PetController`; animate the round floating button near the exact target and render a rotated arrow inside it, reserving mascot movement for pet mode only.

@@ -210,6 +210,11 @@ struct AskNugumiFloatingPromptLayout: Equatable {
     let cornerRadius: CGFloat
 }
 
+struct AskNugumiFloatingTargetPresentation: Equatable {
+    let panelFrame: CGRect
+    let arrowAngleRadians: CGFloat
+}
+
 struct AskNugumiPetBubblePresentation: Equatable {
     let promptFrame: CGRect
     let petOrigin: CGPoint
@@ -289,6 +294,77 @@ enum AskNugumiFloatingPromptMetrics {
             textFrame: textFrame,
             cornerRadius: cornerRadius
         )
+    }
+}
+
+enum AskNugumiFloatingTargetPresentationPolicy {
+    static let buttonSize: CGFloat = 30
+    static let shadowPadding: CGFloat = 15
+    static let totalSize: CGFloat = buttonSize + shadowPadding * 2
+    static let pointerOffset = CGPoint(x: 20, y: -20)
+
+    static func presentation(
+        targetPoint: CGPoint,
+        visibleFrame: CGRect
+    ) -> AskNugumiFloatingTargetPresentation {
+        let desiredCenter = CGPoint(
+            x: targetPoint.x + pointerOffset.x,
+            y: targetPoint.y + pointerOffset.y
+        )
+        let desiredOrigin = CGPoint(
+            x: desiredCenter.x - totalSize / 2,
+            y: desiredCenter.y - totalSize / 2
+        )
+        let origin = clampedOrigin(
+            desiredOrigin,
+            size: CGSize(width: totalSize, height: totalSize),
+            visibleFrame: visibleFrame,
+            edgeMargin: 0
+        )
+        let center = CGPoint(
+            x: origin.x + totalSize / 2,
+            y: origin.y + totalSize / 2
+        )
+        let dx = targetPoint.x - center.x
+        let dy = targetPoint.y - center.y
+        let angle = hypot(dx, dy) > 0.001 ? atan2(dy, dx) : CGFloat.pi / 2
+
+        return AskNugumiFloatingTargetPresentation(
+            panelFrame: CGRect(
+                x: origin.x,
+                y: origin.y,
+                width: totalSize,
+                height: totalSize
+            ),
+            arrowAngleRadians: angle
+        )
+    }
+
+    private static func clampedOrigin(
+        _ origin: CGPoint,
+        size: CGSize,
+        visibleFrame: CGRect,
+        edgeMargin: CGFloat
+    ) -> CGPoint {
+        CGPoint(
+            x: clamped(
+                origin.x,
+                min: visibleFrame.minX + edgeMargin,
+                max: visibleFrame.maxX - size.width - edgeMargin
+            ),
+            y: clamped(
+                origin.y,
+                min: visibleFrame.minY + edgeMargin,
+                max: visibleFrame.maxY - size.height - edgeMargin
+            )
+        )
+    }
+
+    private static func clamped(_ value: CGFloat, min minValue: CGFloat, max maxValue: CGFloat) -> CGFloat {
+        guard minValue <= maxValue else {
+            return (minValue + maxValue) / 2
+        }
+        return Swift.min(Swift.max(value, minValue), maxValue)
     }
 }
 

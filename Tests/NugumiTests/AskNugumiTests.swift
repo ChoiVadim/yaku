@@ -236,6 +236,28 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertEqual(frame.height, AskNugumiTargetMarkerMetrics.size)
     }
 
+    func testFloatingTargetPresentationPlacesButtonNearTargetAndPointsArrowBack() {
+        let presentation = AskNugumiFloatingTargetPresentationPolicy.presentation(
+            targetPoint: CGPoint(x: 500, y: 500),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1000, height: 800)
+        )
+
+        XCTAssertEqual(presentation.panelFrame.midX, 520, accuracy: 0.001)
+        XCTAssertEqual(presentation.panelFrame.midY, 480, accuracy: 0.001)
+        XCTAssertEqual(presentation.arrowAngleRadians, 3 * .pi / 4, accuracy: 0.001)
+    }
+
+    func testFloatingTargetPresentationClampsButtonButKeepsArrowPointingToExactTarget() {
+        let presentation = AskNugumiFloatingTargetPresentationPolicy.presentation(
+            targetPoint: CGPoint(x: 990, y: 10),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1000, height: 800)
+        )
+
+        XCTAssertLessThanOrEqual(presentation.panelFrame.maxX, 1000 + 0.001)
+        XCTAssertGreaterThanOrEqual(presentation.panelFrame.minY, 0 - 0.001)
+        XCTAssertEqual(presentation.arrowAngleRadians, -.pi / 4, accuracy: 0.001)
+    }
+
     func testPetPromptDismissesOnlyWhenClickTargetsPet() {
         let petFrame = CGRect(x: 40, y: 50, width: 54, height: 46)
 
