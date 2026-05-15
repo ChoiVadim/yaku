@@ -131,38 +131,61 @@ struct AskNugumiResponse: Codable, Equatable {
     }
 }
 
+struct AskNugumiTurn: Equatable {
+    let question: String
+    let answer: String
+}
+
 enum AskNugumiPromptBuilder {
-    static func visionPrompt(
-        question: String,
-        imagePixelSize: CGSize,
-        screenFrame: CGRect,
-        visibleFrame: CGRect
-    ) -> String {
+    static let maxHistoryTurns = 8
+
+    static func appending(_ turn: AskNugumiTurn, to history: [AskNugumiTurn]) -> [AskNugumiTurn] {
+        let updated = history + [turn]
+        guard updated.count > maxHistoryTurns else { return updated }
+        return Array(updated.suffix(maxHistoryTurns))
+    }
+
+    static let systemPrompt = """
+You are Nugumi, a concise and helpful desktop assistant. Answer the user's question directly and usefully.
+
+When the user attaches a screenshot, you can see what is currently on their screen and answer about it. When no screenshot is attached, answer from general knowledge.
+
+Return only JSON. Use this default shape:
+{"message":"short helpful answer","emotion":"neutral"}
+
+When a screenshot is attached AND pointing at a specific visible element helps the user, use this shape:
+{"message":"short helpful answer","emotion":"neutral","petTarget":{"x":0.0,"y":0.0,"coordinateSpace":"screenshot_normalized"}}
+
+Rules:
+- `message` is required and must be useful on its own.
+- `emotion` is optional. Use one of: "neutral", "happy", "surprised", "confused", "concerned".
+- Include `petTarget` only when a screenshot is attached AND the user benefits from the pet pointing at a specific visible location. Never include `petTarget` without a screenshot.
+- When a screenshot is attached, the user message includes a coordinate guide; follow it when computing `petTarget`.
+- `petTarget.x` and `petTarget.y` are normalized 0.0–1.0 across the screenshot (x left-to-right, y top-to-bottom).
+- Aim at the geometric center of the target element, never the top-left of a text label.
+- Use coordinateSpace exactly "screenshot_normalized".
+- Do not click, automate, or claim you took an action.
+- If uncertain about a location, omit `petTarget` and describe what to look for in `message`.
+"""
+
+    static func prompt(question: String, hasImage: Bool) -> String {
         let cleanQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        let pixelWidth = Int(imagePixelSize.width.rounded())
-        let pixelHeight = Int(imagePixelSize.height.rounded())
+
+        guard hasImage else {
+            return cleanQuestion
+        }
 
         return """
 User question:
 \(cleanQuestion)
 
 Coordinate guide for petTarget:
-- The attached PNG is exactly \(pixelWidth)x\(pixelHeight) pixels.
-- Return petTarget normalized over the full attached PNG, not over an app window, visibleFrame, or text label.
-- If you choose target pixel center (px, py) with top-left origin, return x = px / \(pixelWidth) and y = py / \(pixelHeight).
-- For menu bar items, use the tiny icon glyph center in the top strip of the full PNG.
-- macOS screenFrame in points: x=\(format(screenFrame.minX)), y=\(format(screenFrame.minY)), width=\(format(screenFrame.width)), height=\(format(screenFrame.height)).
-- macOS visibleFrame in points excludes the menu bar/dock: x=\(format(visibleFrame.minX)), y=\(format(visibleFrame.minY)), width=\(format(visibleFrame.width)), height=\(format(visibleFrame.height)).
-- The app will convert your normalized PNG coordinate back to screen coordinates; do not compensate for Retina scale or visibleFrame.
+- x and y are normalized from 0.0 to 1.0 over the attached screenshot. x is the horizontal fraction from the left edge; y is the vertical fraction from the top edge.
+- Aim at the geometric center of the target element's visible bounding box (button, icon, control, or input). Never anchor to the top-left of a text label — in a vertical list of buttons or menu items, a label's top-left sits inside the previous row.
+- For small menu bar or status icons, use the icon glyph's visual center, not the surrounding hit area.
+- Before returning coordinates, identify the target's row/column context in `message` (for example: "the third item in the left sidebar, below New chat and above Artifacts") so you anchor to the correct sibling among visually similar elements.
+- Use coordinateSpace exactly "screenshot_normalized".
 """
-    }
-
-    private static func format(_ value: CGFloat) -> String {
-        let rounded = value.rounded()
-        if abs(value - rounded) < 0.001 {
-            return String(Int(rounded))
-        }
-        return String(format: "%.3f", Double(value))
     }
 }
 
@@ -283,6 +306,26 @@ enum AskNugumiPetDismissalPolicy {
 
     static func shouldDismissPrompt(clickPoint: CGPoint, petFrame: CGRect) -> Bool {
         petFrame.insetBy(dx: -hitTolerance, dy: -hitTolerance).contains(clickPoint)
+    }
+}
+
+struct AskNugumiPetAnswerTargetPresentation: Equatable {
+    let markerTarget: CGPoint
+    let movementTarget: CGPoint?
+}
+
+enum AskNugumiPetAnswerTargetPresentationPolicy {
+    static func presentation(
+        for target: AskNugumiPetTarget,
+        screenFrame: CGRect
+    ) -> AskNugumiPetAnswerTargetPresentation {
+        AskNugumiPetAnswerTargetPresentation(
+            markerTarget: AskNugumiCoordinateMapper.exactScreenPoint(
+                for: target,
+                screenFrame: screenFrame
+            ),
+            movementTarget: nil
+        )
     }
 }
 

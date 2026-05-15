@@ -795,6 +795,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private var askPromptController: AskPromptController?
     private var askNugumiTask: Task<Void, Never>?
     private var askNugumiRequestID: UUID?
+    private var askHistory: [AskNugumiTurn] = []
     private var translationPrefetch: TranslationPrefetch?
     private var isScreenshotTranslationRunning = false
     private var isAskNugumiRunning = false
@@ -1131,14 +1132,10 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 }
                 guard shouldContinue else { return }
 
-                let askPrompt = AskNugumiPromptBuilder.visionPrompt(
-                    question: cleanPrompt,
-                    imagePixelSize: capture.imagePixelSize,
-                    screenFrame: capture.screenFrame,
-                    visibleFrame: capture.visibleFrame
-                )
+                let history = await MainActor.run { self?.askHistory ?? [] }
                 let response = try await backend.ask(
-                    prompt: askPrompt,
+                    history: history,
+                    question: cleanPrompt,
                     image: capture.image
                 ) { _ in }
                 try Task.checkCancellation()
@@ -1172,6 +1169,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     ) {
         guard askNugumiRequestID == requestID else { return }
         clearAskNugumiRequestIfCurrent(requestID)
+        recordAskTurn(question: prompt, answer: response.message)
         askPromptController?.close()
         askPromptController = nil
 
@@ -1223,21 +1221,24 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         guard let petController else { return }
 
         if let target = response.petTarget {
-            let movementPoint = AskNugumiCoordinateMapper.screenPoint(
-                for: target,
-                screenFrame: capture.screenFrame,
-                visibleFrame: capture.visibleFrame
-            )
-            let markerPoint = AskNugumiCoordinateMapper.exactScreenPoint(
+            let presentation = AskNugumiPetAnswerTargetPresentationPolicy.presentation(
                 for: target,
                 screenFrame: capture.screenFrame
             )
-            petController.moveToAnswerTarget(
-                movementPoint,
-                markerTarget: markerPoint,
-                message: response.message,
-                emotion: response.emotion
-            )
+            if let movementTarget = presentation.movementTarget {
+                petController.moveToAnswerTarget(
+                    movementTarget,
+                    markerTarget: presentation.markerTarget,
+                    message: response.message,
+                    emotion: response.emotion
+                )
+            } else {
+                petController.showAnswer(
+                    response.message,
+                    emotion: response.emotion,
+                    markerTarget: presentation.markerTarget
+                )
+            }
         } else {
             petController.showAnswer(response.message, emotion: response.emotion)
         }
@@ -1276,6 +1277,15 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         isAskNugumiRunning = false
         petController?.clearThinking()
         petController?.clearPrompt()
+    }
+
+    @MainActor
+    private func recordAskTurn(question: String, answer: String) {
+        let trimmedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuestion.isEmpty, !trimmedAnswer.isEmpty else { return }
+        let turn = AskNugumiTurn(question: trimmedQuestion, answer: trimmedAnswer)
+        askHistory = AskNugumiPromptBuilder.appending(turn, to: askHistory)
     }
 
     private static func hideAppWindowsFromScreenCapture() -> [WindowSharingSnapshot] {
@@ -9829,8 +9839,9 @@ protocol LLMBackend {
     ) async throws -> String
 
     func ask(
-        prompt: String,
-        image: ImageInput,
+        history: [AskNugumiTurn],
+        question: String,
+        image: ImageInput?,
         onPartial: @escaping (String) -> Void
     ) async throws -> AskNugumiResponse
 }
@@ -9840,11 +9851,12 @@ struct OllamaClient: LLMBackend {
     let model: String
 
     func ask(
-        prompt: String,
-        image: ImageInput,
+        history: [AskNugumiTurn],
+        question: String,
+        image: ImageInput?,
         onPartial: @escaping (String) -> Void
     ) async throws -> AskNugumiResponse {
-        throw TranslationError.ollama("Ask Nugumi needs a vision model.")
+        throw TranslationError.ollama("Ask Nugumi is available with a cloud provider.")
     }
 
     func translate(
@@ -9978,64 +9990,55 @@ struct OpenAIChatClient: LLMBackend {
     let model: String
 
     private static let maxImageBytes = 5 * 1024 * 1024
-    private static let askSystemPrompt = """
-You are Nugumi, a concise desktop visual assistant. The user will provide a screenshot and a question about what is visible on screen.
-
-Return only JSON. Use this default shape when no movement is needed:
-{"message":"short helpful answer","emotion":"neutral"}
-
-Use this shape only when pointing to a specific visible place helps:
-{"message":"short helpful answer","emotion":"neutral","petTarget":{"x":0.0,"y":0.0,"coordinateSpace":"screenshot_normalized"}}
-
-Rules:
-- `message` is required and must be useful on its own.
-- `emotion` is optional. Use one of: "neutral", "happy", "surprised", "confused", "concerned".
-- Include `petTarget` only when the pet should physically move to point at a specific visible screen location.
-- If the answer does not require pointing to a specific visible location, omit `petTarget` completely. Do not include it just to animate movement.
-- The user message includes a coordinate guide generated by the app. Follow that guide when computing `petTarget`.
-- `petTarget.x` is left-to-right from 0.0 to 1.0 across the screenshot.
-- `petTarget.y` is top-to-bottom from 0.0 to 1.0 across the screenshot.
-- When returning `petTarget`, use the exact visual center of the object, icon, button, or control named in `message`, not the center of a broad region or nearby label.
-- For tiny menu bar/status icons, estimate the center of the icon glyph itself as precisely as possible.
-- Use coordinateSpace exactly "screenshot_normalized".
-- Do not click, automate, or claim you took an action.
-- If uncertain, omit `petTarget` and explain what to look for in `message`.
-"""
 
     func ask(
-        prompt: String,
-        image: ImageInput,
+        history: [AskNugumiTurn],
+        question: String,
+        image: ImageInput?,
         onPartial: @escaping (String) -> Void
     ) async throws -> AskNugumiResponse {
         guard !apiKey.isEmpty else {
             throw TranslationError.invalidAPIKey(provider)
         }
 
-        guard LLMModel.option(id: model).supportsImages else {
-            throw TranslationError.cloudError(provider, "Ask Nugumi needs a vision model.")
+        if let image {
+            guard LLMModel.option(id: model).supportsImages else {
+                throw TranslationError.cloudError(provider, "Ask Nugumi with a screenshot needs a vision model.")
+            }
+            guard image.data.count <= Self.maxImageBytes else {
+                throw TranslationError.cloudError(provider, "Image too large (limit 5 MB)")
+            }
         }
 
-        guard image.data.count <= Self.maxImageBytes else {
-            throw TranslationError.cloudError(provider, "Image too large (limit 5 MB)")
-        }
-
-        let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanPrompt.isEmpty else {
+        let cleanQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanQuestion.isEmpty else {
             return AskNugumiResponse(message: "", petTarget: nil, emotion: nil)
         }
 
-        let userContent = OpenAIContent.parts([
-            .text(cleanPrompt),
-            .imageURL(image.openAIDataURI)
-        ])
+        let currentPrompt = AskNugumiPromptBuilder.prompt(question: cleanQuestion, hasImage: image != nil)
+        let currentUserContent: OpenAIContent
+        if let image {
+            currentUserContent = .parts([
+                .text(currentPrompt),
+                .imageURL(image.openAIDataURI)
+            ])
+        } else {
+            currentUserContent = .string(currentPrompt)
+        }
+
+        var messages: [OpenAIMessage] = [
+            OpenAIMessage(role: "system", content: .string(AskNugumiPromptBuilder.systemPrompt))
+        ]
+        for turn in history {
+            messages.append(OpenAIMessage(role: "user", content: .string(turn.question)))
+            messages.append(OpenAIMessage(role: "assistant", content: .string(turn.answer)))
+        }
+        messages.append(OpenAIMessage(role: "user", content: currentUserContent))
 
         let body = OpenAIRequest(
             model: model,
             stream: true,
-            messages: [
-                OpenAIMessage(role: "system", content: .string(Self.askSystemPrompt)),
-                OpenAIMessage(role: "user", content: userContent)
-            ]
+            messages: messages
         )
 
         var request = URLRequest(url: provider.baseURL)

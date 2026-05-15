@@ -89,20 +89,62 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertNil(response.petTarget)
     }
 
-    func testVisionPromptIncludesCoordinateGuideForAttachedPNG() {
-        let prompt = AskNugumiPromptBuilder.visionPrompt(
-            question: "Where is the Apple icon?",
-            imagePixelSize: CGSize(width: 3024, height: 1964),
-            screenFrame: CGRect(x: 0, y: 0, width: 1512, height: 982),
-            visibleFrame: CGRect(x: 0, y: 44, width: 1512, height: 938)
-        )
+    func testPromptWithImageIncludesCoordinateGuide() {
+        let prompt = AskNugumiPromptBuilder.prompt(question: "Where is the Apple icon?", hasImage: true)
 
         XCTAssertTrue(prompt.contains("Where is the Apple icon?"))
-        XCTAssertTrue(prompt.contains("3024x1964 pixels"))
-        XCTAssertTrue(prompt.contains("x = px / 3024"))
-        XCTAssertTrue(prompt.contains("y = py / 1964"))
-        XCTAssertTrue(prompt.contains("full attached PNG"))
-        XCTAssertTrue(prompt.contains("do not compensate for Retina scale or visibleFrame"))
+        XCTAssertTrue(prompt.contains("normalized from 0.0 to 1.0"))
+        XCTAssertTrue(prompt.contains("geometric center"))
+        XCTAssertTrue(prompt.contains("Never anchor to the top-left of a text label"))
+        XCTAssertTrue(prompt.contains("screenshot_normalized"))
+    }
+
+    func testPromptWithoutImageOmitsCoordinateGuide() {
+        let prompt = AskNugumiPromptBuilder.prompt(question: "What is the capital of Korea?", hasImage: false)
+
+        XCTAssertEqual(prompt, "What is the capital of Korea?")
+        XCTAssertFalse(prompt.contains("petTarget"))
+        XCTAssertFalse(prompt.contains("normalized"))
+        XCTAssertFalse(prompt.contains("screenshot"))
+    }
+
+    func testSystemPromptDescribesGeneralAgentWithOptionalScreenshot() {
+        let prompt = AskNugumiPromptBuilder.systemPrompt
+
+        XCTAssertTrue(prompt.contains("desktop assistant"))
+        XCTAssertTrue(prompt.contains("When the user attaches a screenshot"))
+        XCTAssertTrue(prompt.contains("When no screenshot is attached, answer from general knowledge"))
+        XCTAssertTrue(prompt.contains("Never include `petTarget` without a screenshot"))
+        XCTAssertFalse(prompt.contains("The user will provide a screenshot"))
+    }
+
+    func testAppendingTurnGrowsHistoryUpToCap() {
+        var history: [AskNugumiTurn] = []
+        for index in 1...3 {
+            history = AskNugumiPromptBuilder.appending(
+                AskNugumiTurn(question: "Q\(index)", answer: "A\(index)"),
+                to: history
+            )
+        }
+
+        XCTAssertEqual(history.count, 3)
+        XCTAssertEqual(history.first?.question, "Q1")
+        XCTAssertEqual(history.last?.answer, "A3")
+    }
+
+    func testAppendingTurnDropsOldestTurnsBeyondCap() {
+        var history: [AskNugumiTurn] = []
+        let overflow = AskNugumiPromptBuilder.maxHistoryTurns + 3
+        for index in 1...overflow {
+            history = AskNugumiPromptBuilder.appending(
+                AskNugumiTurn(question: "Q\(index)", answer: "A\(index)"),
+                to: history
+            )
+        }
+
+        XCTAssertEqual(history.count, AskNugumiPromptBuilder.maxHistoryTurns)
+        XCTAssertEqual(history.first?.question, "Q4")
+        XCTAssertEqual(history.last?.question, "Q\(overflow)")
     }
 
     func testMapsTopLeftNormalizedCoordinateToAppKitScreenPoint() {
@@ -164,6 +206,24 @@ final class AskNugumiTests: XCTestCase {
 
         XCTAssertEqual(movementPoint.y, 760, accuracy: 0.001)
         XCTAssertEqual(markerPoint.y, 800, accuracy: 0.001)
+    }
+
+    func testAnswerTargetPresentationKeepsPetStillAndShowsExactMarker() {
+        let screenFrame = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        let target = AskNugumiPetTarget(
+            x: 0.82,
+            y: 0.18,
+            coordinateSpace: .screenshotNormalized
+        )
+
+        let presentation = AskNugumiPetAnswerTargetPresentationPolicy.presentation(
+            for: target,
+            screenFrame: screenFrame
+        )
+
+        XCTAssertNil(presentation.movementTarget)
+        XCTAssertEqual(presentation.markerTarget.x, 820, accuracy: 0.001)
+        XCTAssertEqual(presentation.markerTarget.y, 656, accuracy: 0.001)
     }
 
     func testTargetMarkerFrameCentersOnExactPoint() {
