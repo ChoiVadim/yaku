@@ -5579,6 +5579,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private var currentAnswerPointerTarget: NSPoint?
     private var pointingTarget: NSPoint?
     private var pendingPointArrival: (() -> Void)?
+    private var pointingArrivalFallbackTimer: Timer?
     private var pointingReturnTimer: Timer?
     private var lastCursorLocation = NSEvent.mouseLocation
     private var lastCursorMovementDate = Date.distantPast
@@ -5599,6 +5600,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private static let promptTextFieldFrame = NSRect(x: 22, y: 52, width: 212, height: 22)
     private static let answerFontSize: CGFloat = 14
     private static let edgeMargin: CGFloat = 6
+    private static let pointingArrivalThreshold: CGFloat = 8
+    private static let pointingArrivalFallbackDelay: TimeInterval = 1.6
     private static let textMovementUserInfoKey = "NSTextMovement"
     private static let defaultCursorOffset = NSPoint(
         x: 12 - panelPadding,
@@ -5971,7 +5974,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
     func moveToAnswerTarget(_ destination: NSPoint, message: String, emotion: AskNugumiEmotion?) {
         let targetOrigin = Self.originNearPoint(destination, size: Self.panelSize)
         let distance = hypot(targetOrigin.x - panel.frame.origin.x, targetOrigin.y - panel.frame.origin.y)
-        guard distance > 3 else {
+        guard distance > Self.pointingArrivalThreshold else {
             showAnswer(message, emotion: emotion, pointerTarget: destination)
             return
         }
@@ -5996,6 +5999,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         pendingPointArrival = { [weak self] in
             self?.showAnswer(message, emotion: emotion, pointerTarget: destination)
         }
+        schedulePointingArrivalFallback()
         petView.apply(state: .run, mode: currentMode)
         show()
     }
@@ -6402,8 +6406,30 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private func cancelPointingAnimation() {
         pointingReturnTimer?.invalidate()
         pointingReturnTimer = nil
+        pointingArrivalFallbackTimer?.invalidate()
+        pointingArrivalFallbackTimer = nil
         pointingTarget = nil
         pendingPointArrival = nil
+    }
+
+    private func schedulePointingArrivalFallback() {
+        pointingArrivalFallbackTimer?.invalidate()
+        let timer = Timer(timeInterval: Self.pointingArrivalFallbackDelay, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.completePendingPointArrival()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pointingArrivalFallbackTimer = timer
+    }
+
+    private func completePendingPointArrival() {
+        guard let pendingPointArrival else { return }
+        pointingArrivalFallbackTimer?.invalidate()
+        pointingArrivalFallbackTimer = nil
+        pointingTarget = nil
+        self.pendingPointArrival = nil
+        pendingPointArrival()
     }
 
     func setActionMode(_ mode: TranslationMode) {
@@ -6440,11 +6466,11 @@ final class PetController: NSObject, NSTextFieldDelegate {
             )
             panel.setFrameOrigin(nextOrigin)
             let distance = hypot(dx, dy)
-            petView.apply(state: distance > 3 ? .run : .ready, mode: currentMode)
-            if distance <= 3, let pendingPointArrival {
-                self.pointingTarget = nil
-                self.pendingPointArrival = nil
-                pendingPointArrival()
+            let hasPendingArrival = pendingPointArrival != nil
+            let didArrive = distance <= Self.pointingArrivalThreshold
+            petView.apply(state: didArrive ? .ready : .run, mode: currentMode)
+            if didArrive, hasPendingArrival {
+                completePendingPointArrival()
             }
             return
         }
