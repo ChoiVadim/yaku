@@ -1198,13 +1198,18 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         guard let petController else { return }
 
         if let target = response.petTarget {
-            let point = AskNugumiCoordinateMapper.screenPoint(
+            let movementPoint = AskNugumiCoordinateMapper.screenPoint(
                 for: target,
                 screenFrame: capture.screenFrame,
                 visibleFrame: capture.visibleFrame
             )
+            let pointerPoint = AskNugumiCoordinateMapper.exactScreenPoint(
+                for: target,
+                screenFrame: capture.screenFrame
+            )
             petController.moveToAnswerTarget(
-                point,
+                movementPoint,
+                pointerTarget: pointerPoint,
                 message: response.message,
                 emotion: response.emotion
             )
@@ -5957,12 +5962,14 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptBubbleView.isError = false
         configureAnswerTextView(with: cleanMessage)
 
-        let frame = promptFrameAnchoredToPet(size: currentAnswerLayout.panelSize)
-        panel.setFrameOrigin(frame.origin)
-        promptPanel.setFrame(frame, display: true)
-        currentAnswerPointerTarget = pointerTarget.map {
-            NSPoint(x: $0.x - frame.minX, y: $0.y - frame.minY)
-        }
+        let presentation = answerPresentationFrame(
+            for: currentAnswerLayout,
+            pointerTarget: pointerTarget
+        )
+        currentAnswerLayout = presentation.layout
+        panel.setFrameOrigin(presentation.petOrigin)
+        promptPanel.setFrame(presentation.frame, display: true)
+        currentAnswerPointerTarget = presentation.pointerTarget
         showPromptViews()
         promptPanel.alphaValue = 1
         show()
@@ -5971,11 +5978,16 @@ final class PetController: NSObject, NSTextFieldDelegate {
         installPromptOutsideClickMonitors()
     }
 
-    func moveToAnswerTarget(_ destination: NSPoint, message: String, emotion: AskNugumiEmotion?) {
+    func moveToAnswerTarget(
+        _ destination: NSPoint,
+        pointerTarget: NSPoint,
+        message: String,
+        emotion: AskNugumiEmotion?
+    ) {
         let targetOrigin = Self.originNearPoint(destination, size: Self.panelSize)
         let distance = hypot(targetOrigin.x - panel.frame.origin.x, targetOrigin.y - panel.frame.origin.y)
         guard distance > Self.pointingArrivalThreshold else {
-            showAnswer(message, emotion: emotion, pointerTarget: destination)
+            showAnswer(message, emotion: emotion, pointerTarget: pointerTarget)
             return
         }
 
@@ -5997,7 +6009,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptPanel.orderOut(nil)
         pointingTarget = destination
         pendingPointArrival = { [weak self] in
-            self?.showAnswer(message, emotion: emotion, pointerTarget: destination)
+            self?.showAnswer(message, emotion: emotion, pointerTarget: pointerTarget)
         }
         schedulePointingArrivalFallback()
         petView.apply(state: .run, mode: currentMode)
@@ -6234,6 +6246,42 @@ final class PetController: NSObject, NSTextFieldDelegate {
         return NSRect(origin: origin, size: size)
     }
 
+    private func answerPresentationFrame(
+        for layout: AskNugumiAnswerBubbleLayout,
+        pointerTarget: NSPoint?
+    ) -> (frame: NSRect, petOrigin: NSPoint, layout: AskNugumiAnswerBubbleLayout, pointerTarget: NSPoint?) {
+        let bubblePanelFrame = promptFrameAnchoredToPet(size: layout.panelSize)
+        guard let pointerTarget else {
+            return (bubblePanelFrame, bubblePanelFrame.origin, layout, nil)
+        }
+
+        let pointerMargin: CGFloat = 12
+        let pointerRect = NSRect(
+            x: pointerTarget.x - pointerMargin,
+            y: pointerTarget.y - pointerMargin,
+            width: pointerMargin * 2,
+            height: pointerMargin * 2
+        )
+        let panelFrame = bubblePanelFrame.union(pointerRect).integral
+        let frameOffset = NSPoint(
+            x: bubblePanelFrame.minX - panelFrame.minX,
+            y: bubblePanelFrame.minY - panelFrame.minY
+        )
+        let shiftedLayout = AskNugumiAnswerBubbleLayout(
+            panelSize: panelFrame.size,
+            bubbleFrame: layout.bubbleFrame.offsetBy(dx: frameOffset.x, dy: frameOffset.y),
+            viewportFrame: layout.viewportFrame.offsetBy(dx: frameOffset.x, dy: frameOffset.y),
+            documentHeight: layout.documentHeight,
+            needsScroll: layout.needsScroll
+        )
+        let localPointerTarget = NSPoint(
+            x: pointerTarget.x - panelFrame.minX,
+            y: pointerTarget.y - panelFrame.minY
+        )
+
+        return (panelFrame, bubblePanelFrame.origin, shiftedLayout, localPointerTarget)
+    }
+
     private func layoutPromptSubviews() {
         petView.frame = NSRect(origin: .zero, size: Self.panelSize)
         appIconView.frame = NSRect(
@@ -6286,7 +6334,16 @@ final class PetController: NSObject, NSTextFieldDelegate {
         guard isPromptOpen || isAnswerOpen, panel.isVisible else { return }
 
         let screenPoint = event.window?.convertPoint(toScreen: event.locationInWindow) ?? NSEvent.mouseLocation
-        let insidePrompt = promptPanel.frame.insetBy(dx: -4, dy: -4).contains(screenPoint)
+        let insidePrompt: Bool
+        if isAnswerOpen {
+            let localPoint = NSPoint(
+                x: screenPoint.x - promptPanel.frame.minX,
+                y: screenPoint.y - promptPanel.frame.minY
+            )
+            insidePrompt = currentAnswerLayout.bubbleFrame.insetBy(dx: -4, dy: -4).contains(localPoint)
+        } else {
+            insidePrompt = promptPanel.frame.insetBy(dx: -4, dy: -4).contains(screenPoint)
+        }
         let insidePet = panel.frame.insetBy(dx: -4, dy: -4).contains(screenPoint)
         guard !insidePrompt, !insidePet else {
             return

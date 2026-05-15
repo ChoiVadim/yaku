@@ -127,6 +127,29 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertEqual(point.y, 40, accuracy: 0.001)
     }
 
+    func testExactScreenPointKeepsMenuBarCoordinatesForPointer() {
+        let screenFrame = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        let visibleFrame = CGRect(x: 0, y: 0, width: 1000, height: 760)
+        let target = AskNugumiPetTarget(
+            x: 0.5,
+            y: 0.0,
+            coordinateSpace: .screenshotNormalized
+        )
+
+        let movementPoint = AskNugumiCoordinateMapper.screenPoint(
+            for: target,
+            screenFrame: screenFrame,
+            visibleFrame: visibleFrame
+        )
+        let pointerPoint = AskNugumiCoordinateMapper.exactScreenPoint(
+            for: target,
+            screenFrame: screenFrame
+        )
+
+        XCTAssertEqual(movementPoint.y, 760, accuracy: 0.001)
+        XCTAssertEqual(pointerPoint.y, 800, accuracy: 0.001)
+    }
+
     func testAnswerBubbleLayoutGrowsBeforeScrollLimit() {
         let short = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 30)
         let taller = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 120)

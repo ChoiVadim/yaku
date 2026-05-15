@@ -177,17 +177,29 @@ enum AskNugumiAnswerBubbleMetrics {
 }
 
 enum AskNugumiCoordinateMapper {
-    static func screenPoint(
+    static func exactScreenPoint(
         for target: AskNugumiPetTarget,
-        screenFrame: CGRect,
-        visibleFrame: CGRect
+        screenFrame: CGRect
     ) -> CGPoint {
         let mappedX = screenFrame.minX + target.x * screenFrame.width
         let mappedY = screenFrame.maxY - target.y * screenFrame.height
 
         return CGPoint(
-            x: min(max(mappedX, visibleFrame.minX), visibleFrame.maxX),
-            y: min(max(mappedY, visibleFrame.minY), visibleFrame.maxY)
+            x: min(max(mappedX, screenFrame.minX), screenFrame.maxX),
+            y: min(max(mappedY, screenFrame.minY), screenFrame.maxY)
+        )
+    }
+
+    static func screenPoint(
+        for target: AskNugumiPetTarget,
+        screenFrame: CGRect,
+        visibleFrame: CGRect
+    ) -> CGPoint {
+        let point = exactScreenPoint(for: target, screenFrame: screenFrame)
+
+        return CGPoint(
+            x: min(max(point.x, visibleFrame.minX), visibleFrame.maxX),
+            y: min(max(point.y, visibleFrame.minY), visibleFrame.maxY)
         )
     }
 }
