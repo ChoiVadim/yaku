@@ -18,6 +18,9 @@ let package = Package(
             name: "Nugumi",
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle")
+            ],
+            resources: [
+                .process("Resources")
             ]
         ),
         .testTarget(

@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Carbon.HIToolbox
+import CoreText
 import Foundation
 import Sparkle
 import UserNotifications
@@ -5277,6 +5278,26 @@ private final class PetPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+private enum NugumiFont {
+    private static let didRegisterPixelifySans: Bool = {
+        guard let url = Bundle.module.url(
+            forResource: "PixelifySans",
+            withExtension: "ttf",
+            subdirectory: "Fonts"
+        ) else {
+            return false
+        }
+        return CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+    }()
+
+    static func pixelPrompt(size: CGFloat) -> NSFont {
+        _ = didRegisterPixelifySans
+        return NSFont(name: "PixelifySans-Regular_SemiBold", size: size)
+            ?? NSFont(name: "Pixelify Sans", size: size)
+            ?? NSFont.monospacedSystemFont(ofSize: size, weight: .semibold)
+    }
+}
+
 private final class PetPromptBubbleView: NSView {
     var isError = false {
         didSet { needsDisplay = true }
@@ -5301,9 +5322,9 @@ private final class PetPromptBubbleView: NSView {
         let unit: CGFloat = 3
         let bubbleRect = NSRect(
             x: 5 * unit,
-            y: 4 * unit,
+            y: 3 * unit,
             width: floor((bounds.width - 10 * unit) / unit) * unit,
-            height: floor((bounds.height - 9 * unit) / unit) * unit
+            height: floor((bounds.height - 7 * unit) / unit) * unit
         )
 
         let shadow = NSColor(calibratedWhite: 0.0, alpha: 0.22)
@@ -5416,9 +5437,9 @@ final class PetController: NSObject, NSTextFieldDelegate {
         width: mascotSize.width + panelPadding * 2,
         height: mascotSize.height + panelPadding * 2
     )
-    private static let promptPanelSize = NSSize(width: 282, height: 98)
-    private static let promptBubbleFrame = NSRect(x: 44, y: 34, width: 232, height: 58)
-    private static let promptTextFieldFrame = NSRect(x: 66, y: 54, width: 188, height: 22)
+    private static let promptPanelSize = NSSize(width: 260, height: 90)
+    private static let promptBubbleFrame = NSRect(x: 32, y: 26, width: 222, height: 60)
+    private static let promptTextFieldFrame = NSRect(x: 54, y: 44, width: 180, height: 22)
     private static let edgeMargin: CGFloat = 6
     private static let textMovementUserInfoKey = "NSTextMovement"
     private static let defaultCursorOffset = NSPoint(
@@ -5507,8 +5528,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptTextField.onEscape = { [weak self] in
             self?.closePromptFromUser()
         }
-        promptTextField.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        promptTextField.textColor = NSColor(srgbRed: 0.12, green: 0.14, blue: 0.15, alpha: 1.0)
+        promptTextField.font = NugumiFont.pixelPrompt(size: 16)
+        promptTextField.textColor = NSColor(srgbRed: 0.26, green: 0.30, blue: 0.30, alpha: 1.0)
         promptTextField.isBordered = false
         promptTextField.isBezeled = false
         promptTextField.drawsBackground = false
@@ -5770,7 +5791,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
                 .foregroundColor: promptBubbleView.isError
                     ? NSColor(srgbRed: 0.78, green: 0.18, blue: 0.18, alpha: 0.78)
                     : NSColor(srgbRed: 0.27, green: 0.31, blue: 0.33, alpha: 0.62),
-                .font: promptTextField.font ?? NSFont.systemFont(ofSize: 13, weight: .medium)
+                .font: promptTextField.font ?? NugumiFont.pixelPrompt(size: 16)
             ]
         )
     }
