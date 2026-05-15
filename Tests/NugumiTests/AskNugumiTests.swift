@@ -127,7 +127,7 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertEqual(point.y, 40, accuracy: 0.001)
     }
 
-    func testExactScreenPointKeepsMenuBarCoordinatesForPointer() {
+    func testExactScreenPointKeepsMenuBarCoordinatesForTargetMarker() {
         let screenFrame = CGRect(x: 0, y: 0, width: 1000, height: 800)
         let visibleFrame = CGRect(x: 0, y: 0, width: 1000, height: 760)
         let target = AskNugumiPetTarget(
@@ -141,13 +141,23 @@ final class AskNugumiTests: XCTestCase {
             screenFrame: screenFrame,
             visibleFrame: visibleFrame
         )
-        let pointerPoint = AskNugumiCoordinateMapper.exactScreenPoint(
+        let markerPoint = AskNugumiCoordinateMapper.exactScreenPoint(
             for: target,
             screenFrame: screenFrame
         )
 
         XCTAssertEqual(movementPoint.y, 760, accuracy: 0.001)
-        XCTAssertEqual(pointerPoint.y, 800, accuracy: 0.001)
+        XCTAssertEqual(markerPoint.y, 800, accuracy: 0.001)
+    }
+
+    func testTargetMarkerFrameCentersOnExactPoint() {
+        let point = CGPoint(x: 128, y: 64)
+        let frame = AskNugumiTargetMarkerMetrics.frame(centeredAt: point)
+
+        XCTAssertEqual(frame.midX, point.x, accuracy: 0.001)
+        XCTAssertEqual(frame.midY, point.y, accuracy: 0.001)
+        XCTAssertEqual(frame.width, AskNugumiTargetMarkerMetrics.size)
+        XCTAssertEqual(frame.height, AskNugumiTargetMarkerMetrics.size)
     }
 
     func testAnswerBubbleLayoutGrowsBeforeScrollLimit() {

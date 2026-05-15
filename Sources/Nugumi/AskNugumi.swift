@@ -176,6 +176,24 @@ enum AskNugumiAnswerBubbleMetrics {
     }
 }
 
+enum AskNugumiTargetMarkerMetrics {
+    static let size: CGFloat = 15
+    static let padding: CGFloat = 6
+
+    static func frame(centeredAt point: CGPoint) -> CGRect {
+        CGRect(
+            x: point.x - size / 2,
+            y: point.y - size / 2,
+            width: size,
+            height: size
+        )
+    }
+
+    static func paddedFrame(centeredAt point: CGPoint) -> CGRect {
+        frame(centeredAt: point).insetBy(dx: -padding, dy: -padding)
+    }
+}
+
 enum AskNugumiCoordinateMapper {
     static func exactScreenPoint(
         for target: AskNugumiPetTarget,
