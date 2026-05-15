@@ -5832,6 +5832,208 @@ final class FloatingTranslateButtonController {
     }
 }
 
+private final class AskPromptTextField: NSTextField {
+    var onEscape: (() -> Void)?
+
+    override func cancelOperation(_ sender: Any?) {
+        onEscape?()
+    }
+}
+
+private final class AskPromptPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+@MainActor
+final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
+    private static let panelSize = NSSize(width: 360, height: 52)
+    private static let edgeMargin: CGFloat = 12
+    private static let fieldInsetX: CGFloat = 14
+    private static let fieldInsetY: CGFloat = 9
+    private static let cornerRadius: CGFloat = 18
+    private static let textMovementUserInfoKey = "NSTextMovement"
+
+    private let panel: NSPanel
+    private let textField: AskPromptTextField
+    private let onSubmit: (String) -> Void
+    private let onClose: () -> Void
+    private var didClose = false
+    private var isSubmitting = false
+
+    var isVisible: Bool { panel.isVisible }
+
+    init(
+        near screenPoint: NSPoint,
+        onSubmit: @escaping (String) -> Void,
+        onClose: @escaping () -> Void
+    ) {
+        self.onSubmit = onSubmit
+        self.onClose = onClose
+
+        let origin = Self.origin(near: screenPoint, size: Self.panelSize)
+        panel = AskPromptPanel(
+            contentRect: NSRect(origin: origin, size: Self.panelSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        textField = AskPromptTextField(frame: .zero)
+
+        super.init()
+
+        panel.delegate = self
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        InvisibilityState.apply(to: panel)
+        panel.isReleasedWhenClosed = false
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.isMovableByWindowBackground = true
+
+        buildUI()
+    }
+
+    func show() {
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(textField)
+    }
+
+    func setLoading() {
+        textField.isEnabled = false
+        textField.stringValue = ""
+        setPlaceholder("Looking...")
+    }
+
+    func showError(_ message: String) {
+        isSubmitting = false
+        textField.isEnabled = true
+        textField.stringValue = ""
+        setPlaceholder(message)
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(textField)
+    }
+
+    func close() {
+        guard !didClose else { return }
+        didClose = true
+        panel.close()
+        onClose()
+    }
+
+    nonisolated func windowWillClose(_ notification: Notification) {
+        Task { @MainActor [weak self] in
+            guard let self, !self.didClose else { return }
+            self.didClose = true
+            self.onClose()
+        }
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard textMovement(from: notification) == NSTextMovement.return.rawValue else {
+            return
+        }
+        submit()
+    }
+
+    private func buildUI() {
+        let rootView = NSView(frame: NSRect(origin: .zero, size: Self.panelSize))
+        rootView.wantsLayer = true
+        rootView.layer?.backgroundColor = NSColor.clear.cgColor
+
+        let glass = GlassHostView(
+            frame: rootView.bounds,
+            cornerRadius: Self.cornerRadius,
+            tintColor: NSColor(srgbRed: 0.06, green: 0.12, blue: 0.22, alpha: 0.35),
+            style: .regular
+        )
+        glass.autoresizingMask = [.width, .height]
+        rootView.addSubview(glass)
+
+        textField.delegate = self
+        textField.onEscape = { [weak self] in
+            self?.close()
+        }
+        setPlaceholder("Ask about this screen...")
+        textField.font = NSFont.systemFont(ofSize: 14, weight: .regular)
+        textField.textColor = .labelColor
+        textField.bezelStyle = .roundedBezel
+        textField.focusRingType = .none
+        textField.usesSingleLineMode = true
+        textField.maximumNumberOfLines = 1
+        textField.cell?.wraps = false
+        textField.cell?.isScrollable = true
+        textField.cell?.lineBreakMode = .byTruncatingTail
+        textField.translatesAutoresizingMaskIntoConstraints = false
+        glass.contentView.addSubview(textField)
+
+        NSLayoutConstraint.activate([
+            textField.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: Self.fieldInsetX),
+            textField.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -Self.fieldInsetX),
+            textField.topAnchor.constraint(equalTo: glass.contentView.topAnchor, constant: Self.fieldInsetY),
+            textField.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -Self.fieldInsetY)
+        ])
+
+        panel.contentView = rootView
+    }
+
+    private func submit() {
+        guard textField.isEnabled, !isSubmitting else { return }
+        let text = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            panel.makeFirstResponder(textField)
+            return
+        }
+        isSubmitting = true
+        onSubmit(text)
+    }
+
+    private func setPlaceholder(_ text: String) {
+        textField.placeholderString = text
+        textField.placeholderAttributedString = NSAttributedString(
+            string: text,
+            attributes: [
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .font: NSFont.systemFont(ofSize: 14, weight: .regular)
+            ]
+        )
+    }
+
+    private func textMovement(from notification: Notification) -> Int? {
+        notification.userInfo?[Self.textMovementUserInfoKey] as? Int
+    }
+
+    private static func origin(near point: NSPoint, size: NSSize) -> NSPoint {
+        let visibleFrame = NSScreen.visibleFrame(containing: point)
+        let preferredGap: CGFloat = 10
+        let preferredBelowY = point.y - size.height - preferredGap
+        let preferredAboveY = point.y + preferredGap
+        let desiredY: CGFloat
+        if preferredBelowY < visibleFrame.minY + edgeMargin,
+           preferredAboveY + size.height <= visibleFrame.maxY - edgeMargin {
+            desiredY = preferredAboveY
+        } else {
+            desiredY = preferredBelowY
+        }
+
+        return NSPoint(
+            x: clamped(point.x - size.width / 2, min: visibleFrame.minX + edgeMargin, max: visibleFrame.maxX - size.width - edgeMargin),
+            y: clamped(desiredY, min: visibleFrame.minY + edgeMargin, max: visibleFrame.maxY - size.height - edgeMargin)
+        )
+    }
+
+    private static func clamped(_ value: CGFloat, min minValue: CGFloat, max maxValue: CGFloat) -> CGFloat {
+        guard minValue <= maxValue else {
+            return (minValue + maxValue) / 2
+        }
+        return Swift.min(Swift.max(value, minValue), maxValue)
+    }
+}
+
 private final class RightClickableButton: NSButton {
     var onRightClick: (() -> Void)?
 
