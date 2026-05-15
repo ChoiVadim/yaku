@@ -8,3 +8,4 @@
 - When reducing the Ask prompt height, scale the pill height, corner radius, font size, input height, and shadow radius together so the result feels intentionally compact instead of vertically squashed.
 - Do not reuse the floating-bar Ask input chrome for pet mode. In pet mode, double-Control should stop the pet and open a larger speech-bubble prompt attached to the mascot, then collapse back into the pet's existing thinking/loading state after Enter.
 - If a floating pet prompt keeps beeping on keys, stop trying to make `NSTextField` focus work through borderless panels. Use a prompt-scoped `CGEvent` key interceptor, render the typed buffer manually, and consume handled key events so input works independently of AppKit first-responder state.
+- Pet-attached prompt windows should match the pixel mascot style. Avoid smooth rounded macOS dialog chrome there; draw a blocky pixel speech bubble with stepped corners, pixel tail, and no antialiasing.

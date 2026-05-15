@@ -5289,63 +5289,85 @@ private final class PetPromptBubbleView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let context = NSGraphicsContext.current
+        let previousAntialiasing = context?.shouldAntialias
+        context?.shouldAntialias = false
+        defer {
+            if let previousAntialiasing {
+                context?.shouldAntialias = previousAntialiasing
+            }
+        }
+
+        let unit: CGFloat = 3
         let bubbleRect = NSRect(
-            x: 5,
-            y: 10,
-            width: bounds.width - 10,
-            height: bounds.height - 15
+            x: 5 * unit,
+            y: 4 * unit,
+            width: floor((bounds.width - 10 * unit) / unit) * unit,
+            height: floor((bounds.height - 9 * unit) / unit) * unit
         )
-        let bodyPath = NSBezierPath(
-            roundedRect: bubbleRect,
-            xRadius: 8,
-            yRadius: 8
-        )
-        let tail = NSBezierPath()
-        let tailTip = NSPoint(x: bubbleRect.minX + 13, y: bubbleRect.minY - 7)
-        let tailLeft = NSPoint(x: bubbleRect.minX + 27, y: bubbleRect.minY + 1)
-        let tailRight = NSPoint(x: bubbleRect.minX + 44, y: bubbleRect.minY + 1)
-        tail.move(to: tailLeft)
-        tail.line(to: tailTip)
-        tail.line(to: tailRight)
-        tail.close()
 
-        let shadowOffset = NSSize(width: 0, height: -2)
-        NSColor(calibratedWhite: 0.0, alpha: 0.22).setFill()
-        NSBezierPath(
-            roundedRect: bubbleRect.offsetBy(dx: shadowOffset.width, dy: shadowOffset.height),
-            xRadius: 8,
-            yRadius: 8
-        ).fill()
+        let shadow = NSColor(calibratedWhite: 0.0, alpha: 0.22)
+        let fill = NSColor(srgbRed: 0.95, green: 0.96, blue: 0.91, alpha: 1.0)
+        let highlight = NSColor(calibratedWhite: 1.0, alpha: 0.55)
+        let border = isError
+            ? NSColor(srgbRed: 0.93, green: 0.23, blue: 0.23, alpha: 1.0)
+            : NSColor(srgbRed: 0.42, green: 0.47, blue: 0.47, alpha: 1.0)
+        let borderDark = isError
+            ? NSColor(srgbRed: 0.54, green: 0.08, blue: 0.08, alpha: 1.0)
+            : NSColor(srgbRed: 0.22, green: 0.27, blue: 0.28, alpha: 1.0)
 
-        NSColor(srgbRed: 0.95, green: 0.96, blue: 0.93, alpha: 1.0).setFill()
-        tail.fill()
-        bodyPath.fill()
+        let tailAnchor = bubbleRect.minX + 4 * unit
+        drawPixelBubbleBody(in: bubbleRect.offsetBy(dx: unit, dy: -unit), unit: unit, color: shadow)
+        drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: shadow, offset: NSPoint(x: unit, y: -unit))
 
-        let borderColor = isError
-            ? NSColor(srgbRed: 0.95, green: 0.36, blue: 0.36, alpha: 1.0)
-            : NSColor(srgbRed: 0.44, green: 0.48, blue: 0.50, alpha: 1.0)
-        borderColor.setStroke()
-        bodyPath.lineWidth = 1.4
-        bodyPath.stroke()
+        drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: borderDark)
+        drawPixelBubbleBody(in: bubbleRect, unit: unit, color: borderDark)
+        drawPixelBubbleBody(in: bubbleRect.insetBy(dx: unit, dy: unit), unit: unit, color: border)
+        drawPixelBubbleBody(in: bubbleRect.insetBy(dx: unit * 2, dy: unit * 2), unit: unit, color: fill)
 
-        let tailStroke = NSBezierPath()
-        tailStroke.move(to: tailLeft)
-        tailStroke.line(to: tailTip)
-        tailStroke.line(to: tailRight)
-        tailStroke.lineWidth = 1.4
-        tailStroke.stroke()
+        drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: fill, offset: NSPoint(x: unit * 2, y: unit * 2))
 
-        NSColor(calibratedWhite: 1.0, alpha: 0.45).setFill()
-        NSBezierPath(
-            roundedRect: NSRect(
-                x: bubbleRect.minX + 4,
-                y: bubbleRect.maxY - 8,
-                width: bubbleRect.width - 8,
-                height: 2.5
-            ),
-            xRadius: 1.5,
-            yRadius: 1.5
-        ).fill()
+        highlight.setFill()
+        NSBezierPath(rect: NSRect(
+            x: bubbleRect.minX + 4 * unit,
+            y: bubbleRect.maxY - 4 * unit,
+            width: bubbleRect.width - 8 * unit,
+            height: unit
+        )).fill()
+    }
+
+    private func drawPixelBubbleBody(in rect: NSRect, unit: CGFloat, color: NSColor) {
+        color.setFill()
+        NSBezierPath(rect: NSRect(
+            x: rect.minX + unit,
+            y: rect.minY,
+            width: rect.width - unit * 2,
+            height: rect.height
+        )).fill()
+        NSBezierPath(rect: NSRect(
+            x: rect.minX,
+            y: rect.minY + unit,
+            width: rect.width,
+            height: rect.height - unit * 2
+        )).fill()
+    }
+
+    private func drawPixelTail(anchor: CGFloat, baseY: CGFloat, unit: CGFloat, color: NSColor, offset: NSPoint = .zero) {
+        color.setFill()
+        let cells: [(CGFloat, CGFloat, CGFloat)] = [
+            (0, 0, 7),
+            (1, -1, 5),
+            (2, -2, 3),
+            (3, -3, 1)
+        ]
+        for (x, y, width) in cells {
+            NSBezierPath(rect: NSRect(
+                x: anchor + offset.x + x * unit,
+                y: baseY + offset.y + y * unit,
+                width: width * unit,
+                height: unit
+            )).fill()
+        }
     }
 }
 
