@@ -6,12 +6,14 @@ enum GlobalShortcutAction: String, CaseIterable {
     case translateOrReply
     case translateSelection
     case screenshotArea
+    case toggleInvisibility
 
     var id: UInt32 {
         switch self {
         case .translateOrReply: return 1
         case .translateSelection: return 2
         case .screenshotArea: return 3
+        case .toggleInvisibility: return 4
         }
     }
 
@@ -24,6 +26,7 @@ enum GlobalShortcutAction: String, CaseIterable {
         case .translateOrReply: return "Translate selected text"
         case .translateSelection: return "Rewrite my text"
         case .screenshotArea: return "Translate screen area"
+        case .toggleInvisibility: return "Toggle invisibility mode"
         }
     }
 
@@ -53,6 +56,13 @@ enum GlobalShortcutAction: String, CaseIterable {
                 modifiers: [.control],
                 keyEquivalent: "3",
                 keyDisplay: "3"
+            )
+        case .toggleInvisibility:
+            return GlobalShortcut(
+                keyCode: UInt32(kVK_ANSI_Backslash),
+                modifiers: [.control, .shift],
+                keyEquivalent: "\\",
+                keyDisplay: "\\"
             )
         }
     }
