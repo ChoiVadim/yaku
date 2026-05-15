@@ -5594,9 +5594,9 @@ final class PetController: NSObject, NSTextFieldDelegate {
         width: mascotSize.width + panelPadding * 2,
         height: mascotSize.height + panelPadding * 2
     )
-    private static let promptPanelSize = NSSize(width: 260, height: 90)
-    private static let promptBubbleFrame = NSRect(x: 8, y: 26, width: 246, height: 60)
-    private static let promptTextFieldFrame = NSRect(x: 30, y: 44, width: 204, height: 22)
+    private static let promptPanelSize = NSSize(width: 260, height: 98)
+    private static let promptBubbleFrame = NSRect(x: 0, y: 34, width: 254, height: 60)
+    private static let promptTextFieldFrame = NSRect(x: 22, y: 52, width: 212, height: 22)
     private static let answerFontSize: CGFloat = 14
     private static let edgeMargin: CGFloat = 6
     private static let textMovementUserInfoKey = "NSTextMovement"

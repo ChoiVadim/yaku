@@ -13,3 +13,4 @@
 - In pet Ask mode, keep the answer inside the same pet speech-bubble surface instead of opening the normal result panel. Only move the pet when the model returns a real `petTarget`; otherwise display the answer in place and keep the pet still.
 - Pet Ask answer bubbles must grow vertically for medium-length responses and switch to internal scrolling at a fixed max height; never render long LLM answers into a fixed one-line or clipped text field.
 - When an Ask response includes `petTarget`, the pet bubble tail becomes the pointer: draw it toward the exact returned screen point instead of leaving the decorative tail aimed only at the mascot.
+- Keep the pet Ask bubble body slightly above and overlapping left toward the mascot; if it drifts too far right/down, adjust the bubble/text frames inside the prompt panel rather than moving the pet panel itself.

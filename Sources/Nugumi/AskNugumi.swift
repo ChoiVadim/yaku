@@ -141,18 +141,18 @@ struct AskNugumiAnswerBubbleLayout: Equatable {
 
 enum AskNugumiAnswerBubbleMetrics {
     static let panelWidth: CGFloat = 300
-    static let minimumPanelHeight: CGFloat = 128
-    static let maximumPanelHeight: CGFloat = 246
+    static let minimumPanelHeight: CGFloat = 136
+    static let maximumPanelHeight: CGFloat = 254
 
-    private static let bubbleX: CGFloat = 8
-    private static let bubbleY: CGFloat = 26
-    private static let bubbleWidth: CGFloat = 286
-    private static let textX: CGFloat = 30
-    private static let textY: CGFloat = 48
-    private static let textWidth: CGFloat = 244
+    private static let bubbleX: CGFloat = 0
+    private static let bubbleY: CGFloat = 34
+    private static let bubbleWidth: CGFloat = 294
+    private static let textX: CGFloat = 22
+    private static let textY: CGFloat = 56
+    private static let textWidth: CGFloat = 252
     private static let minimumViewportHeight: CGFloat = 54
     private static let topTextInset: CGFloat = 26
-    private static let bubbleBottomInset: CGFloat = 30
+    private static let bubbleBottomInset: CGFloat = 38
 
     static func layout(forContentHeight contentHeight: CGFloat) -> AskNugumiAnswerBubbleLayout {
         let sanitizedContentHeight = contentHeight.isFinite
