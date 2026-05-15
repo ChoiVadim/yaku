@@ -21,3 +21,4 @@
 - Pet Ask bubbles should be anchored above the mascot; if screen edges force the prompt panel downward, nudge the mascot below the bubble rather than letting the dialog cover the character.
 - Ask Nugumi screen captures should temporarily hide Nugumi windows from capture and include an explicit PNG pixel-size coordinate guide, otherwise vision models may localize tiny menu bar icons against the wrong visual context.
 - Pet Ask target markers should look like a quiet pixel indicator, not a bright system-selection button; use the product green accent `#11766E` with a soft border/shadow.
+- Pet Ask prompt bubbles should sit visually close to the mascot sprite, not just close to the transparent pet panel; use a small negative bubble-to-panel gap so the tail reads attached.

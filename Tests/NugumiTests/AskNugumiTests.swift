@@ -188,9 +188,19 @@ final class AskNugumiTests: XCTestCase {
             visibleFrame: CGRect(x: 0, y: 0, width: 420, height: 300),
             edgeMargin: 6
         )
+        let bubbleScreenFrame = layout.bubbleFrame.offsetBy(
+            dx: presentation.promptFrame.minX,
+            dy: presentation.promptFrame.minY
+        )
+        let petFrame = CGRect(origin: presentation.petOrigin, size: petSize)
 
         XCTAssertEqual(presentation.petOrigin.x, petOrigin.x, accuracy: 0.001)
         XCTAssertEqual(presentation.petOrigin.y, petOrigin.y, accuracy: 0.001)
+        XCTAssertEqual(
+            bubbleScreenFrame.minY - petFrame.maxY,
+            AskNugumiPetBubblePresentationMetrics.bubbleToPetPanelGap,
+            accuracy: 0.001
+        )
     }
 
     func testPetBubblePresentationMovesPetBelowTopClampedBubble() {
@@ -214,7 +224,7 @@ final class AskNugumiTests: XCTestCase {
 
         XCTAssertEqual(
             bubbleScreenFrame.minY - petFrame.maxY,
-            AskNugumiPetBubblePresentationMetrics.gap,
+            AskNugumiPetBubblePresentationMetrics.bubbleToPetPanelGap,
             accuracy: 0.001
         )
         XCTAssertLessThanOrEqual(presentation.promptFrame.maxY, visibleFrame.maxY - edgeMargin)

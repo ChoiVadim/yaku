@@ -277,7 +277,7 @@ enum AskNugumiTargetMarkerMetrics {
 }
 
 enum AskNugumiPetBubblePresentationMetrics {
-    static let gap: CGFloat = 2
+    static let bubbleToPetPanelGap: CGFloat = -6
 
     static func presentation(
         petOrigin: CGPoint,
@@ -289,7 +289,7 @@ enum AskNugumiPetBubblePresentationMetrics {
     ) -> AskNugumiPetBubblePresentation {
         let desiredPromptOrigin = CGPoint(
             x: petOrigin.x,
-            y: petOrigin.y + petSize.height - bubbleFrame.minY + gap
+            y: petOrigin.y + petSize.height - bubbleFrame.minY + bubbleToPetPanelGap
         )
         let promptOrigin = clampedOrigin(
             desiredPromptOrigin,
@@ -300,7 +300,7 @@ enum AskNugumiPetBubblePresentationMetrics {
         var adjustedPetOrigin = petOrigin
 
         let bubbleOriginY = promptOrigin.y + bubbleFrame.minY
-        let targetPetMaxY = bubbleOriginY - gap
+        let targetPetMaxY = bubbleOriginY - bubbleToPetPanelGap
         if petOrigin.y + petSize.height > targetPetMaxY {
             adjustedPetOrigin.y = targetPetMaxY - petSize.height
         }
