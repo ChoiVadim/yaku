@@ -139,6 +139,48 @@ struct AskNugumiAnswerBubbleLayout: Equatable {
     let needsScroll: Bool
 }
 
+struct AskNugumiPromptInputLayout: Equatable {
+    let panelSize: CGSize
+    let bubbleFrame: CGRect
+    let textFrame: CGRect
+}
+
+enum AskNugumiPromptInputMetrics {
+    static let panelWidth: CGFloat = 182
+    static let minimumPanelHeight: CGFloat = 98
+    static let maximumPanelHeight: CGFloat = 210
+    static let fontSize: CGFloat = 13
+
+    private static let bubbleX: CGFloat = 0
+    private static let bubbleY: CGFloat = 34
+    private static let bubbleWidth: CGFloat = 176
+    private static let textX: CGFloat = 16
+    private static let textY: CGFloat = 52
+    private static let textWidth: CGFloat = 144
+    private static let minimumTextHeight: CGFloat = 22
+    private static let topTextInset: CGFloat = 24
+    private static let bubbleBottomInset: CGFloat = 38
+
+    static func layout(forContentHeight contentHeight: CGFloat) -> AskNugumiPromptInputLayout {
+        let sanitizedContentHeight = contentHeight.isFinite
+            ? max(1, ceil(contentHeight))
+            : minimumTextHeight
+        let maximumTextHeight = maximumPanelHeight - textY - topTextInset
+        let textHeight = min(
+            max(minimumTextHeight, sanitizedContentHeight),
+            maximumTextHeight
+        )
+        let panelHeight = textHeight + textY + topTextInset
+        let bubbleHeight = panelHeight - bubbleBottomInset
+
+        return AskNugumiPromptInputLayout(
+            panelSize: CGSize(width: panelWidth, height: panelHeight),
+            bubbleFrame: CGRect(x: bubbleX, y: bubbleY, width: bubbleWidth, height: bubbleHeight),
+            textFrame: CGRect(x: textX, y: textY, width: textWidth, height: textHeight)
+        )
+    }
+}
+
 enum AskNugumiAnswerBubbleMetrics {
     static let panelWidth: CGFloat = 300
     static let minimumPanelHeight: CGFloat = 136

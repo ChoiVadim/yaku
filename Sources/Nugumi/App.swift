@@ -5537,6 +5537,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private var isAnswerOpen = false
     private var promptBuffer = ""
     private var promptHasFullSelection = false
+    private var currentPromptInputLayout = AskNugumiPromptInputMetrics.layout(forContentHeight: 0)
     private var currentAnswerLayout = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 0)
     private var currentAnswerMarkerTarget: NSPoint?
     private var pointingTarget: NSPoint?
@@ -5557,9 +5558,6 @@ final class PetController: NSObject, NSTextFieldDelegate {
         width: mascotSize.width + panelPadding * 2,
         height: mascotSize.height + panelPadding * 2
     )
-    private static let promptPanelSize = NSSize(width: 260, height: 98)
-    private static let promptBubbleFrame = NSRect(x: 0, y: 34, width: 254, height: 60)
-    private static let promptTextFieldFrame = NSRect(x: 22, y: 52, width: 212, height: 22)
     private static let answerFontSize: CGFloat = 14
     private static let edgeMargin: CGFloat = 6
     private static let pointingArrivalThreshold: CGFloat = 8
@@ -5592,13 +5590,14 @@ final class PetController: NSObject, NSTextFieldDelegate {
             defer: false
         )
         containerView = NSView(frame: NSRect(origin: .zero, size: Self.panelSize))
+        let initialPromptInputLayout = AskNugumiPromptInputMetrics.layout(forContentHeight: 0)
         promptPanel = PetPanel(
-            contentRect: NSRect(origin: origin, size: Self.promptPanelSize),
+            contentRect: NSRect(origin: origin, size: initialPromptInputLayout.panelSize),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
-        promptContainerView = NSView(frame: NSRect(origin: .zero, size: Self.promptPanelSize))
+        promptContainerView = NSView(frame: NSRect(origin: .zero, size: initialPromptInputLayout.panelSize))
         petView = PetMascotView(frame: NSRect(
             origin: .zero,
             size: Self.panelSize
@@ -5609,8 +5608,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
             width: Self.appIconSize.width,
             height: Self.appIconSize.height
         ))
-        promptBubbleView = PetPromptBubbleView(frame: Self.promptBubbleFrame)
-        promptTextField = AskPromptTextField(frame: Self.promptTextFieldFrame)
+        promptBubbleView = PetPromptBubbleView(frame: initialPromptInputLayout.bubbleFrame)
+        promptTextField = AskPromptTextField(frame: initialPromptInputLayout.textFrame)
         let initialAnswerLayout = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 0)
         answerScrollView = NSScrollView(frame: initialAnswerLayout.viewportFrame)
         answerTextView = NSTextView(frame: NSRect(
@@ -5795,13 +5794,13 @@ final class PetController: NSObject, NSTextFieldDelegate {
 
         promptBuffer = ""
         promptHasFullSelection = false
-        renderPromptText()
         promptTextField.isEnabled = true
         configurePromptTextFieldForInput()
+        renderPromptText()
         promptBubbleView.isError = false
         promptBubbleView.targetMarkerPoint = nil
         setPromptPlaceholder("Ask Nugumi")
-        let frame = promptFrameAnchoredToPet(size: Self.promptPanelSize)
+        let frame = promptFrameAnchoredToPet(size: currentPromptInputLayout.panelSize)
         panel.setFrameOrigin(frame.origin)
         promptPanel.setFrame(frame, display: true)
         showPromptViews()
@@ -5869,7 +5868,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptBubbleView.targetMarkerPoint = nil
         setPromptPlaceholder(message)
         petView.apply(state: .idle, mode: currentMode)
-        let frame = promptFrameAnchoredToPet(size: Self.promptPanelSize)
+        refreshPromptInputLayout()
+        let frame = promptFrameAnchoredToPet(size: currentPromptInputLayout.panelSize)
         panel.setFrameOrigin(frame.origin)
         promptPanel.setFrame(frame, display: true)
         showPromptViews()
@@ -6044,12 +6044,12 @@ final class PetController: NSObject, NSTextFieldDelegate {
     }
 
     private func configurePromptTextFieldForInput() {
-        promptTextField.font = NugumiFont.pixelPrompt(size: 16)
-        promptTextField.usesSingleLineMode = true
-        promptTextField.maximumNumberOfLines = 1
-        promptTextField.cell?.wraps = false
-        promptTextField.cell?.isScrollable = true
-        promptTextField.cell?.lineBreakMode = .byTruncatingTail
+        promptTextField.font = NugumiFont.pixelPrompt(size: AskNugumiPromptInputMetrics.fontSize)
+        promptTextField.usesSingleLineMode = false
+        promptTextField.maximumNumberOfLines = 0
+        promptTextField.cell?.wraps = true
+        promptTextField.cell?.isScrollable = false
+        promptTextField.cell?.lineBreakMode = .byWordWrapping
     }
 
     private func configureAnswerTextView(with message: String) {
@@ -6119,6 +6119,37 @@ final class PetController: NSObject, NSTextFieldDelegate {
 
     private func renderPromptText() {
         promptTextField.stringValue = promptBuffer
+        refreshPromptInputLayout()
+    }
+
+    private func refreshPromptInputLayout() {
+        currentPromptInputLayout = AskNugumiPromptInputMetrics.layout(
+            forContentHeight: promptInputContentHeight(for: promptBuffer)
+        )
+        guard isPromptOpen, !isAnswerOpen else { return }
+        let frame = promptFrameAnchoredToPet(size: currentPromptInputLayout.panelSize)
+        panel.setFrameOrigin(frame.origin)
+        promptPanel.setFrame(frame, display: true)
+        layoutPromptSubviews()
+    }
+
+    private func promptInputContentHeight(for text: String) -> CGFloat {
+        let measuredText = text.isEmpty ? "Ask Nugumi" : text
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byWordWrapping
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NugumiFont.pixelPrompt(size: AskNugumiPromptInputMetrics.fontSize),
+            .paragraphStyle: paragraphStyle
+        ]
+        let boundingRect = (measuredText as NSString).boundingRect(
+            with: NSSize(
+                width: AskNugumiPromptInputMetrics.layout(forContentHeight: 0).textFrame.width,
+                height: .greatestFiniteMagnitude
+            ),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes
+        )
+        return ceil(boundingRect.height) + 4
     }
 
     private func insertPromptText(_ text: String) {
@@ -6247,10 +6278,10 @@ final class PetController: NSObject, NSTextFieldDelegate {
             promptBubbleView.targetMarkerPoint = currentAnswerMarkerTarget
             answerScrollView.frame = currentAnswerLayout.viewportFrame
         } else {
-            promptBubbleView.frame = NSRect(origin: .zero, size: Self.promptPanelSize)
-            promptBubbleView.bubbleFrame = Self.promptBubbleFrame
+            promptBubbleView.frame = NSRect(origin: .zero, size: currentPromptInputLayout.panelSize)
+            promptBubbleView.bubbleFrame = currentPromptInputLayout.bubbleFrame
             promptBubbleView.targetMarkerPoint = nil
-            promptTextField.frame = Self.promptTextFieldFrame
+            promptTextField.frame = currentPromptInputLayout.textFrame
         }
     }
 

@@ -16,3 +16,4 @@
 - Keep the pet Ask bubble body slightly above and overlapping left toward the mascot; if it drifts too far right/down, adjust the bubble/text frames inside the prompt panel rather than moving the pet panel itself.
 - In the `petTarget` Ask flow, never rely on an asymptotic movement loop as the only way to show the answer bubble. The movement arrival callback needs a single-shot completion path plus a short fallback timer, otherwise the pet can move forever with no bubble or target marker.
 - For `petTarget`, keep movement and marker coordinates separate: move the pet to a visible-frame-safe point, but draw the blinking marker at the exact screenshot-derived screen point and expand the transparent prompt panel so the marker is not clipped.
+- Pet Ask input should stay compact: about 30% narrower than the answer bubble, with smaller prompt text, and it should grow vertically as the typed prompt wraps instead of clipping/truncating long input.
