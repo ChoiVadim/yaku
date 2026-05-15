@@ -145,6 +145,11 @@ struct AskNugumiPromptInputLayout: Equatable {
     let textFrame: CGRect
 }
 
+struct AskNugumiPetBubblePresentation: Equatable {
+    let promptFrame: CGRect
+    let petOrigin: CGPoint
+}
+
 enum AskNugumiPromptInputMetrics {
     static let panelWidth: CGFloat = 182
     static let minimumPanelHeight: CGFloat = 98
@@ -154,9 +159,9 @@ enum AskNugumiPromptInputMetrics {
     private static let bubbleX: CGFloat = 0
     private static let bubbleY: CGFloat = 34
     private static let bubbleWidth: CGFloat = 176
-    private static let textX: CGFloat = 16
+    private static let textX: CGFloat = 30
     private static let textY: CGFloat = 52
-    private static let textWidth: CGFloat = 144
+    private static let textWidth: CGFloat = 116
     private static let minimumTextHeight: CGFloat = 22
     private static let topTextInset: CGFloat = 24
     private static let bubbleBottomInset: CGFloat = 38
@@ -189,9 +194,9 @@ enum AskNugumiAnswerBubbleMetrics {
     private static let bubbleX: CGFloat = 0
     private static let bubbleY: CGFloat = 34
     private static let bubbleWidth: CGFloat = 294
-    private static let textX: CGFloat = 22
+    private static let textX: CGFloat = 30
     private static let textY: CGFloat = 56
-    private static let textWidth: CGFloat = 252
+    private static let textWidth: CGFloat = 234
     private static let minimumViewportHeight: CGFloat = 54
     private static let topTextInset: CGFloat = 26
     private static let bubbleBottomInset: CGFloat = 38
@@ -233,6 +238,66 @@ enum AskNugumiTargetMarkerMetrics {
 
     static func paddedFrame(centeredAt point: CGPoint) -> CGRect {
         frame(centeredAt: point).insetBy(dx: -padding, dy: -padding)
+    }
+}
+
+enum AskNugumiPetBubblePresentationMetrics {
+    static let gap: CGFloat = 2
+
+    static func presentation(
+        petOrigin: CGPoint,
+        petSize: CGSize,
+        promptSize: CGSize,
+        bubbleFrame: CGRect,
+        visibleFrame: CGRect,
+        edgeMargin: CGFloat
+    ) -> AskNugumiPetBubblePresentation {
+        let desiredPromptOrigin = CGPoint(
+            x: petOrigin.x,
+            y: petOrigin.y + petSize.height - bubbleFrame.minY + gap
+        )
+        let promptOrigin = clampedOrigin(
+            desiredPromptOrigin,
+            size: promptSize,
+            visibleFrame: visibleFrame,
+            edgeMargin: edgeMargin
+        )
+        var adjustedPetOrigin = petOrigin
+
+        let bubbleOriginY = promptOrigin.y + bubbleFrame.minY
+        let targetPetMaxY = bubbleOriginY - gap
+        if petOrigin.y + petSize.height > targetPetMaxY {
+            adjustedPetOrigin.y = targetPetMaxY - petSize.height
+        }
+        adjustedPetOrigin = clampedOrigin(
+            adjustedPetOrigin,
+            size: petSize,
+            visibleFrame: visibleFrame,
+            edgeMargin: edgeMargin
+        )
+
+        return AskNugumiPetBubblePresentation(
+            promptFrame: CGRect(origin: promptOrigin, size: promptSize),
+            petOrigin: adjustedPetOrigin
+        )
+    }
+
+    private static func clampedOrigin(
+        _ origin: CGPoint,
+        size: CGSize,
+        visibleFrame: CGRect,
+        edgeMargin: CGFloat
+    ) -> CGPoint {
+        CGPoint(
+            x: min(
+                max(origin.x, visibleFrame.minX + edgeMargin),
+                visibleFrame.maxX - size.width - edgeMargin
+            ),
+            y: min(
+                max(origin.y, visibleFrame.minY + edgeMargin),
+                visibleFrame.maxY - size.height - edgeMargin
+            )
+        )
     }
 }
 

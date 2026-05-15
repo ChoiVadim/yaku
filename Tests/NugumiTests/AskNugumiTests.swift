@@ -160,12 +160,63 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertEqual(frame.height, AskNugumiTargetMarkerMetrics.size)
     }
 
+    func testPetBubblePresentationKeepsPetStillWhenBubbleFitsAboveMascot() {
+        let layout = AskNugumiPromptInputMetrics.layout(forContentHeight: 18)
+        let petOrigin = CGPoint(x: 40, y: 40)
+        let petSize = CGSize(width: 54, height: 46)
+        let presentation = AskNugumiPetBubblePresentationMetrics.presentation(
+            petOrigin: petOrigin,
+            petSize: petSize,
+            promptSize: layout.panelSize,
+            bubbleFrame: layout.bubbleFrame,
+            visibleFrame: CGRect(x: 0, y: 0, width: 420, height: 300),
+            edgeMargin: 6
+        )
+
+        XCTAssertEqual(presentation.petOrigin.x, petOrigin.x, accuracy: 0.001)
+        XCTAssertEqual(presentation.petOrigin.y, petOrigin.y, accuracy: 0.001)
+    }
+
+    func testPetBubblePresentationMovesPetBelowTopClampedBubble() {
+        let layout = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 80)
+        let petSize = CGSize(width: 54, height: 46)
+        let visibleFrame = CGRect(x: 0, y: 0, width: 420, height: 300)
+        let edgeMargin: CGFloat = 6
+        let presentation = AskNugumiPetBubblePresentationMetrics.presentation(
+            petOrigin: CGPoint(x: 40, y: 248),
+            petSize: petSize,
+            promptSize: layout.panelSize,
+            bubbleFrame: layout.bubbleFrame,
+            visibleFrame: visibleFrame,
+            edgeMargin: edgeMargin
+        )
+        let bubbleScreenFrame = layout.bubbleFrame.offsetBy(
+            dx: presentation.promptFrame.minX,
+            dy: presentation.promptFrame.minY
+        )
+        let petFrame = CGRect(origin: presentation.petOrigin, size: petSize)
+
+        XCTAssertEqual(
+            bubbleScreenFrame.minY - petFrame.maxY,
+            AskNugumiPetBubblePresentationMetrics.gap,
+            accuracy: 0.001
+        )
+        XCTAssertLessThanOrEqual(presentation.promptFrame.maxY, visibleFrame.maxY - edgeMargin)
+    }
+
     func testPromptInputLayoutIsShorterWithSmallerText() {
         let layout = AskNugumiPromptInputMetrics.layout(forContentHeight: 18)
 
         XCTAssertEqual(layout.panelSize.width, 182, accuracy: 0.001)
         XCTAssertEqual(AskNugumiPromptInputMetrics.fontSize, 13, accuracy: 0.001)
         XCTAssertLessThan(layout.panelSize.width, AskNugumiAnswerBubbleMetrics.panelWidth)
+    }
+
+    func testPromptInputTextHasSymmetricInnerPadding() {
+        let layout = AskNugumiPromptInputMetrics.layout(forContentHeight: 18)
+
+        XCTAssertEqual(layout.textFrame.minX - layout.bubbleFrame.minX, 30, accuracy: 0.001)
+        XCTAssertEqual(layout.bubbleFrame.maxX - layout.textFrame.maxX, 30, accuracy: 0.001)
     }
 
     func testPromptInputLayoutGrowsWhenTextWraps() {
@@ -183,6 +234,13 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertGreaterThan(taller.panelSize.height, short.panelSize.height)
         XCTAssertGreaterThan(taller.bubbleFrame.height, short.bubbleFrame.height)
         XCTAssertFalse(taller.needsScroll)
+    }
+
+    func testAnswerTextHasSymmetricInnerPadding() {
+        let layout = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 80)
+
+        XCTAssertEqual(layout.viewportFrame.minX - layout.bubbleFrame.minX, 30, accuracy: 0.001)
+        XCTAssertEqual(layout.bubbleFrame.maxX - layout.viewportFrame.maxX, 30, accuracy: 0.001)
     }
 
     func testAnswerBubbleLayoutUsesScrollAfterMaximumHeight() {

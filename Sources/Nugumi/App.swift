@@ -5800,9 +5800,12 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptBubbleView.isError = false
         promptBubbleView.targetMarkerPoint = nil
         setPromptPlaceholder("Ask Nugumi")
-        let frame = promptFrameAnchoredToPet(size: currentPromptInputLayout.panelSize)
-        panel.setFrameOrigin(frame.origin)
-        promptPanel.setFrame(frame, display: true)
+        let presentation = promptPresentationAnchoredToPet(
+            size: currentPromptInputLayout.panelSize,
+            bubbleFrame: currentPromptInputLayout.bubbleFrame
+        )
+        panel.setFrameOrigin(presentation.petOrigin)
+        promptPanel.setFrame(presentation.promptFrame, display: true)
         showPromptViews()
         promptPanel.alphaValue = 1
         show()
@@ -5869,9 +5872,12 @@ final class PetController: NSObject, NSTextFieldDelegate {
         setPromptPlaceholder(message)
         petView.apply(state: .idle, mode: currentMode)
         refreshPromptInputLayout()
-        let frame = promptFrameAnchoredToPet(size: currentPromptInputLayout.panelSize)
-        panel.setFrameOrigin(frame.origin)
-        promptPanel.setFrame(frame, display: true)
+        let presentation = promptPresentationAnchoredToPet(
+            size: currentPromptInputLayout.panelSize,
+            bubbleFrame: currentPromptInputLayout.bubbleFrame
+        )
+        panel.setFrameOrigin(presentation.petOrigin)
+        promptPanel.setFrame(presentation.promptFrame, display: true)
         showPromptViews()
         promptPanel.alphaValue = 1
         show()
@@ -6127,9 +6133,12 @@ final class PetController: NSObject, NSTextFieldDelegate {
             forContentHeight: promptInputContentHeight(for: promptBuffer)
         )
         guard isPromptOpen, !isAnswerOpen else { return }
-        let frame = promptFrameAnchoredToPet(size: currentPromptInputLayout.panelSize)
-        panel.setFrameOrigin(frame.origin)
-        promptPanel.setFrame(frame, display: true)
+        let presentation = promptPresentationAnchoredToPet(
+            size: currentPromptInputLayout.panelSize,
+            bubbleFrame: currentPromptInputLayout.bubbleFrame
+        )
+        panel.setFrameOrigin(presentation.petOrigin)
+        promptPanel.setFrame(presentation.promptFrame, display: true)
         layoutPromptSubviews()
     }
 
@@ -6223,24 +6232,35 @@ final class PetController: NSObject, NSTextFieldDelegate {
         notification.userInfo?[Self.textMovementUserInfoKey] as? Int
     }
 
-    private func promptFrameAnchoredToPet(size: NSSize) -> NSRect {
+    private func promptPresentationAnchoredToPet(
+        size: NSSize,
+        bubbleFrame: NSRect
+    ) -> (promptFrame: NSRect, petOrigin: NSPoint) {
         let referencePoint = NSPoint(x: panel.frame.midX, y: panel.frame.midY)
         let visibleFrame = NSScreen.visibleFrame(containing: referencePoint)
-        let origin = Self.clampedOrigin(
-            panel.frame.origin,
-            size: size,
-            visibleFrame: visibleFrame
+        let presentation = AskNugumiPetBubblePresentationMetrics.presentation(
+            petOrigin: panel.frame.origin,
+            petSize: Self.panelSize,
+            promptSize: size,
+            bubbleFrame: bubbleFrame,
+            visibleFrame: visibleFrame,
+            edgeMargin: Self.edgeMargin
         )
-        return NSRect(origin: origin, size: size)
+
+        return (presentation.promptFrame, presentation.petOrigin)
     }
 
     private func answerPresentationFrame(
         for layout: AskNugumiAnswerBubbleLayout,
         markerTarget: NSPoint?
     ) -> (frame: NSRect, petOrigin: NSPoint, layout: AskNugumiAnswerBubbleLayout, markerTarget: NSPoint?) {
-        let bubblePanelFrame = promptFrameAnchoredToPet(size: layout.panelSize)
+        let promptPresentation = promptPresentationAnchoredToPet(
+            size: layout.panelSize,
+            bubbleFrame: layout.bubbleFrame
+        )
+        let bubblePanelFrame = promptPresentation.promptFrame
         guard let markerTarget else {
-            return (bubblePanelFrame, bubblePanelFrame.origin, layout, nil)
+            return (bubblePanelFrame, promptPresentation.petOrigin, layout, nil)
         }
 
         let markerRect = AskNugumiTargetMarkerMetrics.paddedFrame(centeredAt: markerTarget)
@@ -6261,7 +6281,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
             y: markerTarget.y - panelFrame.minY
         )
 
-        return (panelFrame, bubblePanelFrame.origin, shiftedLayout, localMarkerTarget)
+        return (panelFrame, promptPresentation.petOrigin, shiftedLayout, localMarkerTarget)
     }
 
     private func layoutPromptSubviews() {
@@ -9918,6 +9938,8 @@ Rules:
 - If the answer does not require pointing to a specific visible location, omit `petTarget` completely. Do not include it just to animate movement.
 - `petTarget.x` is left-to-right from 0.0 to 1.0 across the screenshot.
 - `petTarget.y` is top-to-bottom from 0.0 to 1.0 across the screenshot.
+- When returning `petTarget`, use the exact visual center of the object, icon, button, or control named in `message`, not the center of a broad region or nearby label.
+- For tiny menu bar/status icons, estimate the center of the icon glyph itself as precisely as possible.
 - Use coordinateSpace exactly "screenshot_normalized".
 - Do not click, automate, or claim you took an action.
 - If uncertain, omit `petTarget` and explain what to look for in `message`.
