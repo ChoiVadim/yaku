@@ -4951,6 +4951,8 @@ final class PetController {
     private var currentMode: TranslationMode
     private var isReadyLockedUntilPanelCloses = false
     private var isThinking = false
+    private var pointingTarget: NSPoint?
+    private var pointingReturnTimer: Timer?
     private var lastCursorLocation = NSEvent.mouseLocation
     private var lastCursorMovementDate = Date.distantPast
     private var cursorOffset = PetController.defaultCursorOffset
@@ -5076,6 +5078,7 @@ final class PetController {
         clearReady()
         trackingTimer?.invalidate()
         trackingTimer = nil
+        cancelPointingAnimation()
         panel.close()
     }
 
@@ -5086,6 +5089,7 @@ final class PetController {
         onRewrite: @escaping (String) -> Void,
         onSmartReply: @escaping (String) -> Void
     ) {
+        cancelPointingAnimation()
         self.selectedText = selectedText
         self.onTranslate = onTranslate
         self.onRewrite = onRewrite
@@ -5100,6 +5104,7 @@ final class PetController {
     }
 
     func holdReadyUntilPanelCloses(mode: TranslationMode? = nil) {
+        cancelPointingAnimation()
         if let mode {
             currentMode = mode
         }
@@ -5116,6 +5121,7 @@ final class PetController {
     }
 
     func clearReady() {
+        cancelPointingAnimation()
         selectedText = nil
         onTranslate = nil
         onRewrite = nil
@@ -5129,6 +5135,7 @@ final class PetController {
     }
 
     func showThinking() {
+        cancelPointingAnimation()
         isThinking = true
         selectedText = nil
         onTranslate = nil
@@ -5147,6 +5154,39 @@ final class PetController {
         isThinking = false
         petView.apply(state: .idle, mode: currentMode)
         refreshAppIcon()
+    }
+
+    func pointTemporarily(at destination: NSPoint, holdDuration: TimeInterval = 3.0) {
+        pointingReturnTimer?.invalidate()
+        pointingTarget = destination
+        selectedText = nil
+        onTranslate = nil
+        onRewrite = nil
+        onSmartReply = nil
+        isReadyLockedUntilPanelCloses = false
+        isThinking = false
+        panel.ignoresMouseEvents = true
+        tabInterceptor?.disable()
+        tabInterceptor = nil
+        appIconView.isHidden = true
+        petView.apply(state: .run, mode: currentMode)
+        show()
+
+        let timer = Timer(timeInterval: holdDuration, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.pointingTarget = nil
+                self?.pointingReturnTimer = nil
+                self?.refreshAppIcon()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pointingReturnTimer = timer
+    }
+
+    private func cancelPointingAnimation() {
+        pointingReturnTimer?.invalidate()
+        pointingReturnTimer = nil
+        pointingTarget = nil
     }
 
     func setActionMode(_ mode: TranslationMode) {
@@ -5171,6 +5211,20 @@ final class PetController {
         guard panel.isVisible else { return }
 
         petView.advanceAnimationFrame()
+        if let pointingTarget {
+            let targetOrigin = Self.originNearPoint(pointingTarget, size: Self.panelSize)
+            let currentOrigin = panel.frame.origin
+            let dx = targetOrigin.x - currentOrigin.x
+            let dy = targetOrigin.y - currentOrigin.y
+            let nextOrigin = NSPoint(
+                x: currentOrigin.x + dx * 0.18,
+                y: currentOrigin.y + dy * 0.18
+            )
+            panel.setFrameOrigin(nextOrigin)
+            let distance = hypot(dx, dy)
+            petView.apply(state: distance > 3 ? .run : .ready, mode: currentMode)
+            return
+        }
         guard selectedText == nil, !isReadyLockedUntilPanelCloses, !isThinking else {
             return
         }
@@ -5263,6 +5317,15 @@ final class PetController {
             origin.x = cursor.x - size.width - 12
         }
 
+        origin.x = min(max(origin.x, visibleFrame.minX + edgeMargin), visibleFrame.maxX - size.width - edgeMargin)
+        origin.y = min(max(origin.y, visibleFrame.minY + edgeMargin), visibleFrame.maxY - size.height - edgeMargin)
+        return origin
+    }
+
+    private static func originNearPoint(_ point: NSPoint, size: NSSize) -> NSPoint {
+        let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        var origin = NSPoint(x: point.x - size.width / 2, y: point.y - size.height / 2)
         origin.x = min(max(origin.x, visibleFrame.minX + edgeMargin), visibleFrame.maxX - size.width - edgeMargin)
         origin.y = min(max(origin.y, visibleFrame.minY + edgeMargin), visibleFrame.maxY - size.height - edgeMargin)
         return origin
