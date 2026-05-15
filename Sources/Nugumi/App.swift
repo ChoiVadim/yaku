@@ -5612,6 +5612,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private static let pointingArrivalThreshold: CGFloat = 8
     private static let pointingArrivalFallbackDelay: TimeInterval = 1.6
     private static let textMovementUserInfoKey = "NSTextMovement"
+    private static let promptPlaceholder = "Hey, need me?"
     private static let defaultCursorOffset = NSPoint(
         x: 12 - panelPadding,
         y: -mascotSize.height - 8 - panelPadding
@@ -5721,7 +5722,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         configurePromptTextFieldForInput()
         promptTextField.alphaValue = 0
         promptTextField.isHidden = true
-        setPromptPlaceholder("Ask Nugumi")
+        setPromptPlaceholder(Self.promptPlaceholder)
         promptContainerView.addSubview(promptTextField)
 
         answerTextView.font = NugumiFont.pixelPrompt(size: Self.answerFontSize)
@@ -5848,7 +5849,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         renderPromptText()
         promptBubbleView.isError = false
         promptBubbleView.targetMarkerPoint = nil
-        setPromptPlaceholder("Ask Nugumi")
+        setPromptPlaceholder(Self.promptPlaceholder)
         let presentation = promptPresentationAnchoredToPet(
             size: currentPromptInputLayout.panelSize,
             bubbleFrame: currentPromptInputLayout.bubbleFrame
@@ -6061,7 +6062,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         renderPromptText()
         promptTextField.isEnabled = true
         promptBubbleView.isError = false
-        setPromptPlaceholder("Ask Nugumi")
+        setPromptPlaceholder(Self.promptPlaceholder)
         hidePromptViews()
         promptPanel.orderOut(nil)
         promptPanel.alphaValue = 1
@@ -6192,7 +6193,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
     }
 
     private func promptInputContentHeight(for text: String) -> CGFloat {
-        let measuredText = text.isEmpty ? "Ask Nugumi" : text
+        let measuredText = text.isEmpty ? Self.promptPlaceholder : text
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineBreakMode = .byWordWrapping
         let attributes: [NSAttributedString.Key: Any] = [
@@ -6219,7 +6220,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         }
         promptHasFullSelection = false
         promptBubbleView.isError = false
-        setPromptPlaceholder("Ask Nugumi")
+        setPromptPlaceholder(Self.promptPlaceholder)
         renderPromptText()
     }
 
