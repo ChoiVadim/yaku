@@ -89,6 +89,22 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertNil(response.petTarget)
     }
 
+    func testVisionPromptIncludesCoordinateGuideForAttachedPNG() {
+        let prompt = AskNugumiPromptBuilder.visionPrompt(
+            question: "Where is the Apple icon?",
+            imagePixelSize: CGSize(width: 3024, height: 1964),
+            screenFrame: CGRect(x: 0, y: 0, width: 1512, height: 982),
+            visibleFrame: CGRect(x: 0, y: 44, width: 1512, height: 938)
+        )
+
+        XCTAssertTrue(prompt.contains("Where is the Apple icon?"))
+        XCTAssertTrue(prompt.contains("3024x1964 pixels"))
+        XCTAssertTrue(prompt.contains("x = px / 3024"))
+        XCTAssertTrue(prompt.contains("y = py / 1964"))
+        XCTAssertTrue(prompt.contains("full attached PNG"))
+        XCTAssertTrue(prompt.contains("do not compensate for Retina scale or visibleFrame"))
+    }
+
     func testMapsTopLeftNormalizedCoordinateToAppKitScreenPoint() {
         let screenFrame = CGRect(x: 100, y: 200, width: 1000, height: 800)
         let visibleFrame = CGRect(x: 100, y: 200, width: 1000, height: 760)

@@ -818,6 +818,11 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private var snippetsWindowController: SnippetsWindowController?
     private var accessibilityTrustTimer: Timer?
     private var screenRecordingTrustTimer: Timer?
+
+    private struct WindowSharingSnapshot {
+        let window: NSWindow
+        let sharingType: NSWindow.SharingType
+    }
     private var permissionsWindowController: PermissionsWindowController?
     private var lastObservedModelReadyState: [String: BootstrapStepStatus] = [:]
     private lazy var updaterController: SPUStandardUpdaterController? = {
@@ -1100,7 +1105,21 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         let backend = currentBackend
         askNugumiTask = Task { [weak self] in
             do {
-                let capture = try await ScreenshotCapture.captureActiveScreen(containing: cursorLocation)
+                let sharingSnapshot = await MainActor.run {
+                    Self.hideAppWindowsFromScreenCapture()
+                }
+                let capture: AskNugumiScreenCapture
+                do {
+                    capture = try await ScreenshotCapture.captureActiveScreen(containing: cursorLocation)
+                } catch {
+                    await MainActor.run {
+                        Self.restoreAppWindowSharing(sharingSnapshot)
+                    }
+                    throw error
+                }
+                await MainActor.run {
+                    Self.restoreAppWindowSharing(sharingSnapshot)
+                }
                 try Task.checkCancellation()
 
                 let shouldContinue = await MainActor.run { () -> Bool in
@@ -1112,8 +1131,14 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 }
                 guard shouldContinue else { return }
 
+                let askPrompt = AskNugumiPromptBuilder.visionPrompt(
+                    question: cleanPrompt,
+                    imagePixelSize: capture.imagePixelSize,
+                    screenFrame: capture.screenFrame,
+                    visibleFrame: capture.visibleFrame
+                )
                 let response = try await backend.ask(
-                    prompt: cleanPrompt,
+                    prompt: askPrompt,
                     image: capture.image
                 ) { _ in }
                 try Task.checkCancellation()
@@ -1251,6 +1276,22 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         isAskNugumiRunning = false
         petController?.clearThinking()
         petController?.clearPrompt()
+    }
+
+    private static func hideAppWindowsFromScreenCapture() -> [WindowSharingSnapshot] {
+        let snapshots = NSApp.windows.map { window in
+            WindowSharingSnapshot(window: window, sharingType: window.sharingType)
+        }
+        NSApp.windows.forEach { window in
+            window.sharingType = .none
+        }
+        return snapshots
+    }
+
+    private static func restoreAppWindowSharing(_ snapshots: [WindowSharingSnapshot]) {
+        snapshots.forEach { snapshot in
+            snapshot.window.sharingType = snapshot.sharingType
+        }
     }
 
     @MainActor
@@ -4642,6 +4683,7 @@ enum ScreenshotTranslationError: LocalizedError {
 
 struct AskNugumiScreenCapture {
     let image: ImageInput
+    let imagePixelSize: CGSize
     // AppKit global coordinates in points.
     let screenFrame: CGRect
     let visibleFrame: CGRect
@@ -4668,7 +4710,7 @@ enum ScreenshotCapture {
         let screenFrame = screen.frame
         let visibleFrame = screen.visibleFrame
 
-        let image = try await Task.detached(priority: .userInitiated) {
+        let imagePayload = try await Task.detached(priority: .userInitiated) {
             guard let cgImage = CGDisplayCreateImage(screenID) else {
                 throw ScreenshotTranslationError.captureFailedDetail("Could not capture the active screen.")
             }
@@ -4678,11 +4720,15 @@ enum ScreenshotCapture {
                 throw ScreenshotTranslationError.captureFailedDetail("Could not encode the active screen.")
             }
 
-            return ImageInput(data: pngData, mediaType: "image/png")
+            return (
+                image: ImageInput(data: pngData, mediaType: "image/png"),
+                pixelSize: CGSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
+            )
         }.value
 
         return AskNugumiScreenCapture(
-            image: image,
+            image: imagePayload.image,
+            imagePixelSize: imagePayload.pixelSize,
             screenFrame: screenFrame,
             visibleFrame: visibleFrame
         )
@@ -9936,6 +9982,7 @@ Rules:
 - `emotion` is optional. Use one of: "neutral", "happy", "surprised", "confused", "concerned".
 - Include `petTarget` only when the pet should physically move to point at a specific visible screen location.
 - If the answer does not require pointing to a specific visible location, omit `petTarget` completely. Do not include it just to animate movement.
+- The user message includes a coordinate guide generated by the app. Follow that guide when computing `petTarget`.
 - `petTarget.x` is left-to-right from 0.0 to 1.0 across the screenshot.
 - `petTarget.y` is top-to-bottom from 0.0 to 1.0 across the screenshot.
 - When returning `petTarget`, use the exact visual center of the object, icon, button, or control named in `message`, not the center of a broad region or nearby label.

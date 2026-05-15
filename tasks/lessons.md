@@ -19,3 +19,4 @@
 - Pet Ask input should stay compact: about 30% narrower than the answer bubble, with smaller prompt text, and it should grow vertically as the typed prompt wraps instead of clipping/truncating long input.
 - Pet Ask input and answer bubbles need symmetric left/right text padding inside the pixel frame; do not let typed prompts or LLM answers press against the bubble edge.
 - Pet Ask bubbles should be anchored above the mascot; if screen edges force the prompt panel downward, nudge the mascot below the bubble rather than letting the dialog cover the character.
+- Ask Nugumi screen captures should temporarily hide Nugumi windows from capture and include an explicit PNG pixel-size coordinate guide, otherwise vision models may localize tiny menu bar icons against the wrong visual context.

@@ -131,6 +131,41 @@ struct AskNugumiResponse: Codable, Equatable {
     }
 }
 
+enum AskNugumiPromptBuilder {
+    static func visionPrompt(
+        question: String,
+        imagePixelSize: CGSize,
+        screenFrame: CGRect,
+        visibleFrame: CGRect
+    ) -> String {
+        let cleanQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pixelWidth = Int(imagePixelSize.width.rounded())
+        let pixelHeight = Int(imagePixelSize.height.rounded())
+
+        return """
+User question:
+\(cleanQuestion)
+
+Coordinate guide for petTarget:
+- The attached PNG is exactly \(pixelWidth)x\(pixelHeight) pixels.
+- Return petTarget normalized over the full attached PNG, not over an app window, visibleFrame, or text label.
+- If you choose target pixel center (px, py) with top-left origin, return x = px / \(pixelWidth) and y = py / \(pixelHeight).
+- For menu bar items, use the tiny icon glyph center in the top strip of the full PNG.
+- macOS screenFrame in points: x=\(format(screenFrame.minX)), y=\(format(screenFrame.minY)), width=\(format(screenFrame.width)), height=\(format(screenFrame.height)).
+- macOS visibleFrame in points excludes the menu bar/dock: x=\(format(visibleFrame.minX)), y=\(format(visibleFrame.minY)), width=\(format(visibleFrame.width)), height=\(format(visibleFrame.height)).
+- The app will convert your normalized PNG coordinate back to screen coordinates; do not compensate for Retina scale or visibleFrame.
+"""
+    }
+
+    private static func format(_ value: CGFloat) -> String {
+        let rounded = value.rounded()
+        if abs(value - rounded) < 0.001 {
+            return String(Int(rounded))
+        }
+        return String(format: "%.3f", Double(value))
+    }
+}
+
 struct AskNugumiAnswerBubbleLayout: Equatable {
     let panelSize: CGSize
     let bubbleFrame: CGRect
