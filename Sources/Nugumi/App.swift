@@ -791,8 +791,12 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private var floatingLoadingBar: FloatingTranslateButtonController?
     private var petController: PetController?
     private var translationPanelController: TranslationPanelController?
+    private var askPromptController: AskPromptController?
+    private var askNugumiTask: Task<Void, Never>?
+    private var askNugumiRequestID: UUID?
     private var translationPrefetch: TranslationPrefetch?
     private var isScreenshotTranslationRunning = false
+    private var isAskNugumiRunning = false
     private var screenshotDragStartLocation: NSPoint?
     private var screenshotDragEndLocation: NSPoint?
     private var screenshotPanelSide: TranslationPanelController.Side?
@@ -1015,7 +1019,187 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func startAskNugumiPrompt() {
-        NSLog("Nugumi: Ask prompt requested")
+        guard !isAskNugumiRunning else { return }
+        guard askPromptController?.isVisible != true else { return }
+
+        translateButtonController?.close()
+        translateButtonController = nil
+        translationPanelController?.close()
+        translationPanelController = nil
+        cancelPrefetch()
+
+        let controller = AskPromptController(
+            near: NSEvent.mouseLocation,
+            onSubmit: { [weak self] prompt in
+                self?.submitAskNugumiPrompt(prompt)
+            },
+            onClose: { [weak self] in
+                guard let self else { return }
+                self.askPromptController = nil
+                if self.isAskNugumiRunning {
+                    self.cancelAskNugumiRequest()
+                }
+            }
+        )
+        askPromptController = controller
+        controller.show()
+    }
+
+    @MainActor
+    private func submitAskNugumiPrompt(_ prompt: String) {
+        let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanPrompt.isEmpty else { return }
+
+        let model = LLMModel.option(id: selectedModelID)
+        guard model.supportsImages else {
+            askPromptController?.showError("Ask Nugumi needs a vision model.")
+            return
+        }
+
+        if let setupError = askNugumiSetupErrorIfNeeded(for: model) {
+            askPromptController?.showError(Self.translationPanelErrorMessage(for: setupError))
+            return
+        }
+
+        let requestID = UUID()
+        askNugumiTask?.cancel()
+        askNugumiRequestID = requestID
+        isAskNugumiRunning = true
+        askPromptController?.setLoading()
+
+        let cursorLocation = NSEvent.mouseLocation
+        let backend = currentBackend
+        askNugumiTask = Task { [weak self] in
+            do {
+                let capture = try await ScreenshotCapture.captureActiveScreen(containing: cursorLocation)
+                try Task.checkCancellation()
+
+                let shouldContinue = await MainActor.run { () -> Bool in
+                    guard let self, self.askNugumiRequestID == requestID else {
+                        return false
+                    }
+                    self.petController?.showThinking()
+                    return true
+                }
+                guard shouldContinue else { return }
+
+                let response = try await backend.ask(
+                    prompt: cleanPrompt,
+                    image: capture.image
+                ) { _ in }
+                try Task.checkCancellation()
+
+                await MainActor.run {
+                    self?.presentAskNugumiResult(
+                        response,
+                        capture: capture,
+                        prompt: cleanPrompt,
+                        requestID: requestID
+                    )
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    self?.clearAskNugumiRequestIfCurrent(requestID)
+                }
+            } catch {
+                await MainActor.run {
+                    self?.presentAskNugumiFailure(error, requestID: requestID)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func presentAskNugumiResult(
+        _ response: AskNugumiResponse,
+        capture: AskNugumiScreenCapture,
+        prompt: String,
+        requestID: UUID
+    ) {
+        guard askNugumiRequestID == requestID else { return }
+        clearAskNugumiRequestIfCurrent(requestID)
+        askPromptController?.close()
+        askPromptController = nil
+
+        translationPanelController?.close()
+        translationPanelController = nil
+        let controller = TranslationPanelController(
+            anchor: .point(NSEvent.mouseLocation, panelSide: .right),
+            sourceText: prompt,
+            targetLanguage: targetLanguage,
+            resultLabel: "Answer",
+            onClose: { [weak self] in
+                self?.translationPanelController = nil
+                self?.petController?.clearReady()
+            }
+        )
+        translationPanelController = controller
+        let panelRequestID = controller.showLoading(targetLanguage: targetLanguage)
+        controller.showTranslation(response.message, requestID: panelRequestID)
+
+        if let target = response.petTarget {
+            let point = AskNugumiCoordinateMapper.screenPoint(
+                for: target,
+                screenFrame: capture.screenFrame,
+                visibleFrame: capture.visibleFrame
+            )
+            if petController == nil {
+                petController = PetController(initialMode: .selection)
+            }
+            petController?.pointTemporarily(at: point)
+        }
+    }
+
+    @MainActor
+    private func presentAskNugumiFailure(_ error: Error, requestID: UUID) {
+        guard askNugumiRequestID == requestID else { return }
+        clearAskNugumiRequestIfCurrent(requestID)
+
+        if let screenshotError = error as? ScreenshotTranslationError,
+           case .screenRecordingPermissionDenied = screenshotError {
+            askPromptController?.close()
+            askPromptController = nil
+            presentScreenshotTranslationError(screenshotError)
+            return
+        }
+
+        let routed = handleTranslationFailure(error)
+        if routed {
+            askPromptController?.close()
+            askPromptController = nil
+            return
+        }
+        askPromptController?.showError(error.localizedDescription)
+    }
+
+    @MainActor
+    private func cancelAskNugumiRequest() {
+        askNugumiTask?.cancel()
+        askNugumiTask = nil
+        askNugumiRequestID = nil
+        isAskNugumiRunning = false
+        petController?.clearThinking()
+    }
+
+    @MainActor
+    private func clearAskNugumiRequestIfCurrent(_ requestID: UUID) {
+        guard askNugumiRequestID == requestID else { return }
+        askNugumiTask = nil
+        askNugumiRequestID = nil
+        isAskNugumiRunning = false
+        petController?.clearThinking()
+    }
+
+    @MainActor
+    private func askNugumiSetupErrorIfNeeded(for model: LLMModel) -> TranslationError? {
+        switch model.backend {
+        case .ollama:
+            return translationErrorIfBootstrapNeedsSetup()
+        case .cloud(let provider):
+            let apiKey = KeychainStore.apiKey(for: provider)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return apiKey?.isEmpty == false ? nil : .invalidAPIKey(provider)
+        }
     }
 
     @objc private func toggleInvisibilityMode() {
@@ -5984,6 +6168,7 @@ final class AskPromptController: NSObject, NSWindowDelegate, NSTextFieldDelegate
     }
 
     func setLoading() {
+        panel.sharingType = .none
         textField.isEnabled = false
         textField.stringValue = ""
         setPlaceholder("Looking...")
@@ -8445,7 +8630,7 @@ Rules:
             || urlError.code == .networkConnectionLost
             || urlError.code == .notConnectedToInternet
             || urlError.code == .timedOut {
-            throw TranslationError.serverUnavailable
+            throw TranslationError.cloudError(provider, urlError.localizedDescription)
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -8555,7 +8740,7 @@ Rules:
             || urlError.code == .networkConnectionLost
             || urlError.code == .notConnectedToInternet
             || urlError.code == .timedOut {
-            throw TranslationError.serverUnavailable
+            throw TranslationError.cloudError(provider, urlError.localizedDescription)
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
