@@ -5335,6 +5335,12 @@ private final class PetPromptBubbleView: NSView {
     var isError = false {
         didSet { needsDisplay = true }
     }
+    var bubbleFrame: NSRect = .zero {
+        didSet { needsDisplay = true }
+    }
+    var pointerTarget: NSPoint? {
+        didSet { needsDisplay = true }
+    }
 
     override var isOpaque: Bool { false }
 
@@ -5353,11 +5359,12 @@ private final class PetPromptBubbleView: NSView {
         }
 
         let unit: CGFloat = 3
+        let drawingFrame = bubbleFrame == .zero ? bounds : bubbleFrame
         let bubbleRect = NSRect(
-            x: 5 * unit,
-            y: 3 * unit,
-            width: floor((bounds.width - 10 * unit) / unit) * unit,
-            height: floor((bounds.height - 7 * unit) / unit) * unit
+            x: drawingFrame.minX + 5 * unit,
+            y: drawingFrame.minY + 3 * unit,
+            width: floor((drawingFrame.width - 10 * unit) / unit) * unit,
+            height: floor((drawingFrame.height - 7 * unit) / unit) * unit
         )
 
         let shadow = NSColor(calibratedWhite: 0.0, alpha: 0.22)
@@ -5371,15 +5378,52 @@ private final class PetPromptBubbleView: NSView {
             : NSColor(srgbRed: 0.22, green: 0.27, blue: 0.28, alpha: 1.0)
 
         let tailAnchor = bubbleRect.minX + 4 * unit
+        let pointerStart: NSPoint?
+        if let pointerTarget {
+            pointerStart = self.pointerStart(in: bubbleRect, target: pointerTarget, unit: unit)
+        } else {
+            pointerStart = nil
+        }
         drawPixelBubbleBody(in: bubbleRect.offsetBy(dx: unit, dy: -unit), unit: unit, color: shadow)
-        drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: shadow, offset: NSPoint(x: unit, y: -unit))
+        if let pointerTarget, let pointerStart {
+            drawPixelPointer(
+                from: pointerStart,
+                to: pointerTarget,
+                unit: unit,
+                width: unit * 8,
+                color: shadow,
+                offset: NSPoint(x: unit, y: -unit)
+            )
+        } else {
+            drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: shadow, offset: NSPoint(x: unit, y: -unit))
+        }
 
-        drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: borderDark)
+        if let pointerTarget, let pointerStart {
+            drawPixelPointer(
+                from: pointerStart,
+                to: pointerTarget,
+                unit: unit,
+                width: unit * 8,
+                color: borderDark
+            )
+        } else {
+            drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: borderDark)
+        }
         drawPixelBubbleBody(in: bubbleRect, unit: unit, color: borderDark)
         drawPixelBubbleBody(in: bubbleRect.insetBy(dx: unit, dy: unit), unit: unit, color: border)
         drawPixelBubbleBody(in: bubbleRect.insetBy(dx: unit * 2, dy: unit * 2), unit: unit, color: fill)
 
-        drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: fill, offset: NSPoint(x: unit * 2, y: unit * 2))
+        if let pointerTarget, let pointerStart {
+            drawPixelPointer(
+                from: pointerStart,
+                to: pointerTarget,
+                unit: unit,
+                width: unit * 4,
+                color: fill
+            )
+        } else {
+            drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: fill, offset: NSPoint(x: unit * 2, y: unit * 2))
+        }
 
         highlight.setFill()
         NSBezierPath(rect: NSRect(
@@ -5423,6 +5467,80 @@ private final class PetPromptBubbleView: NSView {
             )).fill()
         }
     }
+
+    private func pointerStart(in bubbleRect: NSRect, target: NSPoint, unit: CGFloat) -> NSPoint {
+        let insetRect = bubbleRect.insetBy(dx: unit * 3, dy: unit * 3)
+        if target.y <= bubbleRect.minY {
+            return NSPoint(
+                x: min(max(target.x, insetRect.minX), insetRect.maxX),
+                y: bubbleRect.minY
+            )
+        }
+        if target.y >= bubbleRect.maxY {
+            return NSPoint(
+                x: min(max(target.x, insetRect.minX), insetRect.maxX),
+                y: bubbleRect.maxY
+            )
+        }
+        if target.x <= bubbleRect.minX {
+            return NSPoint(
+                x: bubbleRect.minX,
+                y: min(max(target.y, insetRect.minY), insetRect.maxY)
+            )
+        }
+        if target.x >= bubbleRect.maxX {
+            return NSPoint(
+                x: bubbleRect.maxX,
+                y: min(max(target.y, insetRect.minY), insetRect.maxY)
+            )
+        }
+
+        return NSPoint(
+            x: min(max(target.x, insetRect.minX), insetRect.maxX),
+            y: bubbleRect.minY
+        )
+    }
+
+    private func drawPixelPointer(
+        from start: NSPoint,
+        to target: NSPoint,
+        unit: CGFloat,
+        width: CGFloat,
+        color: NSColor,
+        offset: NSPoint = .zero
+    ) {
+        let start = NSPoint(x: start.x + offset.x, y: start.y + offset.y)
+        let target = NSPoint(x: target.x + offset.x, y: target.y + offset.y)
+        let dx = target.x - start.x
+        let dy = target.y - start.y
+        let length = hypot(dx, dy)
+        guard length > unit else {
+            color.setFill()
+            NSBezierPath(rect: NSRect(
+                x: target.x - width / 2,
+                y: target.y - width / 2,
+                width: width,
+                height: width
+            )).fill()
+            return
+        }
+
+        let normal = NSPoint(x: -dy / length, y: dx / length)
+        let halfWidth = width / 2
+        let path = NSBezierPath()
+        path.move(to: NSPoint(
+            x: start.x + normal.x * halfWidth,
+            y: start.y + normal.y * halfWidth
+        ))
+        path.line(to: target)
+        path.line(to: NSPoint(
+            x: start.x - normal.x * halfWidth,
+            y: start.y - normal.y * halfWidth
+        ))
+        path.close()
+        color.setFill()
+        path.fill()
+    }
 }
 
 @MainActor
@@ -5435,6 +5553,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private let appIconView: NSImageView
     private let promptBubbleView: PetPromptBubbleView
     private let promptTextField: AskPromptTextField
+    private let answerScrollView: NSScrollView
+    private let answerTextView: NSTextView
     private var workspaceObserver: NSObjectProtocol?
     private var trackingTimer: Timer?
     private var tabInterceptor: TabKeyInterceptor?
@@ -5455,6 +5575,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private var isAnswerOpen = false
     private var promptBuffer = ""
     private var promptHasFullSelection = false
+    private var currentAnswerLayout = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 0)
+    private var currentAnswerPointerTarget: NSPoint?
     private var pointingTarget: NSPoint?
     private var pendingPointArrival: (() -> Void)?
     private var pointingReturnTimer: Timer?
@@ -5473,11 +5595,9 @@ final class PetController: NSObject, NSTextFieldDelegate {
         height: mascotSize.height + panelPadding * 2
     )
     private static let promptPanelSize = NSSize(width: 260, height: 90)
-    private static let promptBubbleFrame = NSRect(x: 32, y: 26, width: 222, height: 60)
-    private static let promptTextFieldFrame = NSRect(x: 54, y: 44, width: 180, height: 22)
-    private static let answerPanelSize = NSSize(width: 300, height: 128)
-    private static let answerBubbleFrame = NSRect(x: 32, y: 26, width: 262, height: 98)
-    private static let answerTextFieldFrame = NSRect(x: 54, y: 48, width: 220, height: 54)
+    private static let promptBubbleFrame = NSRect(x: 8, y: 26, width: 246, height: 60)
+    private static let promptTextFieldFrame = NSRect(x: 30, y: 44, width: 204, height: 22)
+    private static let answerFontSize: CGFloat = 14
     private static let edgeMargin: CGFloat = 6
     private static let textMovementUserInfoKey = "NSTextMovement"
     private static let defaultCursorOffset = NSPoint(
@@ -5526,6 +5646,12 @@ final class PetController: NSObject, NSTextFieldDelegate {
         ))
         promptBubbleView = PetPromptBubbleView(frame: Self.promptBubbleFrame)
         promptTextField = AskPromptTextField(frame: Self.promptTextFieldFrame)
+        let initialAnswerLayout = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 0)
+        answerScrollView = NSScrollView(frame: initialAnswerLayout.viewportFrame)
+        answerTextView = NSTextView(frame: NSRect(
+            origin: .zero,
+            size: initialAnswerLayout.viewportFrame.size
+        ))
 
         super.init()
 
@@ -5584,6 +5710,32 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptTextField.isHidden = true
         setPromptPlaceholder("Ask Nugumi")
         promptContainerView.addSubview(promptTextField)
+
+        answerTextView.font = NugumiFont.pixelPrompt(size: Self.answerFontSize)
+        answerTextView.textColor = NSColor(srgbRed: 0.26, green: 0.30, blue: 0.30, alpha: 1.0)
+        answerTextView.drawsBackground = false
+        answerTextView.backgroundColor = .clear
+        answerTextView.isEditable = false
+        answerTextView.isSelectable = true
+        answerTextView.isRichText = false
+        answerTextView.importsGraphics = false
+        answerTextView.isHorizontallyResizable = false
+        answerTextView.isVerticallyResizable = true
+        answerTextView.textContainerInset = .zero
+        answerTextView.textContainer?.lineFragmentPadding = 0
+        answerTextView.textContainer?.widthTracksTextView = true
+        answerTextView.textContainer?.heightTracksTextView = false
+
+        answerScrollView.borderType = .noBorder
+        answerScrollView.drawsBackground = false
+        answerScrollView.hasHorizontalScroller = false
+        answerScrollView.hasVerticalScroller = false
+        answerScrollView.autohidesScrollers = true
+        answerScrollView.scrollerStyle = .overlay
+        answerScrollView.alphaValue = 0
+        answerScrollView.isHidden = true
+        answerScrollView.documentView = answerTextView
+        promptContainerView.addSubview(answerScrollView)
 
         panel.contentView = containerView
         promptPanel.contentView = promptContainerView
@@ -5669,6 +5821,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptOpen = true
         isPromptLoading = false
         isAnswerOpen = false
+        currentAnswerPointerTarget = nil
         panel.ignoresMouseEvents = true
         tabInterceptor?.disable()
         tabInterceptor = nil
@@ -5681,11 +5834,12 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptTextField.isEnabled = true
         configurePromptTextFieldForInput()
         promptBubbleView.isError = false
+        promptBubbleView.pointerTarget = nil
         setPromptPlaceholder("Ask Nugumi")
-        showPromptViews()
         let frame = promptFrameAnchoredToPet(size: Self.promptPanelSize)
         panel.setFrameOrigin(frame.origin)
         promptPanel.setFrame(frame, display: true)
+        showPromptViews()
         promptPanel.alphaValue = 1
         show()
         promptPanel.orderFrontRegardless()
@@ -5707,6 +5861,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptOpen = false
         isPromptLoading = true
         isAnswerOpen = false
+        currentAnswerPointerTarget = nil
         isThinking = true
         promptHasFullSelection = false
         removePromptOutsideClickMonitors()
@@ -5740,17 +5895,19 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptOpen = true
         isPromptLoading = false
         isAnswerOpen = false
+        currentAnswerPointerTarget = nil
         isThinking = false
         panel.ignoresMouseEvents = true
         promptTextField.isEnabled = true
         configurePromptTextFieldForInput()
         promptBubbleView.isError = true
+        promptBubbleView.pointerTarget = nil
         setPromptPlaceholder(message)
-        showPromptViews()
         petView.apply(state: .idle, mode: currentMode)
         let frame = promptFrameAnchoredToPet(size: Self.promptPanelSize)
         panel.setFrameOrigin(frame.origin)
         promptPanel.setFrame(frame, display: true)
+        showPromptViews()
         promptPanel.alphaValue = 1
         show()
         focusPrompt()
@@ -5769,7 +5926,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         submitPrompt()
     }
 
-    func showAnswer(_ message: String, emotion: AskNugumiEmotion?) {
+    func showAnswer(_ message: String, emotion: AskNugumiEmotion?, pointerTarget: NSPoint? = nil) {
         let cleanMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanMessage.isEmpty else { return }
 
@@ -5785,6 +5942,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptOpen = false
         isPromptLoading = false
         isAnswerOpen = true
+        currentAnswerPointerTarget = nil
         promptBuffer = ""
         promptHasFullSelection = false
         removePromptKeyInterceptor()
@@ -5794,13 +5952,15 @@ final class PetController: NSObject, NSTextFieldDelegate {
         tabInterceptor = nil
         appIconView.isHidden = true
         promptBubbleView.isError = false
-        configurePromptTextFieldForAnswer()
-        promptTextField.stringValue = cleanMessage
-        showPromptViews()
+        configureAnswerTextView(with: cleanMessage)
 
-        let frame = promptFrameAnchoredToPet(size: Self.answerPanelSize)
+        let frame = promptFrameAnchoredToPet(size: currentAnswerLayout.panelSize)
         panel.setFrameOrigin(frame.origin)
         promptPanel.setFrame(frame, display: true)
+        currentAnswerPointerTarget = pointerTarget.map {
+            NSPoint(x: $0.x - frame.minX, y: $0.y - frame.minY)
+        }
+        showPromptViews()
         promptPanel.alphaValue = 1
         show()
         promptPanel.orderFrontRegardless()
@@ -5812,7 +5972,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         let targetOrigin = Self.originNearPoint(destination, size: Self.panelSize)
         let distance = hypot(targetOrigin.x - panel.frame.origin.x, targetOrigin.y - panel.frame.origin.y)
         guard distance > 3 else {
-            showAnswer(message, emotion: emotion)
+            showAnswer(message, emotion: emotion, pointerTarget: destination)
             return
         }
 
@@ -5826,6 +5986,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptOpen = false
         isPromptLoading = false
         isAnswerOpen = false
+        currentAnswerPointerTarget = nil
         panel.ignoresMouseEvents = true
         tabInterceptor?.disable()
         tabInterceptor = nil
@@ -5833,7 +5994,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptPanel.orderOut(nil)
         pointingTarget = destination
         pendingPointArrival = { [weak self] in
-            self?.showAnswer(message, emotion: emotion)
+            self?.showAnswer(message, emotion: emotion, pointerTarget: destination)
         }
         petView.apply(state: .run, mode: currentMode)
         show()
@@ -5864,6 +6025,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptOpen = false
         isPromptLoading = false
         isAnswerOpen = false
+        currentAnswerPointerTarget = nil
         onPromptSubmit = nil
         onPromptClose = nil
         promptBuffer = ""
@@ -5885,16 +6047,27 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private func showPromptViews() {
         layoutPromptSubviews()
         promptBubbleView.isHidden = false
-        promptTextField.isHidden = false
         promptBubbleView.alphaValue = 1
-        promptTextField.alphaValue = 1
+        if isAnswerOpen {
+            promptTextField.alphaValue = 0
+            promptTextField.isHidden = true
+            answerScrollView.isHidden = false
+            answerScrollView.alphaValue = 1
+        } else {
+            answerScrollView.alphaValue = 0
+            answerScrollView.isHidden = true
+            promptTextField.isHidden = false
+            promptTextField.alphaValue = 1
+        }
     }
 
     private func hidePromptViews() {
         promptBubbleView.alphaValue = 0
         promptTextField.alphaValue = 0
+        answerScrollView.alphaValue = 0
         promptBubbleView.isHidden = true
         promptTextField.isHidden = true
+        answerScrollView.isHidden = true
     }
 
     private func configurePromptTextFieldForInput() {
@@ -5906,13 +6079,56 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptTextField.cell?.lineBreakMode = .byTruncatingTail
     }
 
-    private func configurePromptTextFieldForAnswer() {
-        promptTextField.font = NugumiFont.pixelPrompt(size: 14)
-        promptTextField.usesSingleLineMode = false
-        promptTextField.maximumNumberOfLines = 4
-        promptTextField.cell?.wraps = true
-        promptTextField.cell?.isScrollable = false
-        promptTextField.cell?.lineBreakMode = .byWordWrapping
+    private func configureAnswerTextView(with message: String) {
+        let contentHeight = answerContentHeight(for: message)
+        currentAnswerLayout = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: contentHeight)
+        let layout = currentAnswerLayout
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byWordWrapping
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NugumiFont.pixelPrompt(size: Self.answerFontSize),
+            .foregroundColor: NSColor(srgbRed: 0.26, green: 0.30, blue: 0.30, alpha: 1.0),
+            .paragraphStyle: paragraphStyle
+        ]
+        answerTextView.textStorage?.setAttributedString(NSAttributedString(
+            string: message,
+            attributes: attributes
+        ))
+        answerTextView.font = NugumiFont.pixelPrompt(size: Self.answerFontSize)
+        answerTextView.textColor = NSColor(srgbRed: 0.26, green: 0.30, blue: 0.30, alpha: 1.0)
+        answerTextView.textContainer?.containerSize = NSSize(
+            width: layout.viewportFrame.width,
+            height: .greatestFiniteMagnitude
+        )
+        answerTextView.frame = NSRect(
+            origin: .zero,
+            size: NSSize(
+                width: layout.viewportFrame.width,
+                height: layout.documentHeight
+            )
+        )
+        answerScrollView.hasVerticalScroller = layout.needsScroll
+        answerScrollView.autohidesScrollers = !layout.needsScroll
+        answerTextView.scrollRangeToVisible(NSRange(location: 0, length: 0))
+    }
+
+    private func answerContentHeight(for message: String) -> CGFloat {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byWordWrapping
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NugumiFont.pixelPrompt(size: Self.answerFontSize),
+            .paragraphStyle: paragraphStyle
+        ]
+        let boundingRect = (message as NSString).boundingRect(
+            with: NSSize(
+                width: AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 0).viewportFrame.width,
+                height: .greatestFiniteMagnitude
+            ),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes
+        )
+        return ceil(boundingRect.height) + 4
     }
 
     private func setPromptPlaceholder(_ text: String) {
@@ -6023,10 +6239,14 @@ final class PetController: NSObject, NSTextFieldDelegate {
             height: Self.appIconSize.height
         )
         if isAnswerOpen {
-            promptBubbleView.frame = Self.answerBubbleFrame
-            promptTextField.frame = Self.answerTextFieldFrame
+            promptBubbleView.frame = NSRect(origin: .zero, size: currentAnswerLayout.panelSize)
+            promptBubbleView.bubbleFrame = currentAnswerLayout.bubbleFrame
+            promptBubbleView.pointerTarget = currentAnswerPointerTarget
+            answerScrollView.frame = currentAnswerLayout.viewportFrame
         } else {
-            promptBubbleView.frame = Self.promptBubbleFrame
+            promptBubbleView.frame = NSRect(origin: .zero, size: Self.promptPanelSize)
+            promptBubbleView.bubbleFrame = Self.promptBubbleFrame
+            promptBubbleView.pointerTarget = nil
             promptTextField.frame = Self.promptTextFieldFrame
         }
     }

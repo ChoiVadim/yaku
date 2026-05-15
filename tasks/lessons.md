@@ -11,3 +11,5 @@
 - Pet-attached prompt windows should match the pixel mascot style. Avoid smooth rounded macOS dialog chrome there; draw a blocky pixel speech bubble with stepped corners, pixel tail, and no antialiasing.
 - When adding a pixel prompt font, bundle the font and its OFL license inside target resources, register it with CoreText from `Bundle.module`, and keep the prompt positioned close enough to the pet that the tail reads as attached.
 - In pet Ask mode, keep the answer inside the same pet speech-bubble surface instead of opening the normal result panel. Only move the pet when the model returns a real `petTarget`; otherwise display the answer in place and keep the pet still.
+- Pet Ask answer bubbles must grow vertically for medium-length responses and switch to internal scrolling at a fixed max height; never render long LLM answers into a fixed one-line or clipped text field.
+- When an Ask response includes `petTarget`, the pet bubble tail becomes the pointer: draw it toward the exact returned screen point instead of leaving the decorative tail aimed only at the mascot.

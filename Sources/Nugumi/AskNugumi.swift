@@ -131,6 +131,51 @@ struct AskNugumiResponse: Codable, Equatable {
     }
 }
 
+struct AskNugumiAnswerBubbleLayout: Equatable {
+    let panelSize: CGSize
+    let bubbleFrame: CGRect
+    let viewportFrame: CGRect
+    let documentHeight: CGFloat
+    let needsScroll: Bool
+}
+
+enum AskNugumiAnswerBubbleMetrics {
+    static let panelWidth: CGFloat = 300
+    static let minimumPanelHeight: CGFloat = 128
+    static let maximumPanelHeight: CGFloat = 246
+
+    private static let bubbleX: CGFloat = 8
+    private static let bubbleY: CGFloat = 26
+    private static let bubbleWidth: CGFloat = 286
+    private static let textX: CGFloat = 30
+    private static let textY: CGFloat = 48
+    private static let textWidth: CGFloat = 244
+    private static let minimumViewportHeight: CGFloat = 54
+    private static let topTextInset: CGFloat = 26
+    private static let bubbleBottomInset: CGFloat = 30
+
+    static func layout(forContentHeight contentHeight: CGFloat) -> AskNugumiAnswerBubbleLayout {
+        let sanitizedContentHeight = contentHeight.isFinite
+            ? max(1, ceil(contentHeight))
+            : minimumViewportHeight
+        let maximumViewportHeight = maximumPanelHeight - textY - topTextInset
+        let viewportHeight = min(
+            max(minimumViewportHeight, sanitizedContentHeight),
+            maximumViewportHeight
+        )
+        let panelHeight = viewportHeight + textY + topTextInset
+        let bubbleHeight = panelHeight - bubbleBottomInset
+
+        return AskNugumiAnswerBubbleLayout(
+            panelSize: CGSize(width: panelWidth, height: panelHeight),
+            bubbleFrame: CGRect(x: bubbleX, y: bubbleY, width: bubbleWidth, height: bubbleHeight),
+            viewportFrame: CGRect(x: textX, y: textY, width: textWidth, height: viewportHeight),
+            documentHeight: max(sanitizedContentHeight, viewportHeight),
+            needsScroll: sanitizedContentHeight > maximumViewportHeight
+        )
+    }
+}
+
 enum AskNugumiCoordinateMapper {
     static func screenPoint(
         for target: AskNugumiPetTarget,

@@ -126,4 +126,21 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertEqual(point.x, 950, accuracy: 0.001)
         XCTAssertEqual(point.y, 40, accuracy: 0.001)
     }
+
+    func testAnswerBubbleLayoutGrowsBeforeScrollLimit() {
+        let short = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 30)
+        let taller = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 120)
+
+        XCTAssertGreaterThan(taller.panelSize.height, short.panelSize.height)
+        XCTAssertGreaterThan(taller.bubbleFrame.height, short.bubbleFrame.height)
+        XCTAssertFalse(taller.needsScroll)
+    }
+
+    func testAnswerBubbleLayoutUsesScrollAfterMaximumHeight() {
+        let layout = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 600)
+
+        XCTAssertEqual(layout.panelSize.height, AskNugumiAnswerBubbleMetrics.maximumPanelHeight)
+        XCTAssertTrue(layout.needsScroll)
+        XCTAssertGreaterThan(layout.documentHeight, layout.viewportFrame.height)
+    }
 }
