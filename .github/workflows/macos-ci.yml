@@ -1,0 +1,46 @@
+name: macOS CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Test and build app bundle
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain versions
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Resolve Swift package dependencies
+        run: swift package resolve
+
+      - name: Run Swift tests
+        run: swift test
+
+      - name: Build distributable app bundle
+        run: bash Scripts/build-app-bundle.sh
+
+      - name: Verify app bundle artifacts
+        run: |
+          test -d dist/Nugumi.app
+          test -f dist/Nugumi.dmg
+          test -d dist/Nugumi.app/Contents/Resources/Nugumi_Nugumi.bundle
+          plutil -lint dist/Nugumi.app/Contents/Info.plist
