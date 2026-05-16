@@ -1428,20 +1428,12 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 for: target,
                 screenFrame: capture.screenFrame
             )
-            if let movementTarget = presentation.movementTarget {
-                petController.moveToAnswerTarget(
-                    movementTarget,
-                    markerTarget: presentation.markerTarget,
-                    message: response.message,
-                    emotion: response.emotion
-                )
-            } else {
-                petController.showAnswer(
-                    response.message,
-                    emotion: response.emotion,
-                    markerTarget: presentation.markerTarget
-                )
-            }
+            // The pet stays put; the pixel arrow travels to the target.
+            petController.showAnswer(
+                response.message,
+                emotion: response.emotion,
+                markerTarget: presentation.markerTarget
+            )
         } else {
             petController.showAnswer(response.message, emotion: response.emotion)
         }
@@ -5802,6 +5794,10 @@ private final class PetPromptBubbleView: NSView {
     var targetMarkerPoint: NSPoint? {
         didSet { needsDisplay = true }
     }
+    /// Direction (radians) the pixel arrow points — pet → destination.
+    var targetMarkerAngle: CGFloat = 0 {
+        didSet { needsDisplay = true }
+    }
     private var targetMarkerFrame = 0
 
     override var isOpaque: Bool { false }
@@ -5904,65 +5900,111 @@ private final class PetPromptBubbleView: NSView {
         }
     }
 
+    // Arrow sprite, pointing +x (right): rectangular stem on the left, a
+    // triangular head tapering to a point on the right. Equal-width rows so
+    // it aligns; '#' = fill. Border is synthesized as a 1-cell outline so the
+    // pixel edge matches the dialog bubble's dark-bordered look.
+    private static let arrowSpriteRows = [
+        "....#...",
+        "....##..",
+        "#######.",
+        "########",
+        "#######.",
+        "....##..",
+        "....#...",
+    ]
+    private static let arrowCoreCell = (col: 1, row: 3) // lighter accent pixel
+
     private func drawTargetMarker(center: NSPoint, unit: CGFloat) {
         let isBrightFrame = targetMarkerFrame < 34
-        let border = NSColor(srgbRed: 0.04, green: 0.31, blue: 0.29, alpha: 0.88)
+        // Brighter than the old dot, same footprint.
+        let border = NSColor(
+            srgbRed: 0.05, green: 0.24, blue: 0.22,
+            alpha: isBrightFrame ? 0.98 : 0.82
+        )
         let fill = NSColor(
             srgbRed: 17.0 / 255.0,
             green: 118.0 / 255.0,
             blue: 110.0 / 255.0,
-            alpha: isBrightFrame ? 0.94 : 0.52
+            alpha: isBrightFrame ? 1.0 : 0.72
         )
-        let core = isBrightFrame
-            ? NSColor(srgbRed: 0.88, green: 0.96, blue: 0.94, alpha: 0.86)
-            : NSColor(srgbRed: 0.88, green: 0.96, blue: 0.94, alpha: 0.42)
-        let shadow = NSColor(calibratedWhite: 0.0, alpha: isBrightFrame ? 0.16 : 0.07)
+        let core = NSColor(
+            srgbRed: 0.90, green: 0.98, blue: 0.96,
+            alpha: isBrightFrame ? 0.95 : 0.55
+        )
+        let shadow = NSColor(calibratedWhite: 0.0, alpha: isBrightFrame ? 0.20 : 0.09)
 
-        drawPixelMarkerRows(center: NSPoint(x: center.x + unit, y: center.y - unit), unit: unit, border: shadow, fill: shadow, core: shadow)
-        drawPixelMarkerRows(center: center, unit: unit, border: border, fill: fill, core: core)
+        // Dedicated unit so the arrow keeps the old dot's ~15px footprint
+        // (it must not look bigger) while leaving rotation room in the panel.
+        _ = unit
+        let arrowUnit: CGFloat = 1.8
+
+        guard let context = NSGraphicsContext.current else { return }
+        context.saveGraphicsState()
+        let transform = NSAffineTransform()
+        transform.translateX(by: center.x, yBy: center.y)
+        transform.rotate(byRadians: targetMarkerAngle)
+        transform.concat()
+        // Local space: sprite centered on (0,0), now rotated toward target.
+        drawArrowSprite(unit: arrowUnit, offset: NSPoint(x: arrowUnit, y: -arrowUnit),
+                        border: shadow, fill: shadow, core: shadow)
+        drawArrowSprite(unit: arrowUnit, offset: .zero,
+                        border: border, fill: fill, core: core)
+        context.restoreGraphicsState()
     }
 
-    private func drawPixelMarkerRows(
-        center: NSPoint,
+    private func drawArrowSprite(
         unit: CGFloat,
+        offset: NSPoint,
         border: NSColor,
         fill: NSColor,
         core: NSColor
     ) {
-        let rows = [
-            ".BBB.",
-            "BFFFB",
-            "BFKFB",
-            "BFFFB",
-            ".BBB."
-        ]
-        let origin = NSPoint(
-            x: center.x - unit * 2.5,
-            y: center.y + unit * 1.5
-        )
-        for (rowIndex, row) in rows.enumerated() {
-            for (columnIndex, pixel) in row.enumerated() {
-                let color: NSColor?
-                switch pixel {
-                case "B":
-                    color = border
-                case "F":
-                    color = fill
-                case "K":
-                    color = core
-                default:
-                    color = nil
-                }
-                guard let color else { continue }
-                color.setFill()
-                NSBezierPath(rect: NSRect(
-                    x: origin.x + CGFloat(columnIndex) * unit,
-                    y: origin.y - CGFloat(rowIndex) * unit,
-                    width: unit,
-                    height: unit
-                )).fill()
+        let rows = Self.arrowSpriteRows
+        let rowCount = rows.count
+        let colCount = rows.map(\.count).max() ?? 0
+        // Center the grid on the origin (sprite center).
+        let centerCol = CGFloat(colCount - 1) / 2
+        let centerRow = CGFloat(rowCount - 1) / 2
+
+        func cell(_ col: Int, _ row: Int) -> NSRect {
+            // Flip row so the grid reads top-to-bottom but draws y-up.
+            NSRect(
+                x: offset.x + (CGFloat(col) - centerCol) * unit,
+                y: offset.y + (centerRow - CGFloat(row)) * unit,
+                width: unit,
+                height: unit
+            )
+        }
+
+        var filled = Set<[Int]>()
+        for (r, line) in rows.enumerated() {
+            for (c, ch) in line.enumerated() where ch == "#" {
+                filled.insert([c, r])
             }
         }
+
+        // 1-cell dark outline around the whole shape.
+        border.setFill()
+        let neighbors = [-1, 0, 1]
+        for key in filled {
+            for dx in neighbors {
+                for dy in neighbors where !(dx == 0 && dy == 0) {
+                    let n = [key[0] + dx, key[1] + dy]
+                    if !filled.contains(n) {
+                        NSBezierPath(rect: cell(n[0], n[1])).fill()
+                    }
+                }
+            }
+        }
+
+        // Fill, then the single lighter accent pixel.
+        fill.setFill()
+        for key in filled {
+            NSBezierPath(rect: cell(key[0], key[1])).fill()
+        }
+        core.setFill()
+        NSBezierPath(rect: cell(Self.arrowCoreCell.col, Self.arrowCoreCell.row)).fill()
     }
 }
 
@@ -6464,7 +6506,15 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptPanel.alphaValue = 1
         show()
         promptPanel.orderFrontRegardless()
-        showTargetMarker(frame: presentation.markerFrame, target: presentation.markerTarget)
+        let petCenter = NSPoint(
+            x: presentation.petOrigin.x + Self.panelSize.width / 2,
+            y: presentation.petOrigin.y + Self.panelSize.height / 2
+        )
+        showTargetMarker(
+            frame: presentation.markerFrame,
+            target: presentation.markerTarget,
+            fromPetCenter: petCenter
+        )
         panel.orderFrontRegardless()
         petView.apply(state: .idle, mode: currentMode, emotion: emotion ?? .neutral)
         installPromptOutsideClickMonitors()
@@ -6821,17 +6871,37 @@ final class PetController: NSObject, NSTextFieldDelegate {
         )
     }
 
-    private func showTargetMarker(frame: NSRect?, target: NSPoint?) {
+    private func showTargetMarker(frame: NSRect?, target: NSPoint?, fromPetCenter petCenter: NSPoint) {
         guard let frame, let target else {
             hideTargetMarker()
             return
         }
 
-        targetMarkerPanel.setFrame(frame, display: true)
+        let destCenter = NSPoint(x: frame.midX, y: frame.midY)
         targetMarkerView.frame = NSRect(origin: .zero, size: frame.size)
         targetMarkerView.targetMarkerPoint = target
+        targetMarkerView.targetMarkerAngle = atan2(
+            destCenter.y - petCenter.y,
+            destCenter.x - petCenter.x
+        )
+
+        // Launch centered on the pet, then glide to the destination so the
+        // arrow visibly travels from the character to the target.
+        let startFrame = NSRect(
+            x: petCenter.x - frame.width / 2,
+            y: petCenter.y - frame.height / 2,
+            width: frame.width,
+            height: frame.height
+        )
+        targetMarkerPanel.setFrame(startFrame, display: true)
         targetMarkerPanel.alphaValue = 1
         targetMarkerPanel.orderFrontRegardless()
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.46
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            targetMarkerPanel.animator().setFrame(frame, display: true)
+        }
     }
 
     private func hideTargetMarker() {
