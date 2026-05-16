@@ -44,3 +44,11 @@ jobs:
           test -f dist/Nugumi.dmg
           test -d dist/Nugumi.app/Contents/Resources/Nugumi_Nugumi.bundle
           plutil -lint dist/Nugumi.app/Contents/Info.plist
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nugumi-${{ github.sha }}.dmg
+          path: dist/Nugumi.dmg
+          if-no-files-found: error
+          retention-days: 14
