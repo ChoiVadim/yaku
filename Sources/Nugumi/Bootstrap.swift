@@ -1,6 +1,17 @@
 import AppKit
 import Foundation
 
+extension NSColor {
+    /// Nugumi brand accent (#11766E) — replaces the system blue selection
+    /// tint across the setup window.
+    static let nugumiAccent = NSColor(
+        red: 0x11 / 255.0,
+        green: 0x76 / 255.0,
+        blue: 0x6E / 255.0,
+        alpha: 1
+    )
+}
+
 enum CloudTestResult {
     case success(preview: String)
     case failure(String)
@@ -423,16 +434,36 @@ private struct PullProgress: Decodable {
 
 @MainActor
 final class OnboardingWindowController: NSWindowController {
+    private enum Method: Int { case cloud = 0, ollama = 1 }
+
     private let bootstrap: OllamaBootstrap
     private let onClose: () -> Void
     private let onCloudPick: (CloudProvider) -> Void
     private let onCloudTest: (CloudProvider) async -> CloudTestResult
-    private var installRow: StepRow?
-    private var serverRow: StepRow?
-    private var signInRow: StepRow?
+
+    private let methodSelector = NSSegmentedControl()
+    private let providerSelector = NSSegmentedControl()
+    private let cloudContainer = NSView()
+    private let ollamaContainer = NSView()
+
+    private var cloudRow: StepRow!
+    private var installRow: StepRow!
+    private var serverRow: StepRow!
+    private var signInRow: StepRow!
     private var modelRows: [String: StepRow] = [:]
-    private var cloudKeyRow: [CloudProvider: StepRow] = [:]
+
+    private var selectedProvider: CloudProvider = .openAI
+    private var currentMethod: Method = .cloud
     private var testingProviders: Set<CloudProvider> = []
+
+    private let windowWidth: CGFloat = 460
+    private let methodKey = "onboardingMethodTab"
+    private let providerKey = "onboardingCloudProvider"
+
+    private let contentWidth: CGFloat = 412 // windowWidth (460) minus 24pt margins
+    private weak var doneButton: NSButton?
+    private weak var subtitleLabel: NSTextField?
+    private var doneTopConstraint: NSLayoutConstraint?
 
     init(
         bootstrap: OllamaBootstrap,
@@ -445,14 +476,22 @@ final class OnboardingWindowController: NSWindowController {
         self.onCloudPick = onCloudPick
         self.onCloudTest = onCloudTest
 
-        let modelCount = bootstrap.models.count
-        // title + subtitle + cloud section (3 rows) + 2 section headers + ollama rows + footer
-        let baseHeight: CGFloat = 580
-        let perModelRow: CGFloat = 58
-        let height = baseHeight + perModelRow * CGFloat(modelCount)
+        // Resolve the initial tab/provider before the window is sized so it
+        // opens at the right height for the method the user lands on.
+        let savedKeyProvider = CloudProvider.allCases.first { KeychainStore.apiKey(for: $0) != nil }
+        let storedProvider = UserDefaults.standard.string(forKey: "onboardingCloudProvider")
+            .flatMap { CloudProvider(rawValue: $0) }
+        let resolvedProvider = savedKeyProvider ?? storedProvider ?? .openAI
 
+        let storedMethod = (UserDefaults.standard.object(forKey: "onboardingMethodTab") as? Int)
+            .flatMap { Method(rawValue: $0) }
+        // A saved cloud key is the strongest signal the user is a cloud user.
+        let resolvedMethod: Method = savedKeyProvider != nil ? .cloud : (storedMethod ?? .cloud)
+
+        // Placeholder height; applyMethod() resizes to fit the active panel
+        // before the window is shown.
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: height),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -468,11 +507,14 @@ final class OnboardingWindowController: NSWindowController {
         window.center()
 
         super.init(window: window)
+        self.selectedProvider = resolvedProvider
+        self.currentMethod = resolvedMethod
         window.delegate = self
         buildUI()
         bootstrap.onChange = { [weak self] state in
             self?.render(state: state)
         }
+        applyMethod(resolvedMethod, animated: false)
         render(state: bootstrap.state)
     }
 
@@ -502,50 +544,200 @@ final class OnboardingWindowController: NSWindowController {
         rootView.addSubview(glass)
         let contentView = glass.contentView
 
+        let leading: CGFloat = 24
+        let trailing: CGFloat = -24
+
         let title = NSTextField(labelWithString: "Set up Nugumi")
         title.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
         title.translatesAutoresizingMaskIntoConstraints = false
 
         let subtitle = NSTextField(wrappingLabelWithString:
-            "Pick how Nugumi translates. Cloud option is fastest to set up — just paste an API key. Local option keeps everything on your Mac.")
+            "Nugumi can translate in two ways. Pick the one that suits you — you can switch anytime from the Nugumi menu.")
         subtitle.font = NSFont.systemFont(ofSize: 12)
         subtitle.textColor = .secondaryLabelColor
+        subtitle.preferredMaxLayoutWidth = contentWidth
         subtitle.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel = subtitle
 
-        let cloudSectionHeader = Self.makeSectionHeader("Quick — paste a cloud API key")
-        let ollamaSectionHeader = Self.makeSectionHeader("Or — install Ollama locally (private, free, ~12 GB)")
-        let translatorSectionHeader = Self.makeSectionHeader("Then pick an Ollama translator")
+        // Top method toggle: Cloud (paste a key) vs Ollama (install locally).
+        methodSelector.segmentCount = 2
+        methodSelector.setLabel("Cloud", forSegment: 0)
+        methodSelector.setLabel("Ollama", forSegment: 1)
+        if let img = NSImage(systemSymbolName: "cloud.fill", accessibilityDescription: nil) {
+            methodSelector.setImage(img, forSegment: 0)
+        }
+        if let img = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil) {
+            methodSelector.setImage(img, forSegment: 1)
+        }
+        methodSelector.segmentStyle = .texturedRounded
+        methodSelector.selectedSegmentBezelColor = .nugumiAccent
+        methodSelector.trackingMode = .selectOne
+        methodSelector.target = self
+        methodSelector.action = #selector(methodChanged(_:))
+        methodSelector.translatesAutoresizingMaskIntoConstraints = false
+        methodSelector.setSelected(true, forSegment: currentMethod.rawValue)
 
-        var cloudRows: [StepRow] = []
-        for provider in CloudProvider.allCases {
-            let row = StepRow(
-                title: "Use \(provider.displayName)",
-                primaryActionTitle: "Paste API key"
-            ) { [weak self] in
-                self?.promptCloudKey(for: provider)
-            }
-            row.secondaryActionTitle = "Get a key →"
-            row.secondaryAction = { [weak self] in
-                self?.openProviderKeyPage(provider)
-            }
-            cloudKeyRow[provider] = row
-            cloudRows.append(row)
+        buildCloudContainer()
+        buildOllamaContainer()
+
+        let doneButton = NSButton(title: "Done", target: self, action: #selector(doneTapped))
+        doneButton.bezelStyle = .rounded
+        doneButton.controlSize = .large
+        doneButton.keyEquivalent = "\r"
+        doneButton.bezelColor = .nugumiAccent
+        doneButton.attributedTitle = NSAttributedString(
+            string: "Done",
+            attributes: [
+                .foregroundColor: NSColor.white,
+                .font: NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
+            ]
+        )
+        doneButton.translatesAutoresizingMaskIntoConstraints = false
+        self.doneButton = doneButton
+
+        contentView.addSubview(title)
+        contentView.addSubview(subtitle)
+        contentView.addSubview(methodSelector)
+        contentView.addSubview(cloudContainer)
+        contentView.addSubview(ollamaContainer)
+        contentView.addSubview(doneButton)
+
+        NSLayoutConstraint.activate([
+            glass.topAnchor.constraint(equalTo: rootView.topAnchor),
+            glass.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            glass.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            glass.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
+
+            title.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 50),
+            title.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
+            title.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
+
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
+            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            subtitle.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+
+            methodSelector.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 18),
+            methodSelector.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
+            methodSelector.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
+            methodSelector.heightAnchor.constraint(equalToConstant: 30),
+
+            cloudContainer.topAnchor.constraint(equalTo: methodSelector.bottomAnchor, constant: 22),
+            cloudContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
+            cloudContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
+
+            ollamaContainer.topAnchor.constraint(equalTo: methodSelector.bottomAnchor, constant: 22),
+            ollamaContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
+            ollamaContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
+
+            // Done's top is pinned to the *active* panel's bottom in
+            // applyMethod() so the window can size to whichever panel shows
+            // — the hidden panel never inflates the window height.
+            doneButton.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
+            doneButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
+            doneButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -18),
+            doneButton.heightAnchor.constraint(equalToConstant: 36)
+        ])
+    }
+
+    private func buildCloudContainer() {
+        cloudContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        let explainer = NSTextField(wrappingLabelWithString:
+            "Paste an API key from one provider. Nothing to install — the fastest way to start. Nugumi sends the text you select to that provider to translate it.")
+        explainer.font = NSFont.systemFont(ofSize: 12)
+        explainer.textColor = .secondaryLabelColor
+        explainer.preferredMaxLayoutWidth = contentWidth
+        explainer.translatesAutoresizingMaskIntoConstraints = false
+
+        let providerCaption = Self.makeSectionHeader("Provider")
+
+        providerSelector.segmentCount = CloudProvider.allCases.count
+        for (index, provider) in CloudProvider.allCases.enumerated() {
+            providerSelector.setLabel(provider.displayName, forSegment: index)
+        }
+        providerSelector.segmentStyle = .rounded
+        providerSelector.selectedSegmentBezelColor = .nugumiAccent
+        providerSelector.trackingMode = .selectOne
+        providerSelector.target = self
+        providerSelector.action = #selector(providerChanged(_:))
+        providerSelector.translatesAutoresizingMaskIntoConstraints = false
+        if let index = CloudProvider.allCases.firstIndex(of: selectedProvider) {
+            providerSelector.setSelected(true, forSegment: index)
         }
 
+        let row = StepRow(
+            title: "\(selectedProvider.displayName) API key",
+            primaryActionTitle: "Paste key"
+        ) { [weak self] in
+            guard let self else { return }
+            self.promptCloudKey(for: self.selectedProvider)
+        }
+        row.keepsSecondaryVisible = true
+        row.secondaryActionTitle = "Get a key →"
+        cloudRow = row
+
+        let hint = NSTextField(wrappingLabelWithString:
+            "Your key is stored locally on this Mac. It’s only used to translate text you select — nothing in the background.")
+        hint.font = NSFont.systemFont(ofSize: 11)
+        hint.textColor = .tertiaryLabelColor
+        hint.preferredMaxLayoutWidth = contentWidth
+        hint.translatesAutoresizingMaskIntoConstraints = false
+
+        cloudContainer.addSubview(explainer)
+        cloudContainer.addSubview(providerCaption)
+        cloudContainer.addSubview(providerSelector)
+        cloudContainer.addSubview(row)
+        cloudContainer.addSubview(hint)
+
+        NSLayoutConstraint.activate([
+            explainer.topAnchor.constraint(equalTo: cloudContainer.topAnchor),
+            explainer.leadingAnchor.constraint(equalTo: cloudContainer.leadingAnchor),
+            explainer.trailingAnchor.constraint(equalTo: cloudContainer.trailingAnchor),
+
+            providerCaption.topAnchor.constraint(equalTo: explainer.bottomAnchor, constant: 18),
+            providerCaption.leadingAnchor.constraint(equalTo: cloudContainer.leadingAnchor),
+            providerCaption.trailingAnchor.constraint(equalTo: cloudContainer.trailingAnchor),
+
+            providerSelector.topAnchor.constraint(equalTo: providerCaption.bottomAnchor, constant: 6),
+            providerSelector.leadingAnchor.constraint(equalTo: cloudContainer.leadingAnchor),
+            providerSelector.trailingAnchor.constraint(equalTo: cloudContainer.trailingAnchor),
+            providerSelector.heightAnchor.constraint(equalToConstant: 28),
+
+            row.topAnchor.constraint(equalTo: providerSelector.bottomAnchor, constant: 16),
+            row.leadingAnchor.constraint(equalTo: cloudContainer.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: cloudContainer.trailingAnchor),
+
+            hint.topAnchor.constraint(equalTo: row.bottomAnchor, constant: 14),
+            hint.leadingAnchor.constraint(equalTo: cloudContainer.leadingAnchor),
+            hint.trailingAnchor.constraint(equalTo: cloudContainer.trailingAnchor),
+            hint.bottomAnchor.constraint(equalTo: cloudContainer.bottomAnchor)
+        ])
+    }
+
+    private func buildOllamaContainer() {
+        ollamaContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        let explainer = NSTextField(wrappingLabelWithString:
+            "Runs entirely on your Mac. Private and free, but downloads about 12 GB. Do these steps in order:")
+        explainer.font = NSFont.systemFont(ofSize: 12)
+        explainer.textColor = .secondaryLabelColor
+        explainer.preferredMaxLayoutWidth = contentWidth
+        explainer.translatesAutoresizingMaskIntoConstraints = false
+
         let installRow = StepRow(
-            title: "Install Ollama",
+            title: "1.  Install Ollama",
             primaryActionTitle: "Open download page"
         ) { [weak self] in
             self?.bootstrap.openInstallPage()
         }
+        installRow.secondaryActionTitle = "Re-check"
         installRow.secondaryAction = { [weak self] in
             self?.bootstrap.refresh()
         }
-        installRow.secondaryActionTitle = "Re-check"
         self.installRow = installRow
 
         let serverRow = StepRow(
-            title: "Start Ollama",
+            title: "2.  Start Ollama",
             primaryActionTitle: "Open Ollama"
         ) { [weak self] in
             self?.bootstrap.launchOllamaApp()
@@ -553,16 +745,18 @@ final class OnboardingWindowController: NSWindowController {
         self.serverRow = serverRow
 
         let signInRow = StepRow(
-            title: "Sign in to Ollama (free)",
+            title: "3.  Sign in to Ollama (free)",
             primaryActionTitle: "Open Ollama"
         ) { [weak self] in
             self?.bootstrap.openOllamaForSignIn()
         }
+        signInRow.secondaryActionTitle = "Re-check"
         signInRow.secondaryAction = { [weak self] in
             self?.bootstrap.refresh()
         }
-        signInRow.secondaryActionTitle = "Re-check"
         self.signInRow = signInRow
+
+        let pickHeader = Self.makeSectionHeader("4.  Choose a translator")
 
         var perModelRows: [StepRow] = []
         for model in bootstrap.models {
@@ -580,107 +774,125 @@ final class OnboardingWindowController: NSWindowController {
             perModelRows.append(row)
         }
 
-        let footerNote = NSTextField(wrappingLabelWithString:
-            "Online is enough to start. You can add Offline or switch between the two anytime from the Nugumi menu.")
-        footerNote.font = NSFont.systemFont(ofSize: 11)
-        footerNote.textColor = .tertiaryLabelColor
-        footerNote.translatesAutoresizingMaskIntoConstraints = false
+        let footer = NSTextField(wrappingLabelWithString:
+            "Online needs internet but no download. Offline works without internet once the download finishes.")
+        footer.font = NSFont.systemFont(ofSize: 11)
+        footer.textColor = .tertiaryLabelColor
+        footer.preferredMaxLayoutWidth = contentWidth
+        footer.translatesAutoresizingMaskIntoConstraints = false
 
-        contentView.addSubview(title)
-        contentView.addSubview(subtitle)
-        contentView.addSubview(cloudSectionHeader)
-        for row in cloudRows {
-            contentView.addSubview(row)
-        }
-        contentView.addSubview(ollamaSectionHeader)
-        contentView.addSubview(installRow)
-        contentView.addSubview(serverRow)
-        contentView.addSubview(signInRow)
-        contentView.addSubview(translatorSectionHeader)
-        for row in perModelRows {
-            contentView.addSubview(row)
-        }
-        contentView.addSubview(footerNote)
+        ollamaContainer.addSubview(explainer)
+        ollamaContainer.addSubview(installRow)
+        ollamaContainer.addSubview(serverRow)
+        ollamaContainer.addSubview(signInRow)
+        ollamaContainer.addSubview(pickHeader)
+        for row in perModelRows { ollamaContainer.addSubview(row) }
+        ollamaContainer.addSubview(footer)
 
-        let leading: CGFloat = 24
-        let trailing: CGFloat = -24
         let rowSpacing: CGFloat = 14
-        let sectionGap: CGFloat = 22
-
         var constraints: [NSLayoutConstraint] = [
-            glass.topAnchor.constraint(equalTo: rootView.topAnchor),
-            glass.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
-            glass.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
-            glass.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
+            explainer.topAnchor.constraint(equalTo: ollamaContainer.topAnchor),
+            explainer.leadingAnchor.constraint(equalTo: ollamaContainer.leadingAnchor),
+            explainer.trailingAnchor.constraint(equalTo: ollamaContainer.trailingAnchor),
 
-            title.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 62),
-            title.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
-            title.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
-
-            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
-            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            subtitle.trailingAnchor.constraint(equalTo: title.trailingAnchor),
-
-            cloudSectionHeader.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: sectionGap),
-            cloudSectionHeader.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
-            cloudSectionHeader.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
-
-            ollamaSectionHeader.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
-            ollamaSectionHeader.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
-        ]
-
-        var cloudPreviousAnchor = cloudSectionHeader.bottomAnchor
-        var firstCloudRow = true
-        for row in cloudRows {
-            constraints.append(contentsOf: [
-                row.topAnchor.constraint(equalTo: cloudPreviousAnchor, constant: firstCloudRow ? 10 : rowSpacing),
-                row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
-                row.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing)
-            ])
-            cloudPreviousAnchor = row.bottomAnchor
-            firstCloudRow = false
-        }
-
-        constraints.append(contentsOf: [
-            ollamaSectionHeader.topAnchor.constraint(equalTo: cloudPreviousAnchor, constant: sectionGap),
-
-            installRow.topAnchor.constraint(equalTo: ollamaSectionHeader.bottomAnchor, constant: 10),
-            installRow.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
-            installRow.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
+            installRow.topAnchor.constraint(equalTo: explainer.bottomAnchor, constant: 14),
+            installRow.leadingAnchor.constraint(equalTo: ollamaContainer.leadingAnchor),
+            installRow.trailingAnchor.constraint(equalTo: ollamaContainer.trailingAnchor),
 
             serverRow.topAnchor.constraint(equalTo: installRow.bottomAnchor, constant: rowSpacing),
-            serverRow.leadingAnchor.constraint(equalTo: installRow.leadingAnchor),
-            serverRow.trailingAnchor.constraint(equalTo: installRow.trailingAnchor),
+            serverRow.leadingAnchor.constraint(equalTo: ollamaContainer.leadingAnchor),
+            serverRow.trailingAnchor.constraint(equalTo: ollamaContainer.trailingAnchor),
 
             signInRow.topAnchor.constraint(equalTo: serverRow.bottomAnchor, constant: rowSpacing),
-            signInRow.leadingAnchor.constraint(equalTo: installRow.leadingAnchor),
-            signInRow.trailingAnchor.constraint(equalTo: installRow.trailingAnchor),
+            signInRow.leadingAnchor.constraint(equalTo: ollamaContainer.leadingAnchor),
+            signInRow.trailingAnchor.constraint(equalTo: ollamaContainer.trailingAnchor),
 
-            translatorSectionHeader.topAnchor.constraint(equalTo: signInRow.bottomAnchor, constant: sectionGap),
-            translatorSectionHeader.leadingAnchor.constraint(equalTo: installRow.leadingAnchor),
-            translatorSectionHeader.trailingAnchor.constraint(equalTo: installRow.trailingAnchor)
-        ])
+            pickHeader.topAnchor.constraint(equalTo: signInRow.bottomAnchor, constant: 20),
+            pickHeader.leadingAnchor.constraint(equalTo: ollamaContainer.leadingAnchor),
+            pickHeader.trailingAnchor.constraint(equalTo: ollamaContainer.trailingAnchor)
+        ]
 
-        var previousBottomAnchor = translatorSectionHeader.bottomAnchor
-        var firstTranslatorRow = true
+        var previousAnchor = pickHeader.bottomAnchor
+        var first = true
         for row in perModelRows {
             constraints.append(contentsOf: [
-                row.topAnchor.constraint(equalTo: previousBottomAnchor, constant: firstTranslatorRow ? 10 : rowSpacing),
-                row.leadingAnchor.constraint(equalTo: installRow.leadingAnchor),
-                row.trailingAnchor.constraint(equalTo: installRow.trailingAnchor)
+                row.topAnchor.constraint(equalTo: previousAnchor, constant: first ? 10 : rowSpacing),
+                row.leadingAnchor.constraint(equalTo: ollamaContainer.leadingAnchor),
+                row.trailingAnchor.constraint(equalTo: ollamaContainer.trailingAnchor)
             ])
-            previousBottomAnchor = row.bottomAnchor
-            firstTranslatorRow = false
+            previousAnchor = row.bottomAnchor
+            first = false
         }
 
         constraints.append(contentsOf: [
-            footerNote.topAnchor.constraint(greaterThanOrEqualTo: previousBottomAnchor, constant: 16),
-            footerNote.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leading),
-            footerNote.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: trailing),
-            footerNote.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20)
+            footer.topAnchor.constraint(equalTo: previousAnchor, constant: 16),
+            footer.leadingAnchor.constraint(equalTo: ollamaContainer.leadingAnchor),
+            footer.trailingAnchor.constraint(equalTo: ollamaContainer.trailingAnchor),
+            footer.bottomAnchor.constraint(equalTo: ollamaContainer.bottomAnchor)
         ])
 
         NSLayoutConstraint.activate(constraints)
+    }
+
+    // MARK: - Method / provider switching
+
+    @objc private func methodChanged(_ sender: NSSegmentedControl) {
+        guard let method = Method(rawValue: sender.selectedSegment) else { return }
+        applyMethod(method, animated: true)
+    }
+
+    private func applyMethod(_ method: Method, animated: Bool) {
+        currentMethod = method
+        UserDefaults.standard.set(method.rawValue, forKey: methodKey)
+        methodSelector.setSelected(true, forSegment: method.rawValue)
+
+        let active: NSView = method == .cloud ? cloudContainer : ollamaContainer
+        cloudContainer.isHidden = method != .cloud
+        ollamaContainer.isHidden = method != .ollama
+
+        // Pin Done directly under the active panel so the window hugs that
+        // panel's content. The hidden panel's height is irrelevant.
+        doneTopConstraint?.isActive = false
+        if let doneButton {
+            let c = doneButton.topAnchor.constraint(equalTo: active.bottomAnchor, constant: 18)
+            c.isActive = true
+            doneTopConstraint = c
+        }
+
+        resizeWindow(to: measuredWindowHeight(for: active), animated: animated)
+    }
+
+    /// Height needed to show `container` plus the fixed header and the Done
+    /// row, measured from constraints rather than guessed constants.
+    private func measuredWindowHeight(for container: NSView) -> CGFloat {
+        container.layoutSubtreeIfNeeded()
+        let containerHeight = container.fittingSize.height
+        let subtitleHeight = subtitleLabel?.fittingSize.height ?? 30
+        // 50 top inset + ~22 title + 6 + subtitle + 18 + 30 selector + 22 gap
+        let header: CGFloat = 50 + 22 + 6 + subtitleHeight + 18 + 30 + 22
+        let doneBlock: CGFloat = 18 + 36 + 18 // gap + button + bottom inset
+        return ceil(header + containerHeight + doneBlock)
+    }
+
+    private func resizeWindow(to height: CGFloat, animated: Bool) {
+        guard let window else { return }
+        let frame = window.frame
+        // Keep the top-left corner pinned so the window grows downward.
+        let newFrame = NSRect(x: frame.minX, y: frame.maxY - height, width: windowWidth, height: height)
+        window.setFrame(newFrame, display: true, animate: animated)
+    }
+
+    @objc private func providerChanged(_ sender: NSSegmentedControl) {
+        let index = sender.selectedSegment
+        guard CloudProvider.allCases.indices.contains(index) else { return }
+        selectedProvider = CloudProvider.allCases[index]
+        UserDefaults.standard.set(selectedProvider.rawValue, forKey: providerKey)
+        cloudRow?.setTitle("\(selectedProvider.displayName) API key")
+        render(state: bootstrap.state)
+    }
+
+    @objc private func doneTapped() {
+        window?.close()
     }
 
     private static func makeSectionHeader(_ text: String) -> NSTextField {
@@ -765,26 +977,34 @@ final class OnboardingWindowController: NSWindowController {
     }
 
     private func render(state: BootstrapState) {
-        for provider in CloudProvider.allCases {
-            let status = state.cloudKey(for: provider)
-            if case .ok = status {
-                let isTesting = testingProviders.contains(provider)
-                cloudKeyRow[provider]?.applyKeySaved(
-                    message: isTesting ? "Testing…" : "Key saved. Click to change.",
-                    primaryTitle: "Change",
-                    secondaryTitle: "Test"
-                )
-                cloudKeyRow[provider]?.secondaryAction = { [weak self] in
-                    self?.runCloudTest(for: provider)
-                }
-                cloudKeyRow[provider]?.setPrimaryEnabled(!isTesting)
-                cloudKeyRow[provider]?.setSecondaryEnabled(!isTesting)
-            } else {
-                cloudKeyRow[provider]?.apply(status)
-                cloudKeyRow[provider]?.secondaryAction = { [weak self] in
-                    self?.openProviderKeyPage(provider)
-                }
+        // Cloud: a single row that reflects whichever provider is selected.
+        let provider = selectedProvider
+        let status = state.cloudKey(for: provider)
+        if case .ok = status {
+            let isTesting = testingProviders.contains(provider)
+            cloudRow?.applyKeySaved(
+                message: isTesting ? "Testing…" : "Key saved. Click Change to replace it.",
+                primaryTitle: "Change",
+                secondaryTitle: "Test"
+            )
+            cloudRow?.primaryAction = { [weak self] in
+                self?.promptCloudKey(for: provider)
             }
+            cloudRow?.secondaryAction = { [weak self] in
+                self?.runCloudTest(for: provider)
+            }
+            cloudRow?.setPrimaryEnabled(!isTesting)
+            cloudRow?.setSecondaryEnabled(!isTesting)
+        } else {
+            cloudRow?.setPrimaryTitle("Paste key")
+            cloudRow?.secondaryActionTitle = "Get a key →"
+            cloudRow?.primaryAction = { [weak self] in
+                self?.promptCloudKey(for: provider)
+            }
+            cloudRow?.secondaryAction = { [weak self] in
+                self?.openProviderKeyPage(provider)
+            }
+            cloudRow?.apply(status)
         }
         installRow?.apply(state.ollamaInstalled)
         serverRow?.apply(state.serverRunning)
@@ -1111,6 +1331,19 @@ private final class StepRow: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    /// When true, the secondary button stays visible in needs-action/failed
+    /// states (used by the cloud key row's "Get a key →" affordance). Default
+    /// behavior only reveals it for sign-in prompts.
+    var keepsSecondaryVisible = false
+
+    func setTitle(_ text: String) {
+        titleLabel.stringValue = text
+    }
+
+    func setPrimaryTitle(_ text: String) {
+        primaryButton.title = text
+    }
+
     func applyOk(message: String) {
         progressIndicator.stopAnimation(nil)
         progressIndicator.isHidden = true
@@ -1173,7 +1406,7 @@ private final class StepRow: NSView {
             statusLabel.textColor = .secondaryLabelColor
             primaryButton.isEnabled = true
             secondaryButton.isHidden = secondaryActionTitle == nil
-                || !message.lowercased().contains("sign in")
+                || (!keepsSecondaryVisible && !message.lowercased().contains("sign in"))
         case .working(let message):
             statusIndicator.isHidden = true
             progressIndicator.isHidden = false
@@ -1191,7 +1424,7 @@ private final class StepRow: NSView {
             statusLabel.stringValue = message
             statusLabel.textColor = .systemRed
             primaryButton.isEnabled = true
-            secondaryButton.isHidden = secondaryActionTitle == nil
+            secondaryButton.isHidden = secondaryActionTitle == nil && !keepsSecondaryVisible
         }
     }
 

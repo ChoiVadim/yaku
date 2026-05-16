@@ -173,7 +173,8 @@ struct GlobalShortcut: Codable, Equatable {
 final class DoubleControlPressDetector {
     private let interval: TimeInterval
     private let onDetected: @MainActor () -> Void
-    private var monitor: Any?
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
     private var lastControlDownDate: Date?
     private var wasControlDown = false
     var isEnabled = true {
@@ -190,19 +191,34 @@ final class DoubleControlPressDetector {
     }
 
     func start() {
-        guard monitor == nil else { return }
-        monitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+        guard globalMonitor == nil, localMonitor == nil else { return }
+        // Global monitor: fires only while ANOTHER app is frontmost.
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             Task { @MainActor [weak self] in
                 self?.handle(event)
             }
         }
+        // Local monitor: fires while Nugumi itself is the active app (e.g.
+        // right after the pet prompt was shown and clicked). Without this the
+        // detector goes deaf once the app activates and never recovers until
+        // another app regains focus. Must return the event unmodified.
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handle(event)
+            }
+            return event
+        }
     }
 
     func stop() {
-        if let monitor {
-            NSEvent.removeMonitor(monitor)
+        if let globalMonitor {
+            NSEvent.removeMonitor(globalMonitor)
         }
-        monitor = nil
+        if let localMonitor {
+            NSEvent.removeMonitor(localMonitor)
+        }
+        globalMonitor = nil
+        localMonitor = nil
         resetState()
     }
 

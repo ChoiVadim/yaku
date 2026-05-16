@@ -236,6 +236,27 @@ final class AskNugumiTests: XCTestCase {
         XCTAssertEqual(frame.height, AskNugumiTargetMarkerMetrics.size)
     }
 
+    func testAnswerTargetMarkerUsesSeparatePanelWithoutExpandingBubblePanel() {
+        let bubblePanelFrame = CGRect(x: 40, y: 86, width: 300, height: 136)
+        let markerTarget = CGPoint(x: 48, y: 48)
+
+        let presentation = AskNugumiPetAnswerTargetPanelMetrics.presentation(
+            bubblePanelFrame: bubblePanelFrame,
+            markerTarget: markerTarget
+        )
+
+        XCTAssertEqual(presentation.bubblePanelFrame, bubblePanelFrame)
+        guard let markerPanelFrame = presentation.markerPanelFrame,
+              let localMarkerTarget = presentation.localMarkerTarget
+        else {
+            return XCTFail("Expected a separate marker panel.")
+        }
+        XCTAssertEqual(markerPanelFrame.midX, markerTarget.x, accuracy: 0.001)
+        XCTAssertEqual(markerPanelFrame.midY, markerTarget.y, accuracy: 0.001)
+        XCTAssertEqual(localMarkerTarget.x, markerPanelFrame.width / 2, accuracy: 0.001)
+        XCTAssertEqual(localMarkerTarget.y, markerPanelFrame.height / 2, accuracy: 0.001)
+    }
+
     func testFloatingTargetPresentationPlacesButtonNearTargetAndPointsArrowBack() {
         let presentation = AskNugumiFloatingTargetPresentationPolicy.presentation(
             targetPoint: CGPoint(x: 500, y: 500),
@@ -282,6 +303,11 @@ final class AskNugumiTests: XCTestCase {
             clickPoint: CGPoint(x: petFrame.minX - AskNugumiPetDismissalPolicy.hitTolerance - 1, y: petFrame.midY),
             petFrame: petFrame
         ))
+    }
+
+    func testSelectionStatusUpdateIsIgnoredWhilePetIsThinking() {
+        XCTAssertTrue(PetSelectionStatusPolicy.shouldPreserveCurrentStatus(isThinking: true))
+        XCTAssertFalse(PetSelectionStatusPolicy.shouldPreserveCurrentStatus(isThinking: false))
     }
 
     func testPetBubblePresentationKeepsPetStillWhenBubbleFitsAboveMascot() {

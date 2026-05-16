@@ -461,11 +461,52 @@ enum AskNugumiTargetMarkerMetrics {
     }
 }
 
+struct AskNugumiPetAnswerTargetPanelPresentation: Equatable {
+    let bubblePanelFrame: CGRect
+    let markerPanelFrame: CGRect?
+    let localMarkerTarget: CGPoint?
+}
+
+enum AskNugumiPetAnswerTargetPanelMetrics {
+    static func presentation(
+        bubblePanelFrame: CGRect,
+        markerTarget: CGPoint?
+    ) -> AskNugumiPetAnswerTargetPanelPresentation {
+        guard let markerTarget else {
+            return AskNugumiPetAnswerTargetPanelPresentation(
+                bubblePanelFrame: bubblePanelFrame,
+                markerPanelFrame: nil,
+                localMarkerTarget: nil
+            )
+        }
+
+        let markerPanelFrame = AskNugumiTargetMarkerMetrics
+            .paddedFrame(centeredAt: markerTarget)
+            .integral
+        let localMarkerTarget = CGPoint(
+            x: markerTarget.x - markerPanelFrame.minX,
+            y: markerTarget.y - markerPanelFrame.minY
+        )
+
+        return AskNugumiPetAnswerTargetPanelPresentation(
+            bubblePanelFrame: bubblePanelFrame,
+            markerPanelFrame: markerPanelFrame,
+            localMarkerTarget: localMarkerTarget
+        )
+    }
+}
+
 enum AskNugumiPetDismissalPolicy {
     static let hitTolerance: CGFloat = 4
 
     static func shouldDismissPrompt(clickPoint: CGPoint, petFrame: CGRect) -> Bool {
         petFrame.insetBy(dx: -hitTolerance, dy: -hitTolerance).contains(clickPoint)
+    }
+}
+
+enum PetSelectionStatusPolicy {
+    static func shouldPreserveCurrentStatus(isThinking: Bool) -> Bool {
+        isThinking
     }
 }
 

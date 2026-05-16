@@ -106,11 +106,81 @@ struct LLMModel: Equatable {
     ]
 
     static let ollamaModels = all.filter(\.isOllama)
+    static let apiKeyModels = all.filter { $0.cloudProvider != nil }
+    static let apiKeyMenuTitle = "API key models"
 
     static let defaultModel = all[0]
 
     static func option(id: String) -> LLMModel {
         all.first { $0.id == id } ?? defaultModel
+    }
+
+    static var modeMenuEntries: [LLMModelMenuEntry] {
+        ollamaModels.map(LLMModelMenuEntry.model)
+            + [.apiKeyModels(title: apiKeyMenuTitle, models: apiKeyModels)]
+    }
+}
+
+enum LLMModelMenuEntry: Equatable {
+    case model(LLMModel)
+    case apiKeyModels(title: String, models: [LLMModel])
+}
+
+enum ModelUseScope: String, CaseIterable {
+    case textActions
+    case askNugumi
+
+    var defaultsKey: String {
+        switch self {
+        case .textActions:
+            return "textModelID"
+        case .askNugumi:
+            return "askNugumiModelID"
+        }
+    }
+
+    func defaultModelID(legacySelectedModelID: String?) -> String {
+        switch self {
+        case .textActions:
+            if let legacySelectedModelID,
+               LLMModel.all.contains(where: { $0.id == legacySelectedModelID }) {
+                return legacySelectedModelID
+            }
+            return LLMModel.defaultModel.id
+        case .askNugumi:
+            if let flagship = LLMModel.all.first(where: { $0.id == "gpt-5.5" && $0.supportsImages }) {
+                return flagship.id
+            }
+            return LLMModel.all.first(where: \.supportsImages)?.id ?? LLMModel.defaultModel.id
+        }
+    }
+
+    func menuTitle(for model: LLMModel) -> String {
+        switch self {
+        case .textActions:
+            return "Everyday text: \(model.shortName)"
+        case .askNugumi:
+            return "Ask Nugumi: \(model.shortName)"
+        }
+    }
+
+    func availableModels(from models: [LLMModel] = LLMModel.all) -> [LLMModel] {
+        switch self {
+        case .textActions:
+            return models
+        case .askNugumi:
+            return models.filter(\.supportsImages)
+        }
+    }
+}
+
+private final class ModelMenuSelection: NSObject {
+    let scope: ModelUseScope
+    let modelID: String
+
+    init(scope: ModelUseScope, modelID: String) {
+        self.scope = scope
+        self.modelID = modelID
     }
 }
 
@@ -131,6 +201,47 @@ enum ThinkingLevel: String, CaseIterable {
 
     var settingsTitle: String {
         "Thinking: \(rawValue)"
+    }
+}
+
+extension ModelUseScope {
+    var thinkingDefaultsKey: String {
+        switch self {
+        case .textActions:
+            return "textThinkingLevel"
+        case .askNugumi:
+            return "askNugumiThinkingLevel"
+        }
+    }
+
+    func defaultThinkingLevel(legacyThinkingRawValue: String?) -> ThinkingLevel {
+        switch self {
+        case .textActions:
+            return legacyThinkingRawValue
+                .flatMap(ThinkingLevel.init(rawValue:))
+                ?? .low
+        case .askNugumi:
+            return .high
+        }
+    }
+
+    func thinkingMenuTitle(for level: ThinkingLevel) -> String {
+        switch self {
+        case .textActions:
+            return "Everyday text: \(level.menuTitle)"
+        case .askNugumi:
+            return "Ask Nugumi: \(level.menuTitle)"
+        }
+    }
+}
+
+private final class ThinkingMenuSelection: NSObject {
+    let scope: ModelUseScope
+    let level: ThinkingLevel
+
+    init(scope: ModelUseScope, level: ThinkingLevel) {
+        self.scope = scope
+        self.level = level
     }
 }
 
@@ -778,7 +889,14 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private let selectionReader = SelectionReader()
     private let ollamaBaseURL = URL(string: "http://127.0.0.1:11434")!
     private var currentBackend: any LLMBackend {
-        let model = LLMModel.option(id: selectedModelID)
+        backend(for: textModelID)
+    }
+    private var askBackend: any LLMBackend {
+        backend(for: askNugumiModelID)
+    }
+
+    private func backend(for modelID: String) -> any LLMBackend {
+        let model = LLMModel.option(id: modelID)
         switch model.backend {
         case .ollama:
             return OllamaClient(baseURL: ollamaBaseURL, model: model.id)
@@ -870,24 +988,87 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     }
     private var selectionDisplayMode: SelectionDisplayMode {
         get {
-            let raw = UserDefaults.standard.string(forKey: "selectionDisplayMode") ?? SelectionDisplayMode.floatingBar.rawValue
-            return SelectionDisplayMode(rawValue: raw) ?? .floatingBar
+            let raw = UserDefaults.standard.string(forKey: "selectionDisplayMode") ?? SelectionDisplayMode.pet.rawValue
+            return SelectionDisplayMode(rawValue: raw) ?? .pet
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: "selectionDisplayMode")
         }
     }
-    private var selectedModelID: String {
-        get { UserDefaults.standard.string(forKey: "selectedOllamaModel") ?? OllamaModelOption.defaultModel.id }
-        set { UserDefaults.standard.set(newValue, forKey: "selectedOllamaModel") }
+    private var legacySelectedModelID: String? {
+        UserDefaults.standard.string(forKey: "selectedOllamaModel")
     }
-    private var thinkingLevel: ThinkingLevel {
+    private var textModelID: String {
         get {
-            let raw = UserDefaults.standard.string(forKey: "thinkingLevel") ?? ThinkingLevel.low.rawValue
-            return ThinkingLevel(rawValue: raw) ?? .low
+            UserDefaults.standard.string(forKey: ModelUseScope.textActions.defaultsKey)
+                ?? ModelUseScope.textActions.defaultModelID(legacySelectedModelID: legacySelectedModelID)
         }
         set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: "thinkingLevel")
+            UserDefaults.standard.set(newValue, forKey: ModelUseScope.textActions.defaultsKey)
+        }
+    }
+    private var askNugumiModelID: String {
+        get {
+            UserDefaults.standard.string(forKey: ModelUseScope.askNugumi.defaultsKey)
+                ?? ModelUseScope.askNugumi.defaultModelID(legacySelectedModelID: legacySelectedModelID)
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: ModelUseScope.askNugumi.defaultsKey)
+        }
+    }
+    private func modelID(for scope: ModelUseScope) -> String {
+        switch scope {
+        case .textActions:
+            return textModelID
+        case .askNugumi:
+            return askNugumiModelID
+        }
+    }
+    private func setModelID(_ modelID: String, for scope: ModelUseScope) {
+        switch scope {
+        case .textActions:
+            textModelID = modelID
+        case .askNugumi:
+            askNugumiModelID = modelID
+        }
+    }
+    private var legacyThinkingRawValue: String? {
+        UserDefaults.standard.string(forKey: "thinkingLevel")
+    }
+    private var textThinkingLevel: ThinkingLevel {
+        get {
+            UserDefaults.standard.string(forKey: ModelUseScope.textActions.thinkingDefaultsKey)
+                .flatMap(ThinkingLevel.init(rawValue:))
+                ?? ModelUseScope.textActions.defaultThinkingLevel(legacyThinkingRawValue: legacyThinkingRawValue)
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: ModelUseScope.textActions.thinkingDefaultsKey)
+        }
+    }
+    private var askNugumiThinkingLevel: ThinkingLevel {
+        get {
+            UserDefaults.standard.string(forKey: ModelUseScope.askNugumi.thinkingDefaultsKey)
+                .flatMap(ThinkingLevel.init(rawValue:))
+                ?? ModelUseScope.askNugumi.defaultThinkingLevel(legacyThinkingRawValue: legacyThinkingRawValue)
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: ModelUseScope.askNugumi.thinkingDefaultsKey)
+        }
+    }
+    private func thinkingLevel(for scope: ModelUseScope) -> ThinkingLevel {
+        switch scope {
+        case .textActions:
+            return textThinkingLevel
+        case .askNugumi:
+            return askNugumiThinkingLevel
+        }
+    }
+    private func setThinkingLevel(_ level: ThinkingLevel, for scope: ModelUseScope) {
+        switch scope {
+        case .textActions:
+            textThinkingLevel = level
+        case .askNugumi:
+            askNugumiThinkingLevel = level
         }
     }
     private var cleanupLevel: CleanupLevel {
@@ -1027,10 +1208,14 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func startAskNugumiPrompt() {
-        guard !isAskNugumiRunning else { return }
-        guard askPromptController?.isVisible != true else { return }
-        guard petController?.isPromptComposingVisible != true else {
-            petController?.focusPrompt()
+        // Double-Control toggles: if any Ask Nugumi UI (prompt, loading,
+        // answer, or an in-flight request) is already up, dismiss it instead
+        // of opening another one.
+        let askUIOpen = isAskNugumiRunning
+            || askPromptController?.isVisible == true
+            || petController?.isPromptVisible == true
+        if askUIOpen {
+            dismissAskNugumi()
             return
         }
 
@@ -1043,20 +1228,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         cancelPrefetch()
 
         if selectionDisplayMode == .pet {
-            if petController == nil {
-                petController = PetController(initialMode: .draftMessage)
-            }
-            petController?.showPrompt(
-                onSubmit: { [weak self] prompt in
-                    self?.submitAskNugumiPrompt(prompt)
-                },
-                onClose: { [weak self] in
-                    guard let self else { return }
-                    if self.isAskNugumiRunning {
-                        self.cancelAskNugumiRequest()
-                    }
-                }
-            )
+            presentPetAskPrompt()
             return
         }
 
@@ -1082,7 +1254,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanPrompt.isEmpty else { return }
 
-        let model = LLMModel.option(id: selectedModelID)
+        let model = LLMModel.option(id: askNugumiModelID)
         guard model.supportsImages else {
             askPromptController?.showError("Ask Nugumi needs a vision model.")
             petController?.showPromptError("Needs a vision model.")
@@ -1106,7 +1278,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         }
 
         let cursorLocation = NSEvent.mouseLocation
-        let backend = currentBackend
+        let backend = askBackend
         askNugumiTask = Task { [weak self] in
             do {
                 let sharingSnapshot = await MainActor.run {
@@ -1136,10 +1308,12 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 guard shouldContinue else { return }
 
                 let history = await MainActor.run { self?.askHistory ?? [] }
+                let currentThinkingLevel = await MainActor.run { self?.askNugumiThinkingLevel ?? .high }
                 let response = try await backend.ask(
                     history: history,
                     question: cleanPrompt,
-                    image: capture.image
+                    image: capture.image,
+                    thinkingLevel: currentThinkingLevel
                 ) { _ in }
                 try Task.checkCancellation()
 
@@ -1222,8 +1396,11 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         if let existing = floatingTargetButton {
             button = existing
         } else {
+            // Launch the pointer from the pet so it visibly travels from the
+            // character to the target; fall back to the cursor if no pet.
+            let launchPoint = petController?.petAnchorPoint ?? NSEvent.mouseLocation
             button = FloatingTranslateButtonController(
-                screenPoint: NSEvent.mouseLocation,
+                screenPoint: launchPoint,
                 selectedText: "",
                 initialMode: .selection,
                 onTranslate: { _ in },
@@ -1307,6 +1484,52 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         floatingTargetButton = nil
     }
 
+    /// Opens the pet prompt input wired to Ask Nugumi. Reused for the initial
+    /// double-Control prompt and for the answer bubble's "continue" button —
+    /// `askHistory` persists across the session so follow-ups keep context.
+    @MainActor
+    private func presentPetAskPrompt() {
+        if petController == nil {
+            petController = PetController(initialMode: .draftMessage)
+        }
+        petController?.onContinue = { [weak self] in
+            self?.continueAskNugumiDialog()
+        }
+        petController?.showPrompt(
+            onSubmit: { [weak self] prompt in
+                self?.submitAskNugumiPrompt(prompt)
+            },
+            onClose: { [weak self] in
+                guard let self else { return }
+                if self.isAskNugumiRunning {
+                    self.cancelAskNugumiRequest()
+                }
+            }
+        )
+    }
+
+    /// "Continue dialog" affordance on the answer bubble: re-open the prompt
+    /// for a follow-up question in the same conversation.
+    @MainActor
+    private func continueAskNugumiDialog() {
+        guard !isAskNugumiRunning else { return }
+        presentPetAskPrompt()
+    }
+
+    /// Tears down every Ask Nugumi surface (pet prompt/answer, standalone
+    /// prompt window, in-flight request). Used by the double-Control toggle.
+    @MainActor
+    private func dismissAskNugumi() {
+        if isAskNugumiRunning {
+            cancelAskNugumiRequest()
+        }
+        askPromptController?.close()
+        askPromptController = nil
+        petController?.clearPrompt()
+        floatingTargetButton?.close()
+        floatingTargetButton = nil
+    }
+
     @MainActor
     private func recordAskTurn(question: String, answer: String) {
         let trimmedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1345,7 +1568,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     private func askNugumiSetupErrorIfNeeded(for model: LLMModel) -> TranslationError? {
         switch model.backend {
         case .ollama:
-            return translationErrorIfBootstrapNeedsSetup()
+            return translationErrorIfBootstrapNeedsSetup(for: model.id)
         case .cloud(let provider):
             let apiKey = KeychainStore.apiKey(for: provider)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1380,7 +1603,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 800_000_000)
             guard let self else { return }
-            if !self.bootstrap.isReady(for: self.selectedModelID) {
+            if !self.bootstrap.isReady(for: self.textModelID) {
                 self.presentOnboardingWindow()
             }
         }
@@ -1394,12 +1617,13 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    private func onSelectedModelChanged() {
+    private func onModelSelectionChanged(for scope: ModelUseScope) {
         bootstrap.refresh()
+        guard scope == .textActions else { return }
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 800_000_000)
             guard let self else { return }
-            if !self.bootstrap.isReady(for: self.selectedModelID) {
+            if !self.bootstrap.isReady(for: self.textModelID) {
                 self.presentOnboardingWindow()
             }
         }
@@ -1407,7 +1631,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func handleBootstrapStateChange(_ state: BootstrapState) {
-        let currentID = selectedModelID
+        let currentID = textModelID
         let previous = lastObservedModelReadyState[currentID] ?? .unknown
         let current = state.modelReady(for: currentID)
         lastObservedModelReadyState[currentID] = current
@@ -1466,7 +1690,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             onCloudPick: { [weak self] provider in
                 guard let self else { return }
                 if let firstModel = LLMModel.all.first(where: { $0.cloudProvider == provider }) {
-                    self.applyModelSelection(firstModel.id)
+                    self.applyModelSelection(firstModel.id, for: .textActions)
                 }
             },
             onCloudTest: { [weak self] provider in
@@ -1856,6 +2080,22 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
     private func makeThinkingLevelMenu() -> NSMenu {
         let menu = NSMenu()
+        for scope in ModelUseScope.allCases {
+            let level = thinkingLevel(for: scope)
+            let item = NSMenuItem(
+                title: scope.thinkingMenuTitle(for: level),
+                action: nil,
+                keyEquivalent: ""
+            )
+            item.representedObject = scope.rawValue
+            item.submenu = makeScopedThinkingLevelMenu(for: scope)
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    private func makeScopedThinkingLevelMenu(for scope: ModelUseScope) -> NSMenu {
+        let menu = NSMenu()
         for level in ThinkingLevel.allCases {
             let item = NSMenuItem(
                 title: level.menuTitle,
@@ -1863,7 +2103,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 keyEquivalent: ""
             )
             item.target = self
-            item.representedObject = level.rawValue
+            item.representedObject = ThinkingMenuSelection(scope: scope, level: level)
             menu.addItem(item)
         }
         return menu
@@ -1871,36 +2111,87 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
     private func makeModelSelectionMenu() -> NSMenu {
         let menu = NSMenu()
-        let groups: [(BackendKind?, [LLMModel])] = [
-            (nil, LLMModel.all.filter(\.isOllama)),
-            (nil, LLMModel.all.filter { $0.cloudProvider == .openAI }),
-            (nil, LLMModel.all.filter { $0.cloudProvider == .anthropic }),
-            (nil, LLMModel.all.filter { $0.cloudProvider == .gemini })
-        ]
-        for (index, group) in groups.enumerated() {
-            if index > 0 {
+        for scope in ModelUseScope.allCases {
+            let model = LLMModel.option(id: modelID(for: scope))
+            let item = NSMenuItem(
+                title: scope.menuTitle(for: model),
+                action: nil,
+                keyEquivalent: ""
+            )
+            item.representedObject = scope.rawValue
+            item.submenu = makeScopedModelSelectionMenu(for: scope)
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        menu.addItem(makeConfigureAPIKeysMenuItem())
+        return menu
+    }
+
+    private func makeScopedModelSelectionMenu(for scope: ModelUseScope) -> NSMenu {
+        switch scope {
+        case .textActions:
+            return makeTextModelSelectionMenu(for: scope)
+        case .askNugumi:
+            return makeAPIKeyModelMenu(
+                models: scope.availableModels(from: LLMModel.apiKeyModels),
+                scope: scope
+            )
+        }
+    }
+
+    private func makeTextModelSelectionMenu(for scope: ModelUseScope) -> NSMenu {
+        let menu = NSMenu()
+        for entry in LLMModel.modeMenuEntries {
+            switch entry {
+            case .model(let option):
+                menu.addItem(makeModelMenuItem(option, scope: scope))
+            case .apiKeyModels(let title, let models):
                 menu.addItem(.separator())
-            }
-            for option in group.1 {
-                let item = NSMenuItem(
-                    title: option.displayName,
-                    action: #selector(selectModel(_:)),
-                    keyEquivalent: ""
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                item.submenu = makeAPIKeyModelMenu(
+                    models: scope.availableModels(from: models),
+                    scope: scope
                 )
-                item.target = self
-                item.representedObject = option.id
                 menu.addItem(item)
             }
         }
-        menu.addItem(.separator())
-        let configureItem = NSMenuItem(
+        return menu
+    }
+
+    private func makeAPIKeyModelMenu(models: [LLMModel], scope: ModelUseScope) -> NSMenu {
+        let menu = NSMenu()
+        for provider in CloudProvider.allCases {
+            let providerModels = models.filter { $0.cloudProvider == provider }
+            guard !providerModels.isEmpty else { continue }
+            if !menu.items.isEmpty {
+                menu.addItem(.separator())
+            }
+            for option in providerModels {
+                menu.addItem(makeModelMenuItem(option, scope: scope))
+            }
+        }
+        return menu
+    }
+
+    private func makeConfigureAPIKeysMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(
             title: "Configure API keys…",
             action: #selector(openOnboardingChooser),
             keyEquivalent: ""
         )
-        configureItem.target = self
-        menu.addItem(configureItem)
-        return menu
+        item.target = self
+        return item
+    }
+
+    private func makeModelMenuItem(_ option: LLMModel, scope: ModelUseScope) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: option.displayName,
+            action: #selector(selectModel(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.representedObject = ModelMenuSelection(scope: scope, modelID: option.id)
+        return item
     }
 
     @MainActor
@@ -2186,7 +2477,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         let primaryMode = floatingDefaultMode.translationMode
         if primaryMode == .selection {
             let language = targetLanguage
-            let currentThinkingLevel = thinkingLevel
+            let currentThinkingLevel = textThinkingLevel
             if translationCache.translation(for: selectedText, targetLanguage: language, thinkingLevel: currentThinkingLevel) == nil {
                 startPrefetchIfEligible(for: selectedText)
             } else {
@@ -2359,7 +2650,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         }
 
         let language = explicitTargetLanguage ?? targetLanguage
-        let currentThinkingLevel = thinkingLevel
+        let currentThinkingLevel = textThinkingLevel
         let (_, currentAppCategory) = AppCategoryClassifier.detectFrontmost()
         let currentComposition = compositionSettings(for: mode, appCategory: currentAppCategory)
         let anchor: TranslationPanelController.Anchor =
@@ -2608,15 +2899,25 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    private func translationErrorIfBootstrapBusy() -> TranslationError? {
-        if case .working(let detail) = bootstrap.state.modelReady(for: selectedModelID) {
+    private func translationErrorIfBootstrapBusy(for modelID: String? = nil) -> TranslationError? {
+        let modelID = modelID ?? textModelID
+        if case .working(let detail) = bootstrap.state.modelReady(for: modelID) {
             return .modelDownloading(detail)
         }
         return nil
     }
 
     @MainActor
-    private func translationErrorIfBootstrapNeedsSetup() -> TranslationError? {
+    private func translationErrorIfBootstrapNeedsSetup(for modelID: String? = nil) -> TranslationError? {
+        let modelID = modelID ?? textModelID
+        let model = LLMModel.option(id: modelID)
+        if let provider = model.cloudProvider {
+            if case .needsAction = bootstrap.state.cloudKey(for: provider) {
+                return .invalidAPIKey(provider)
+            }
+            return nil
+        }
+
         if case .needsAction = bootstrap.state.ollamaInstalled {
             return .serverUnavailable
         }
@@ -2624,11 +2925,11 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             return .serverUnavailable
         }
         if case .needsAction = bootstrap.state.ollamaSignedIn,
-           OllamaModelOption.option(id: selectedModelID).isCloud {
+           model.isCloud {
             return .signInRequired
         }
-        if case .needsAction = bootstrap.state.modelReady(for: selectedModelID) {
-            return .modelMissing(selectedModelID)
+        if case .needsAction = bootstrap.state.modelReady(for: modelID) {
+            return .modelMissing(modelID)
         }
         return nil
     }
@@ -2643,12 +2944,12 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
         // Don't burn API calls while the translator isn't ready — the request
         // would only surface a 404/connection error inside the prefetch.
-        guard bootstrap.isReady(for: selectedModelID) else {
+        guard bootstrap.isReady(for: textModelID) else {
             return
         }
 
         let language = targetLanguage
-        let currentThinkingLevel = thinkingLevel
+        let currentThinkingLevel = textThinkingLevel
         let (_, appCategory) = AppCategoryClassifier.detectFrontmost()
         let prefetch = TranslationPrefetch(
             text: text,
@@ -2756,7 +3057,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         menu.item(withTag: MenuItemTag.accessibilitySettings.rawValue)?.isHidden = trusted
         menu.item(withTag: MenuItemTag.permissionSeparator.rawValue)?.isHidden = trusted
 
-        let bootstrapReady = bootstrap.isReady(for: selectedModelID)
+        let bootstrapReady = bootstrap.isReady(for: textModelID)
         menu.item(withTag: MenuItemTag.bootstrapNotice.rawValue)?.isHidden = bootstrapReady
         menu.item(withTag: MenuItemTag.bootstrapAction.rawValue)?.title = bootstrapReady
             ? "Setup..."
@@ -2766,8 +3067,8 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         menu.item(withTag: MenuItemTag.draftTargetLanguage.rawValue)?.title = "Write / rewrite my text in: \(draftTargetLanguage.displayName)"
         menu.item(withTag: MenuItemTag.selectionDisplayMode.rawValue)?.title = selectionDisplayMode.settingsTitle
         menu.item(withTag: MenuItemTag.floatingDefaultMode.rawValue)?.title = floatingDefaultMode.menuTitle
-        menu.item(withTag: MenuItemTag.thinkingLevel.rawValue)?.title = thinkingLevel.settingsTitle
-        menu.item(withTag: MenuItemTag.selectedModel.rawValue)?.title = "Mode: \(OllamaModelOption.option(id: selectedModelID).displayName)"
+        menu.item(withTag: MenuItemTag.thinkingLevel.rawValue)?.title = "Thinking"
+        menu.item(withTag: MenuItemTag.selectedModel.rawValue)?.title = "Models"
         menu.item(withTag: MenuItemTag.checkForUpdates.rawValue)?.isHidden = !isRunningFromAppBundle
         if let translateSelectionItem = menu.item(withTag: MenuItemTag.translateSelection.rawValue) {
             translateSelectionItem.title = "Rewrite my text in \(draftTargetLanguage.displayName)..."
@@ -2830,19 +3131,13 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         }
 
         if let thinkingMenu = menu.item(withTag: MenuItemTag.thinkingLevel.rawValue)?.submenu {
-            let activeLevel = thinkingLevel.rawValue
-            for item in thinkingMenu.items {
-                guard let raw = item.representedObject as? String else { continue }
-                item.state = raw == activeLevel ? .on : .off
-            }
+            updateThinkingScopeTitles(in: thinkingMenu)
+            updateThinkingSelectionState(in: thinkingMenu)
         }
 
         if let modelMenu = menu.item(withTag: MenuItemTag.selectedModel.rawValue)?.submenu {
-            let activeModelID = selectedModelID
-            for item in modelMenu.items {
-                guard let modelID = item.representedObject as? String else { continue }
-                item.state = modelID == activeModelID ? .on : .off
-            }
+            updateModelScopeTitles(in: modelMenu)
+            updateModelSelectionState(in: modelMenu)
         }
 
         menu.item(withTag: MenuItemTag.writingStyle.rawValue)?.title = "Writing style"
@@ -2892,6 +3187,68 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             invisibilityItem.keyEquivalent = chord.menuKeyEquivalent
             invisibilityItem.keyEquivalentModifierMask = chord.keyEquivalentModifierMask
         }
+    }
+
+    private func updateThinkingScopeTitles(in menu: NSMenu) {
+        for item in menu.items {
+            if let raw = item.representedObject as? String,
+               let scope = ModelUseScope(rawValue: raw) {
+                item.title = scope.thinkingMenuTitle(for: thinkingLevel(for: scope))
+            }
+            if let submenu = item.submenu {
+                updateThinkingScopeTitles(in: submenu)
+            }
+        }
+    }
+
+    @discardableResult
+    private func updateThinkingSelectionState(in menu: NSMenu) -> Bool {
+        var containsActiveLevel = false
+        for item in menu.items {
+            if let submenu = item.submenu {
+                let submenuContainsActiveLevel = updateThinkingSelectionState(in: submenu)
+                item.state = submenuContainsActiveLevel ? .on : .off
+                containsActiveLevel = containsActiveLevel || submenuContainsActiveLevel
+                continue
+            }
+
+            guard let selection = item.representedObject as? ThinkingMenuSelection else { continue }
+            let isActiveLevel = selection.level == thinkingLevel(for: selection.scope)
+            item.state = isActiveLevel ? .on : .off
+            containsActiveLevel = containsActiveLevel || isActiveLevel
+        }
+        return containsActiveLevel
+    }
+
+    private func updateModelScopeTitles(in menu: NSMenu) {
+        for item in menu.items {
+            if let raw = item.representedObject as? String,
+               let scope = ModelUseScope(rawValue: raw) {
+                item.title = scope.menuTitle(for: LLMModel.option(id: modelID(for: scope)))
+            }
+            if let submenu = item.submenu {
+                updateModelScopeTitles(in: submenu)
+            }
+        }
+    }
+
+    @discardableResult
+    private func updateModelSelectionState(in menu: NSMenu) -> Bool {
+        var containsActiveModel = false
+        for item in menu.items {
+            if let submenu = item.submenu {
+                let submenuContainsActiveModel = updateModelSelectionState(in: submenu)
+                item.state = submenuContainsActiveModel ? .on : .off
+                containsActiveModel = containsActiveModel || submenuContainsActiveModel
+                continue
+            }
+
+            guard let selection = item.representedObject as? ModelMenuSelection else { continue }
+            let isActiveModel = selection.modelID == modelID(for: selection.scope)
+            item.state = isActiveModel ? .on : .off
+            containsActiveModel = containsActiveModel || isActiveModel
+        }
+        return containsActiveModel
     }
 
     private func applyShortcut(for action: GlobalShortcutAction, to item: NSMenuItem) {
@@ -3074,7 +3431,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        let currentThinkingLevel = thinkingLevel
+        let currentThinkingLevel = textThinkingLevel
         let (_, currentAppCategory) = AppCategoryClassifier.detectFrontmost()
         let currentComposition = compositionSettings(for: .draftMessage, appCategory: currentAppCategory)
 
@@ -3368,37 +3725,41 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     @objc private func selectThinkingLevel(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let level = ThinkingLevel(rawValue: raw)
-        else {
+        guard let selection = sender.representedObject as? ThinkingMenuSelection else {
             return
         }
 
-        thinkingLevel = level
-        cancelPrefetch()
+        guard selection.level != thinkingLevel(for: selection.scope) else {
+            return
+        }
+
+        setThinkingLevel(selection.level, for: selection.scope)
+        if selection.scope == .textActions {
+            cancelPrefetch()
+        }
         updateMenuState()
     }
 
     @MainActor
     @objc private func selectModel(_ sender: NSMenuItem) {
-        guard let modelID = sender.representedObject as? String else {
+        guard let selection = sender.representedObject as? ModelMenuSelection else {
             return
         }
 
-        let option = LLMModel.option(id: modelID)
-        guard option.id != selectedModelID else {
+        let option = LLMModel.option(id: selection.modelID)
+        guard option.id != modelID(for: selection.scope) else {
             return
         }
 
         if let provider = option.cloudProvider, KeychainStore.apiKey(for: provider) == nil {
             presentAPIKeySheet(for: provider) { [weak self] saved in
                 guard let self, saved else { return }
-                self.applyModelSelection(option.id)
+                self.applyModelSelection(option.id, for: selection.scope)
             }
             return
         }
 
-        applyModelSelection(option.id)
+        applyModelSelection(option.id, for: selection.scope)
     }
 
     @MainActor
@@ -3418,7 +3779,7 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
                 mode: .selection,
                 appCategory: .other,
                 composition: nil,
-                thinkingLevel: thinkingLevel,
+                thinkingLevel: textThinkingLevel,
                 onPartial: { _ in }
             )
             let preview = String(translated.prefix(160))
@@ -3431,11 +3792,11 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    private func applyModelSelection(_ modelID: String) {
-        selectedModelID = modelID
+    private func applyModelSelection(_ modelID: String, for scope: ModelUseScope) {
+        setModelID(modelID, for: scope)
         cancelPrefetch()
         translationCache = TranslationCache()
-        onSelectedModelChanged()
+        onModelSelectionChanged(for: scope)
         updateMenuState()
     }
 
@@ -3576,13 +3937,18 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func resetSettingsToDefaults() {
-        let previousModelID = selectedModelID
+        let previousTextModelID = textModelID
+        let previousAskModelID = askNugumiModelID
         let defaults = UserDefaults.standard
         [
             "targetLanguageID",
             "draftTargetLanguageID",
             "floatingButtonDefaultMode",
             "selectionDisplayMode",
+            ModelUseScope.textActions.defaultsKey,
+            ModelUseScope.askNugumi.defaultsKey,
+            ModelUseScope.textActions.thinkingDefaultsKey,
+            ModelUseScope.askNugumi.thinkingDefaultsKey,
             "selectedOllamaModel",
             "thinkingLevel",
             "cleanupLevel",
@@ -3609,8 +3975,11 @@ final class NugumiApp: NSObject, NSApplicationDelegate {
         statusItem?.isVisible = true
         InvisibilityState.applyToAllOpenWindows()
 
-        if selectedModelID != previousModelID {
-            onSelectedModelChanged()
+        if textModelID != previousTextModelID {
+            onModelSelectionChanged(for: .textActions)
+        }
+        if askNugumiModelID != previousAskModelID {
+            onModelSelectionChanged(for: .askNugumi)
         }
 
         updateMenuState()
@@ -5421,6 +5790,9 @@ private enum NugumiFont {
 }
 
 private final class PetPromptBubbleView: NSView {
+    var drawsBubble = true {
+        didSet { needsDisplay = true }
+    }
     var isError = false {
         didSet { needsDisplay = true }
     }
@@ -5473,23 +5845,25 @@ private final class PetPromptBubbleView: NSView {
             ? NSColor(srgbRed: 0.54, green: 0.08, blue: 0.08, alpha: 1.0)
             : NSColor(srgbRed: 0.22, green: 0.27, blue: 0.28, alpha: 1.0)
 
-        drawPixelBubbleBody(in: bubbleRect.offsetBy(dx: unit, dy: -unit), unit: unit, color: shadow)
-        let tailAnchor = bubbleRect.minX + 4 * unit
-        drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: shadow, offset: NSPoint(x: unit, y: -unit))
-        drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: borderDark)
-        drawPixelBubbleBody(in: bubbleRect, unit: unit, color: borderDark)
-        drawPixelBubbleBody(in: bubbleRect.insetBy(dx: unit, dy: unit), unit: unit, color: border)
-        drawPixelBubbleBody(in: bubbleRect.insetBy(dx: unit * 2, dy: unit * 2), unit: unit, color: fill)
+        if drawsBubble {
+            drawPixelBubbleBody(in: bubbleRect.offsetBy(dx: unit, dy: -unit), unit: unit, color: shadow)
+            let tailAnchor = bubbleRect.minX + 4 * unit
+            drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: shadow, offset: NSPoint(x: unit, y: -unit))
+            drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: borderDark)
+            drawPixelBubbleBody(in: bubbleRect, unit: unit, color: borderDark)
+            drawPixelBubbleBody(in: bubbleRect.insetBy(dx: unit, dy: unit), unit: unit, color: border)
+            drawPixelBubbleBody(in: bubbleRect.insetBy(dx: unit * 2, dy: unit * 2), unit: unit, color: fill)
 
-        drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: fill, offset: NSPoint(x: unit * 2, y: unit * 2))
+            drawPixelTail(anchor: tailAnchor, baseY: bubbleRect.minY, unit: unit, color: fill, offset: NSPoint(x: unit * 2, y: unit * 2))
 
-        highlight.setFill()
-        NSBezierPath(rect: NSRect(
-            x: bubbleRect.minX + 4 * unit,
-            y: bubbleRect.maxY - 4 * unit,
-            width: bubbleRect.width - 8 * unit,
-            height: unit
-        )).fill()
+            highlight.setFill()
+            NSBezierPath(rect: NSRect(
+                x: bubbleRect.minX + 4 * unit,
+                y: bubbleRect.maxY - 4 * unit,
+                width: bubbleRect.width - 8 * unit,
+                height: unit
+            )).fill()
+        }
 
         if let targetMarkerPoint {
             drawTargetMarker(center: targetMarkerPoint, unit: unit)
@@ -5598,12 +5972,15 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private let containerView: NSView
     private let promptPanel: NSPanel
     private let promptContainerView: NSView
+    private let targetMarkerPanel: NSPanel
     private let petView: PetMascotView
     private let appIconView: NSImageView
     private let promptBubbleView: PetPromptBubbleView
+    private let targetMarkerView: PetPromptBubbleView
     private let promptTextField: AskPromptTextField
     private let answerScrollView: NSScrollView
     private let answerTextView: NSTextView
+    private let continueButton = NSButton()
     private var workspaceObserver: NSObjectProtocol?
     private var trackingTimer: Timer?
     private var tabInterceptor: TabKeyInterceptor?
@@ -5616,6 +5993,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private var onSmartReply: ((String) -> Void)?
     private var onPromptSubmit: ((String) -> Void)?
     private var onPromptClose: (() -> Void)?
+    var onContinue: (() -> Void)?
     private var currentMode: TranslationMode
     private var isReadyLockedUntilPanelCloses = false
     private var isThinking = false
@@ -5664,6 +6042,12 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptOpen || isPromptLoading
     }
 
+    /// Screen-space center of the pet panel. The floating target pointer
+    /// launches from here so it visibly travels from the character.
+    var petAnchorPoint: NSPoint {
+        NSPoint(x: panel.frame.midX, y: panel.frame.midY)
+    }
+
     init(initialMode: TranslationMode) {
         currentMode = initialMode
         let origin = PetController.originNearCursor(
@@ -5686,6 +6070,13 @@ final class PetController: NSObject, NSTextFieldDelegate {
             defer: false
         )
         promptContainerView = NSView(frame: NSRect(origin: .zero, size: initialPromptInputLayout.panelSize))
+        let initialMarkerPanelSize = AskNugumiTargetMarkerMetrics.paddedFrame(centeredAt: .zero).size
+        targetMarkerPanel = PetPanel(
+            contentRect: NSRect(origin: origin, size: initialMarkerPanelSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
         petView = PetMascotView(frame: NSRect(
             origin: .zero,
             size: Self.panelSize
@@ -5697,6 +6088,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
             height: Self.appIconSize.height
         ))
         promptBubbleView = PetPromptBubbleView(frame: initialPromptInputLayout.bubbleFrame)
+        targetMarkerView = PetPromptBubbleView(frame: NSRect(origin: .zero, size: initialMarkerPanelSize))
         promptTextField = AskPromptTextField(frame: initialPromptInputLayout.textFrame)
         let initialAnswerLayout = AskNugumiAnswerBubbleMetrics.layout(forContentHeight: 0)
         answerScrollView = NSScrollView(frame: initialAnswerLayout.viewportFrame)
@@ -5726,6 +6118,16 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptPanel.hidesOnDeactivate = false
         promptPanel.ignoresMouseEvents = false
 
+        targetMarkerPanel.level = .floating
+        targetMarkerPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        InvisibilityState.apply(to: targetMarkerPanel)
+        targetMarkerPanel.isReleasedWhenClosed = false
+        targetMarkerPanel.isOpaque = false
+        targetMarkerPanel.backgroundColor = .clear
+        targetMarkerPanel.hasShadow = false
+        targetMarkerPanel.hidesOnDeactivate = false
+        targetMarkerPanel.ignoresMouseEvents = true
+
         containerView.autoresizingMask = [.width, .height]
         promptContainerView.autoresizingMask = [.width, .height]
         petView.wantsLayer = true
@@ -5743,6 +6145,14 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptBubbleView.alphaValue = 0
         promptBubbleView.isHidden = true
         promptContainerView.addSubview(promptBubbleView)
+
+        targetMarkerView.drawsBubble = false
+        targetMarkerView.autoresizingMask = [.width, .height]
+        targetMarkerView.targetMarkerPoint = NSPoint(
+            x: targetMarkerView.bounds.midX,
+            y: targetMarkerView.bounds.midY
+        )
+        targetMarkerPanel.contentView = targetMarkerView
 
         promptTextField.delegate = self
         promptTextField.onEscape = { [weak self] in
@@ -5788,6 +6198,22 @@ final class PetController: NSObject, NSTextFieldDelegate {
         answerScrollView.isHidden = true
         answerScrollView.documentView = answerTextView
         promptContainerView.addSubview(answerScrollView)
+
+        // "Continue dialog" affordance, bottom-right of the answer bubble.
+        continueButton.isBordered = false
+        continueButton.bezelStyle = .regularSquare
+        continueButton.imagePosition = .imageOnly
+        continueButton.image = NSImage(
+            systemSymbolName: "arrowshape.turn.up.left.circle.fill",
+            accessibilityDescription: "Continue conversation"
+        )
+        continueButton.contentTintColor = .nugumiAccent
+        continueButton.toolTip = "Continue the conversation"
+        continueButton.target = self
+        continueButton.action = #selector(continueButtonTapped)
+        continueButton.isHidden = true
+        continueButton.alphaValue = 0
+        promptContainerView.addSubview(continueButton)
 
         panel.contentView = containerView
         promptPanel.contentView = promptContainerView
@@ -5859,6 +6285,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         cancelPointingAnimation()
         panel.close()
         promptPanel.close()
+        targetMarkerPanel.close()
     }
 
     func showPrompt(
@@ -5879,6 +6306,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptLoading = false
         isAnswerOpen = false
         currentAnswerMarkerTarget = nil
+        hideTargetMarker()
         panel.ignoresMouseEvents = false
         petView.allowsClickWhenNotReady = true
         tabInterceptor?.disable()
@@ -5923,6 +6351,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptLoading = true
         isAnswerOpen = false
         currentAnswerMarkerTarget = nil
+        hideTargetMarker()
         isThinking = true
         promptHasFullSelection = false
         removePromptOutsideClickMonitors()
@@ -5958,6 +6387,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptLoading = false
         isAnswerOpen = false
         currentAnswerMarkerTarget = nil
+        hideTargetMarker()
         isThinking = false
         panel.ignoresMouseEvents = false
         petView.allowsClickWhenNotReady = true
@@ -6034,6 +6464,8 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptPanel.alphaValue = 1
         show()
         promptPanel.orderFrontRegardless()
+        showTargetMarker(frame: presentation.markerFrame, target: presentation.markerTarget)
+        panel.orderFrontRegardless()
         petView.apply(state: .idle, mode: currentMode, emotion: emotion ?? .neutral)
         installPromptOutsideClickMonitors()
     }
@@ -6062,6 +6494,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptLoading = false
         isAnswerOpen = false
         currentAnswerMarkerTarget = nil
+        hideTargetMarker()
         panel.ignoresMouseEvents = true
         tabInterceptor?.disable()
         tabInterceptor = nil
@@ -6102,6 +6535,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         isPromptLoading = false
         isAnswerOpen = false
         currentAnswerMarkerTarget = nil
+        hideTargetMarker()
         onPromptSubmit = nil
         onPromptClose = nil
         promptBuffer = ""
@@ -6130,11 +6564,15 @@ final class PetController: NSObject, NSTextFieldDelegate {
             promptTextField.isHidden = true
             answerScrollView.isHidden = false
             answerScrollView.alphaValue = 1
+            continueButton.isHidden = (onContinue == nil)
+            continueButton.alphaValue = (onContinue == nil) ? 0 : 1
         } else {
             answerScrollView.alphaValue = 0
             answerScrollView.isHidden = true
             promptTextField.isHidden = false
             promptTextField.alphaValue = 1
+            continueButton.isHidden = true
+            continueButton.alphaValue = 0
         }
     }
 
@@ -6145,6 +6583,13 @@ final class PetController: NSObject, NSTextFieldDelegate {
         promptBubbleView.isHidden = true
         promptTextField.isHidden = true
         answerScrollView.isHidden = true
+        continueButton.isHidden = true
+        continueButton.alphaValue = 0
+        hideTargetMarker()
+    }
+
+    @objc private func continueButtonTapped() {
+        onContinue?()
     }
 
     private func configurePromptTextFieldForInput() {
@@ -6351,35 +6796,47 @@ final class PetController: NSObject, NSTextFieldDelegate {
     private func answerPresentationFrame(
         for layout: AskNugumiAnswerBubbleLayout,
         markerTarget: NSPoint?
-    ) -> (frame: NSRect, petOrigin: NSPoint, layout: AskNugumiAnswerBubbleLayout, markerTarget: NSPoint?) {
+    ) -> (
+        frame: NSRect,
+        petOrigin: NSPoint,
+        layout: AskNugumiAnswerBubbleLayout,
+        markerFrame: NSRect?,
+        markerTarget: NSPoint?
+    ) {
         let promptPresentation = promptPresentationAnchoredToPet(
             size: layout.panelSize,
             bubbleFrame: layout.bubbleFrame
         )
-        let bubblePanelFrame = promptPresentation.promptFrame
-        guard let markerTarget else {
-            return (bubblePanelFrame, promptPresentation.petOrigin, layout, nil)
+        let markerPresentation = AskNugumiPetAnswerTargetPanelMetrics.presentation(
+            bubblePanelFrame: promptPresentation.promptFrame,
+            markerTarget: markerTarget
+        )
+
+        return (
+            markerPresentation.bubblePanelFrame,
+            promptPresentation.petOrigin,
+            layout,
+            markerPresentation.markerPanelFrame,
+            markerPresentation.localMarkerTarget
+        )
+    }
+
+    private func showTargetMarker(frame: NSRect?, target: NSPoint?) {
+        guard let frame, let target else {
+            hideTargetMarker()
+            return
         }
 
-        let markerRect = AskNugumiTargetMarkerMetrics.paddedFrame(centeredAt: markerTarget)
-        let panelFrame = bubblePanelFrame.union(markerRect).integral
-        let frameOffset = NSPoint(
-            x: bubblePanelFrame.minX - panelFrame.minX,
-            y: bubblePanelFrame.minY - panelFrame.minY
-        )
-        let shiftedLayout = AskNugumiAnswerBubbleLayout(
-            panelSize: panelFrame.size,
-            bubbleFrame: layout.bubbleFrame.offsetBy(dx: frameOffset.x, dy: frameOffset.y),
-            viewportFrame: layout.viewportFrame.offsetBy(dx: frameOffset.x, dy: frameOffset.y),
-            documentHeight: layout.documentHeight,
-            needsScroll: layout.needsScroll
-        )
-        let localMarkerTarget = NSPoint(
-            x: markerTarget.x - panelFrame.minX,
-            y: markerTarget.y - panelFrame.minY
-        )
+        targetMarkerPanel.setFrame(frame, display: true)
+        targetMarkerView.frame = NSRect(origin: .zero, size: frame.size)
+        targetMarkerView.targetMarkerPoint = target
+        targetMarkerPanel.alphaValue = 1
+        targetMarkerPanel.orderFrontRegardless()
+    }
 
-        return (panelFrame, promptPresentation.petOrigin, shiftedLayout, localMarkerTarget)
+    private func hideTargetMarker() {
+        targetMarkerPanel.orderOut(nil)
+        targetMarkerPanel.alphaValue = 1
     }
 
     private func layoutPromptSubviews() {
@@ -6393,8 +6850,16 @@ final class PetController: NSObject, NSTextFieldDelegate {
         if isAnswerOpen {
             promptBubbleView.frame = NSRect(origin: .zero, size: currentAnswerLayout.panelSize)
             promptBubbleView.bubbleFrame = currentAnswerLayout.bubbleFrame
-            promptBubbleView.targetMarkerPoint = currentAnswerMarkerTarget
+            promptBubbleView.targetMarkerPoint = nil
             answerScrollView.frame = currentAnswerLayout.viewportFrame
+            let bubble = currentAnswerLayout.bubbleFrame
+            let buttonSize: CGFloat = 18
+            continueButton.frame = NSRect(
+                x: bubble.maxX - buttonSize - 6,
+                y: bubble.minY + 6,
+                width: buttonSize,
+                height: buttonSize
+            )
         } else {
             promptBubbleView.frame = NSRect(origin: .zero, size: currentPromptInputLayout.panelSize)
             promptBubbleView.bubbleFrame = currentPromptInputLayout.bubbleFrame
@@ -6451,6 +6916,9 @@ final class PetController: NSObject, NSTextFieldDelegate {
         onRewrite: @escaping (String) -> Void,
         onSmartReply: @escaping (String) -> Void
     ) {
+        guard !PetSelectionStatusPolicy.shouldPreserveCurrentStatus(isThinking: isThinking) else {
+            return
+        }
         clearPrompt(animate: true)
         cancelPointingAnimation()
         self.selectedText = selectedText
@@ -6484,7 +6952,9 @@ final class PetController: NSObject, NSTextFieldDelegate {
     }
 
     func clearReady() {
-        guard !isPromptVisible else { return }
+        guard !isPromptVisible,
+              !PetSelectionStatusPolicy.shouldPreserveCurrentStatus(isThinking: isThinking)
+        else { return }
         cancelPointingAnimation()
         selectedText = nil
         onTranslate = nil
@@ -6609,6 +7079,7 @@ final class PetController: NSObject, NSTextFieldDelegate {
         petView.advanceAnimationFrame()
         if isAnswerOpen {
             promptBubbleView.advanceTargetMarkerBlink()
+            targetMarkerView.advanceTargetMarkerBlink()
         }
         if let pointingTarget {
             let targetOrigin = Self.originNearPoint(pointingTarget, size: Self.panelSize)
@@ -7305,6 +7776,7 @@ final class FloatingTranslateButtonController {
         let container = NSView(frame: NSRect(origin: .zero, size: NSSize(width: totalSize, height: totalSize)))
         buttonView = FloatingTranslateButtonView(initialMode: initialMode)
         buttonView.frame = NSRect(x: shadowPadding, y: shadowPadding, width: buttonSize, height: buttonSize)
+        buttonView.wantsLayer = true
         container.addSubview(buttonView)
         panel.contentView = container
 
@@ -7350,11 +7822,47 @@ final class FloatingTranslateButtonController {
         buttonView.setTargetArrow(angle: presentation.arrowAngleRadians)
         panel.orderFrontRegardless()
 
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.24
+        // Slower glide so the trip from the pet to the target reads clearly,
+        // then a pop on arrival so the destination is unmistakable.
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.42
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             panel.animator().setFrame(presentation.panelFrame, display: true)
-        }
+        }, completionHandler: {
+            // AppKit invokes this on the main thread.
+            MainActor.assumeIsolated { [weak self] in
+                self?.playArrivalPulse()
+            }
+        })
+    }
+
+    /// Quick scale "pop" on the button, centered, after it lands on target.
+    private func playArrivalPulse() {
+        let base = AskNugumiFloatingTargetPresentationPolicy.buttonSize
+        let pad = AskNugumiFloatingTargetPresentationPolicy.shadowPadding
+        let center = pad + base / 2
+        let grownSide = base * 1.3
+        let grown = NSRect(
+            x: center - grownSide / 2,
+            y: center - grownSide / 2,
+            width: grownSide,
+            height: grownSide
+        )
+        let normal = NSRect(x: pad, y: pad, width: base, height: base)
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.12
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            buttonView.animator().frame = grown
+        }, completionHandler: {
+            MainActor.assumeIsolated { [weak self] in
+                guard let self else { return }
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.12
+                    context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                    self.buttonView.animator().frame = normal
+                }
+            }
+        })
     }
 
     private func toggleMode() {
@@ -10008,6 +10516,7 @@ protocol LLMBackend {
         history: [AskNugumiTurn],
         question: String,
         image: ImageInput?,
+        thinkingLevel: ThinkingLevel,
         onPartial: @escaping (String) -> Void
     ) async throws -> AskNugumiResponse
 }
@@ -10020,6 +10529,7 @@ struct OllamaClient: LLMBackend {
         history: [AskNugumiTurn],
         question: String,
         image: ImageInput?,
+        thinkingLevel: ThinkingLevel,
         onPartial: @escaping (String) -> Void
     ) async throws -> AskNugumiResponse {
         throw TranslationError.ollama("Ask Nugumi is available with a cloud provider.")
@@ -10161,6 +10671,7 @@ struct OpenAIChatClient: LLMBackend {
         history: [AskNugumiTurn],
         question: String,
         image: ImageInput?,
+        thinkingLevel: ThinkingLevel,
         onPartial: @escaping (String) -> Void
     ) async throws -> AskNugumiResponse {
         guard !apiKey.isEmpty else {
@@ -10204,7 +10715,12 @@ struct OpenAIChatClient: LLMBackend {
         let body = OpenAIRequest(
             model: model,
             stream: true,
-            messages: messages
+            messages: messages,
+            thinkingOptions: CloudThinkingOptions(
+                provider: provider,
+                model: model,
+                thinkingLevel: thinkingLevel
+            )
         )
 
         var request = URLRequest(url: provider.baseURL)
@@ -10314,7 +10830,12 @@ struct OpenAIChatClient: LLMBackend {
             messages: [
                 OpenAIMessage(role: "system", content: .string(systemPrompt)),
                 OpenAIMessage(role: "user", content: userContent)
-            ]
+            ],
+            thinkingOptions: CloudThinkingOptions(
+                provider: provider,
+                model: model,
+                thinkingLevel: thinkingLevel
+            )
         )
 
         var request = URLRequest(url: provider.baseURL)
@@ -10429,10 +10950,121 @@ private struct OpenAIMessage: Encodable {
     let content: OpenAIContent
 }
 
+struct CloudThinkingOptions: Encodable, Equatable {
+    let reasoningEffort: String?
+    let thinking: AnthropicThinkingConfig?
+    let outputConfig: AnthropicOutputConfig?
+
+    init(provider: CloudProvider, model: String, thinkingLevel: ThinkingLevel) {
+        switch provider {
+        case .openAI, .gemini:
+            reasoningEffort = thinkingLevel.cloudReasoningEffort
+            thinking = nil
+            outputConfig = nil
+        case .anthropic:
+            reasoningEffort = nil
+            if Self.usesAdaptiveClaudeThinking(model: model) {
+                thinking = AnthropicThinkingConfig(type: "adaptive")
+                outputConfig = AnthropicOutputConfig(effort: thinkingLevel.cloudReasoningEffort)
+            } else {
+                thinking = AnthropicThinkingConfig(
+                    type: "enabled",
+                    budgetTokens: thinkingLevel.claudeThinkingBudgetTokens
+                )
+                outputConfig = nil
+            }
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case reasoningEffort = "reasoning_effort"
+        case thinking
+        case outputConfig = "output_config"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort)
+        try container.encodeIfPresent(thinking, forKey: .thinking)
+        try container.encodeIfPresent(outputConfig, forKey: .outputConfig)
+    }
+
+    private static func usesAdaptiveClaudeThinking(model: String) -> Bool {
+        let normalized = model.lowercased()
+        return normalized.contains("claude-opus-4-7")
+            || normalized.contains("claude-opus-4-6")
+            || normalized.contains("claude-sonnet-4-6")
+            || normalized.contains("claude-mythos")
+    }
+}
+
+struct AnthropicThinkingConfig: Encodable, Equatable {
+    let type: String
+    let budgetTokens: Int?
+
+    init(type: String, budgetTokens: Int? = nil) {
+        self.type = type
+        self.budgetTokens = budgetTokens
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case budgetTokens = "budget_tokens"
+    }
+}
+
+struct AnthropicOutputConfig: Encodable, Equatable {
+    let effort: String
+}
+
+private extension ThinkingLevel {
+    var cloudReasoningEffort: String { rawValue }
+
+    var claudeThinkingBudgetTokens: Int {
+        switch self {
+        case .low: return 1_024
+        case .medium: return 2_048
+        case .high: return 4_096
+        }
+    }
+}
+
 private struct OpenAIRequest: Encodable {
     let model: String
     let stream: Bool
     let messages: [OpenAIMessage]
+    let thinkingOptions: CloudThinkingOptions?
+
+    private enum CodingKeys: String, CodingKey {
+        case model
+        case stream
+        case messages
+        case reasoningEffort = "reasoning_effort"
+        case thinking
+        case outputConfig = "output_config"
+    }
+
+    init(
+        model: String,
+        stream: Bool,
+        messages: [OpenAIMessage],
+        thinkingOptions: CloudThinkingOptions? = nil
+    ) {
+        self.model = model
+        self.stream = stream
+        self.messages = messages
+        self.thinkingOptions = thinkingOptions
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(model, forKey: .model)
+        try container.encode(stream, forKey: .stream)
+        try container.encode(messages, forKey: .messages)
+        try container.encodeIfPresent(thinkingOptions?.reasoningEffort, forKey: .reasoningEffort)
+        try container.encodeIfPresent(thinkingOptions?.thinking, forKey: .thinking)
+        try container.encodeIfPresent(thinkingOptions?.outputConfig, forKey: .outputConfig)
+    }
 }
 
 private struct OpenAIStreamChunk: Decodable {
