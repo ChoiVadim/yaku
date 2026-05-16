@@ -90,6 +90,20 @@ cp "$BINARY_PATH" "$MACOS_DIR/Nugumi"
 cp "$ROOT/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 cp "$ICNS_PATH" "$RESOURCES_DIR/AppIcon.icns"
 
+# SwiftPM emits target resources (the PixelifySans font, etc.) into a
+# generated `Nugumi_Nugumi.bundle` next to the product binary. `Bundle.module`
+# fatalErrors if it can't find this at runtime — and one of its fallbacks is a
+# build-time absolute path under .build that only exists on the build machine.
+# Without copying the bundle into the .app, the app launches for the builder
+# but crashes on every other Mac the moment any resource is touched.
+RESOURCE_BUNDLE="$(dirname "$BINARY_PATH")/Nugumi_Nugumi.bundle"
+if [ ! -d "$RESOURCE_BUNDLE" ]; then
+    echo "SwiftPM resource bundle not found at $RESOURCE_BUNDLE — did 'swift build' run?" >&2
+    exit 1
+fi
+rm -rf "$RESOURCES_DIR/Nugumi_Nugumi.bundle"
+cp -R "$RESOURCE_BUNDLE" "$RESOURCES_DIR/Nugumi_Nugumi.bundle"
+
 # SwiftPM-built binaries don't auto-embed @executable_path/../Frameworks in
 # their rpath, so dyld can't locate Sparkle.framework. Add it explicitly.
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/Nugumi" 2>/dev/null || true
