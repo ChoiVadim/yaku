@@ -9029,26 +9029,19 @@ final class GlassHostView: NSView {
         contentView.frame = bounds
         contentView.autoresizingMask = [.width, .height]
 
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView(frame: bounds)
-            glass.autoresizingMask = [.width, .height]
-            glass.cornerRadius = cornerRadius
-            glass.tintColor = tintColor
-            glass.style = style == .clear ? .clear : .regular
-            glass.contentView = contentView
-            addSubview(glass)
-        } else {
-            let material = NSVisualEffectView(frame: bounds)
-            material.autoresizingMask = [.width, .height]
-            material.material = .hudWindow
-            material.blendingMode = .behindWindow
-            material.state = .active
-            material.wantsLayer = true
-            material.layer?.cornerRadius = cornerRadius
-            material.layer?.masksToBounds = true
-            addSubview(material)
-            material.addSubview(contentView)
-        }
+        // Keep this compatible with the current public macOS SDK used by CI/release builds.
+        // Referencing NSGlassEffectView directly breaks compilation on Xcode versions whose
+        // SDK does not yet define that symbol, even inside an #available(macOS 26.0, *) block.
+        let material = NSVisualEffectView(frame: bounds)
+        material.autoresizingMask = [.width, .height]
+        material.material = .hudWindow
+        material.blendingMode = .behindWindow
+        material.state = .active
+        material.wantsLayer = true
+        material.layer?.cornerRadius = cornerRadius
+        material.layer?.masksToBounds = true
+        addSubview(material)
+        material.addSubview(contentView)
     }
 
     required init?(coder: NSCoder) {
